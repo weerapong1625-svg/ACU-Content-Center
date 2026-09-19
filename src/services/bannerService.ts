@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export interface PopupBannerConfig {
@@ -47,6 +47,49 @@ export function hasCachedBannerConfig(): boolean {
     // ignore
   }
   return false;
+}
+
+/**
+ * Real-time subscription to the announcement banner configuration in Firestore.
+ * Ensures mobile and desktop screens receive newly uploaded banners instantly without hanging.
+ */
+export function subscribePopupBanner(onUpdate: (config: PopupBannerConfig) => void): () => void {
+  try {
+    const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);
+    const unsubscribe = onSnapshot(
+      bannerRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data() as PopupBannerConfig;
+          if (data?.bannerImageUrl) {
+            try {
+              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(data));
+            } catch {
+              // ignore
+            }
+            onUpdate(data);
+            return;
+          }
+        }
+        // Fallback to cache or default if document doesn't exist
+        const initial = getInitialBannerUrl();
+        onUpdate({
+          bannerImageUrl: initial,
+          title: 'ประกาศ/ภาพประชาสัมพันธ์',
+          enabled: true,
+        });
+      },
+      (error) => {
+        console.warn('Realtime banner subscription warning:', error);
+        fetchPopupBannerConfig().then(onUpdate);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Could not initialize realtime banner listener:', err);
+    fetchPopupBannerConfig().then(onUpdate);
+    return () => {};
+  }
 }
 
 /**

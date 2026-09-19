@@ -10,7 +10,8 @@ import {
 import { 
   DEFAULT_BANNER_IMAGE, 
   fetchPopupBannerConfig, 
-  getInitialBannerUrl 
+  getInitialBannerUrl,
+  subscribePopupBanner 
 } from '../services/bannerService';
 import { AdminBannerManagerModal } from './AdminBannerManagerModal';
 
@@ -29,38 +30,17 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
   const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
   const [dontShowToday, setDontShowToday] = useState<boolean>(false);
 
-  // Check Firestore in background; if updated, smoothly preload before applying to prevent screen flicker
+  // Subscribe to real-time banner updates from Cloud Firestore so mobile and desktop sync immediately without hanging
   useEffect(() => {
-    let isMounted = true;
-    const loadBanner = async () => {
-      try {
-        const config = await fetchPopupBannerConfig();
-        if (!isMounted) return;
-
-        if (config?.bannerImageUrl && config.bannerImageUrl !== bannerUrl) {
-          // Preload remote image in background first
-          const preloadImg = new Image();
-          preloadImg.src = config.bannerImageUrl;
-          preloadImg.onload = () => {
-            if (isMounted) {
-              setBannerUrl(config.bannerImageUrl);
-            }
-          };
-          preloadImg.onerror = () => {
-            if (isMounted) {
-              setBannerUrl(config.bannerImageUrl);
-            }
-          };
-        }
-      } catch (err) {
-        console.warn('Background banner sync error:', err);
+    const unsubscribe = subscribePopupBanner((config) => {
+      if (config?.bannerImageUrl) {
+        setBannerUrl(config.bannerImageUrl);
       }
-    };
-    loadBanner();
+    });
     return () => {
-      isMounted = false;
+      unsubscribe();
     };
-  }, [bannerUrl]);
+  }, []);
 
   // Listen for ESC key
   useEffect(() => {

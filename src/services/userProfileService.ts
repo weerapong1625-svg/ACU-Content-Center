@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, updateDoc, arrayUnion, increment } from 'firebase/firestore';
+import { doc, getDoc, setDoc, updateDoc, arrayUnion, increment, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export interface InnovationItem {
@@ -128,6 +128,62 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
     );
   } catch (err) {
     console.warn('Could not save to localStorage:', err);
+  }
+}
+
+/**
+ * Real-time subscription to full user profile in Firestore.
+ * Automatically synchronizes profile data and avatar across all mobile and desktop devices.
+ */
+export function subscribeFullUserProfile(
+  email: string,
+  onUpdate: (profile: FullUserProfile) => void
+): () => void {
+  try {
+    const safeDocId = getSafeDocId(email);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    const unsubscribe = onSnapshot(
+      profileRef,
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const data = snapshot.data();
+          const loadedProfile: FullUserProfile = {
+            email: data.email || email,
+            fullName: data.fullName || 'คุณครูอัสสัมชัญ',
+            nickname: data.nickname || '',
+            school: data.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+            displayName: data.displayName || data.fullName || email.split('@')[0],
+            avatarUrl: data.avatarUrl || '',
+            role: data.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+            innovations: Array.isArray(data.innovations) && data.innovations.length === 5 
+              ? data.innovations 
+              : DEFAULT_INNOVATION_ITEMS,
+            stats: {
+              totalViews: typeof data.stats?.totalViews === 'number' ? data.stats.totalViews : 148,
+              uniqueVisitors: typeof data.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 96,
+              points: typeof data.stats?.points === 'number' ? data.stats.points : 285,
+              averageRating: typeof data.stats?.averageRating === 'number' ? data.stats.averageRating : 5.0,
+              totalRatings: typeof data.stats?.totalRatings === 'number' ? data.stats.totalRatings : 3,
+            },
+            praises: Array.isArray(data.praises) ? data.praises : DEFAULT_INITIAL_PRAISES,
+            updatedAt: data.updatedAt || new Date().toISOString(),
+          };
+          setCachedUserProfile(loadedProfile);
+          onUpdate(loadedProfile);
+        } else {
+          fetchFullUserProfile(email).then(onUpdate);
+        }
+      },
+      (error) => {
+        console.warn('Realtime profile subscription warning:', error);
+        fetchFullUserProfile(email).then(onUpdate);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('Could not initialize profile subscription:', err);
+    fetchFullUserProfile(email).then(onUpdate);
+    return () => {};
   }
 }
 

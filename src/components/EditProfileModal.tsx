@@ -92,9 +92,9 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
-        // Resize canvas to max 320x320 for optimal performance and storage
+        // Resize canvas to max 256x256 for instant cloud synchronization across devices
         const canvas = document.createElement('canvas');
-        const MAX_DIM = 320;
+        const MAX_DIM = 256;
         let width = img.width;
         let height = img.height;
 
@@ -115,7 +115,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.88);
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.80);
           setSelectedAvatar(compressedDataUrl);
         } else {
           setSelectedAvatar(event.target?.result as string);

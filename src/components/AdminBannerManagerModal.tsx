@@ -76,9 +76,9 @@ export const AdminBannerManagerModal: React.FC<AdminBannerManagerModalProps> = (
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
-        // Resize canvas to max 1200 width with 0.82 quality to optimize instant loading and local storage
+        // Resize canvas to max 960 width with 0.76 quality to optimize instant loading across mobile and desktop
         const canvas = document.createElement('canvas');
-        const MAX_WIDTH = 1200;
+        const MAX_WIDTH = 960;
         let width = img.width;
         let height = img.height;
 
@@ -92,7 +92,7 @@ export const AdminBannerManagerModal: React.FC<AdminBannerManagerModalProps> = (
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL('image/jpeg', 0.82);
+          const compressed = canvas.toDataURL('image/jpeg', 0.76);
           setSelectedUrl(compressed);
         } else {
           setSelectedUrl(event.target?.result as string);

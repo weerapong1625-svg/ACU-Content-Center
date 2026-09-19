@@ -30,7 +30,8 @@ import {
 } from '../services/auditService';
 import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
-import { getCachedUserProfile, FullUserProfile } from '../services/userProfileService';
+import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
+import { TeacherDashboard } from './TeacherDashboard';
 
 interface RoleSelectionDashboardProps {
   userEmail: string;
@@ -82,20 +83,24 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     if (updated.avatarUrl) setAvatarUrl(updated.avatarUrl);
   };
 
-  // Load saved profile from Firestore if available
+  // Synchronize profile real-time from Firestore across all devices (mobile & desktop)
   useEffect(() => {
-    const syncProfileFromCloud = async () => {
-      const profile = await fetchUserProfile(userEmail);
-      if (profile?.avatarUrl) {
-        setAvatarUrl(profile.avatarUrl);
+    const unsubscribe = subscribeFullUserProfile(userEmail, (fullProf) => {
+      if (fullProf.avatarUrl) {
+        setAvatarUrl(fullProf.avatarUrl);
         try {
-          localStorage.setItem(`acu_user_avatar_${userEmail}`, profile.avatarUrl);
+          localStorage.setItem(`acu_user_avatar_${userEmail}`, fullProf.avatarUrl);
         } catch {
           // ignore
         }
       }
+      if (fullProf.fullName) setProfileName(fullProf.fullName);
+      if (fullProf.nickname) setProfileNickname(fullProf.nickname);
+      if (fullProf.school) setProfileSchool(fullProf.school);
+    });
+    return () => {
+      unsubscribe();
     };
-    syncProfileFromCloud();
   }, [userEmail]);
 
   // Handle saving new avatar photo
@@ -161,6 +166,17 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     setRecentLogs(logs);
     setIsLoadingLogs(false);
   };
+
+  // If Teacher role is chosen, render Page 3 (Teacher Dashboard) with full features
+  if (selectedRole === 'teacher') {
+    return (
+      <TeacherDashboard
+        userEmail={userEmail}
+        onBackToRoles={() => setSelectedRole(null)}
+        onLogout={onLogout}
+      />
+    );
+  }
 
   return (
     <div className="relative min-h-screen w-full flex flex-col justify-between overflow-x-hidden text-slate-100 font-sans selection:bg-red-600 selection:text-white">
@@ -388,20 +404,8 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
             type="button"
             id="role-btn-teacher"
             onClick={() => handleSelectRole('teacher')}
-            className={`group relative text-left bg-white rounded-3xl p-6 sm:p-8 shadow-[0_20px_50px_rgba(0,0,0,0.35)] transition-all duration-300 hover:-translate-y-1.5 hover:shadow-[0_25px_60px_rgba(37,99,235,0.35)] border-2 ${
-              selectedRole === 'teacher'
-                ? 'border-blue-600 ring-4 ring-blue-500/20 scale-[1.02]'
-                : 'border-white hover:border-blue-400'
-            }`}
+            className="group relative text-left bg-white rounded-3xl p-6 sm:p-8 shadow-[0_20px_50px_rgba(0,0,0,0.35)] transition-all duration-300 hover:-translate-y-1.5 hover:shadow-[0_25px_60px_rgba(37,99,235,0.35)] border-2 border-white hover:border-blue-400"
           >
-            {/* Active Pill Badge */}
-            {selectedRole === 'teacher' && (
-              <div className="absolute top-4 right-4 inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 text-xs font-bold shadow-xs">
-                <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />
-                <span>เลือกแล้ว</span>
-              </div>
-            )}
-
             {/* Teacher Icon in Modern Badge */}
             <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-700 text-white flex items-center justify-center shadow-lg mb-5 group-hover:scale-110 transition-transform duration-300">
               <UserCheck className="w-9 h-9 sm:w-11 sm:h-11" />
@@ -510,7 +514,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
               </div>
               <div>
                 <h5 className="text-sm font-bold text-white">
-                  กำลังเตรียมห้องเรียนสำหรับ {selectedRole === 'teacher' ? 'คุณครู' : 'นักเรียน'}
+                  กำลังเตรียมห้องเรียนสำหรับ {selectedRole === 'student' ? 'นักเรียน' : 'ผู้ใช้งาน'}
                 </h5>
                 <p className="text-xs text-emerald-200/80">
                   บันทึกสถานะลงฐานข้อมูล Firebase Firestore (System Test) สำเร็จเรียบร้อย
