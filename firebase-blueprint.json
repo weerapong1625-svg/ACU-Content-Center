@@ -1,0 +1,52 @@
+{
+  "entities": {
+    "login_logs": {
+      "title": "Login Activity Logs",
+      "description": "Stores user login audit trails for system test and access tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "Log record ID" },
+        "email": { "type": "string", "description": "User email address" },
+        "displayName": { "type": "string", "description": "User display name" },
+        "role": { "type": "string", "enum": ["teacher", "student", "guest"], "description": "Selected or detected user role" },
+        "loginMethod": { "type": "string", "description": "Google SSO or Email/Password" },
+        "status": { "type": "string", "enum": ["online", "offline"], "description": "Active session status" },
+        "loginTimestamp": { "type": "string", "format": "date-time", "description": "ISO string timestamp of login" },
+        "source": { "type": "string", "description": "System Test - ACU Learning Media & Innovation" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email", "role", "loginTimestamp"]
+    },
+    "user_profiles": {
+      "title": "User Profile Customizations & Innovation Portfolio",
+      "description": "Stores user personal information, 5 innovation submission statuses, visit statistics, and star praises",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "fullName": { "type": "string" },
+        "nickname": { "type": "string" },
+        "school": { "type": "string" },
+        "displayName": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "role": { "type": "string" },
+        "innovations": { "type": "array" },
+        "stats": { "type": "object" },
+        "praises": { "type": "array" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["email"]
+    },
+    "system_settings": {
+      "title": "System Settings and Banners",
+      "description": "Stores global announcement popup banners, active state, and admin configurations",
+      "type": "object",
+      "properties": {
+        "bannerImageUrl": { "type": "string" },
+        "title": { "type": "string" },
+        "enabled": { "type": "boolean" },
+        "updatedBy": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      }
+    }
+  }
+}
