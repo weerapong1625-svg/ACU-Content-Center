@@ -4,7 +4,7 @@
  */
 
 import React, { useState } from 'react';
-import { Megaphone, Camera } from 'lucide-react';
+import { Megaphone } from 'lucide-react';
 import { SchoolLogo } from './components/SchoolLogo';
 import { GmailLoginForm } from './components/GmailLoginForm';
 import { RoleSelectionDashboard } from './components/RoleSelectionDashboard';
@@ -124,26 +124,14 @@ export default function App() {
               >
                 Assumption College Ubonratchathani
               </h1>
-              <div className="flex items-center gap-2">
-                <p
-                  className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90 drop-shadow-sm"
-                  style={{
-                    textShadow: '0 1px 3px rgba(0, 0, 0, 0.8)',
-                  }}
-                >
-                  โรงเรียนอัสสัมชัญอุบลราชธานี
-                </p>
-                <button
-                  type="button"
-                  id="btn-app-change-logo"
-                  onClick={() => window.dispatchEvent(new CustomEvent('open_admin_logo_modal'))}
-                  className="px-2 py-0.5 rounded-lg bg-blue-600/30 hover:bg-blue-600/60 text-blue-300 hover:text-white border border-blue-400/40 text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
-                  title="คลิกเพื่อจัดการหรือเปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)"
-                >
-                  <Camera className="w-3 h-3 text-blue-300" />
-                  <span>เปลี่ยนภาพโลโก้ (Admin)</span>
-                </button>
-              </div>
+              <p
+                className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90 drop-shadow-sm"
+                style={{
+                  textShadow: '0 1px 3px rgba(0, 0, 0, 0.8)',
+                }}
+              >
+                โรงเรียนอัสสัมชัญอุบลราชธานี
+              </p>
             </div>
           </div>
         </header>

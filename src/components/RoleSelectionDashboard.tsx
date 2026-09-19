@@ -8,6 +8,8 @@ import {
   Clock, 
   CheckCircle2, 
   ShieldCheck, 
+  ShieldAlert,
+  Lock,
   Sparkles,
   ChevronRight,
   BookOpen,
@@ -17,8 +19,9 @@ import {
   RefreshCw,
   Layers,
   ArrowRight,
+  User,
   Camera,
-  User
+  X
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -32,6 +35,8 @@ import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
 import { TeacherDashboard } from './TeacherDashboard';
+import { AdminDashboard } from './AdminDashboard';
+import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 
 interface RoleSelectionDashboardProps {
   userEmail: string;
@@ -42,9 +47,10 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   userEmail,
   onLogout,
 }) => {
-  const [selectedRole, setSelectedRole] = useState<'teacher' | 'student' | null>(null);
+  const [selectedRole, setSelectedRole] = useState<'teacher' | 'student' | 'admin' | null>(null);
   const [dbStatus, setDbStatus] = useState<'saving' | 'saved' | 'idle'>('idle');
   const [showSystemTestModal, setShowSystemTestModal] = useState(false);
+  const [showAdminAccessDeniedModal, setShowAdminAccessDeniedModal] = useState(false);
   const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'content'>('overview');
@@ -167,6 +173,24 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     setIsLoadingLogs(false);
   };
 
+  const handleOpenAdminPortal = () => {
+    if (userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()) {
+      setSelectedRole('admin');
+    } else {
+      setShowAdminAccessDeniedModal(true);
+    }
+  };
+
+  // If Admin portal is chosen, render Admin Dashboard
+  if (selectedRole === 'admin') {
+    return (
+      <AdminDashboard
+        userEmail={userEmail}
+        onBack={() => setSelectedRole(null)}
+      />
+    );
+  }
+
   // If Teacher role is chosen, render Page 3 (Teacher Dashboard) with full features
   if (selectedRole === 'teacher') {
     return (
@@ -223,18 +247,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
               >
                 Assumption College Ubonratchathani
               </h1>
-              {userEmail.trim().toLowerCase() === 'weerapong1625@acu.ac.th' && (
-                <button
-                  type="button"
-                  id="btn-admin-change-logo-rolescreen"
-                  onClick={() => window.dispatchEvent(new CustomEvent('open_admin_logo_modal'))}
-                  className="px-2 py-0.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
-                  title="เปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)"
-                >
-                  <Camera className="w-3 h-3 text-blue-200" />
-                  <span>เปลี่ยนภาพโลโก้ (Admin)</span>
-                </button>
-              )}
             </div>
             <p
               className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90"
@@ -349,8 +361,25 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
             </div>
           </div>
 
-          {/* Action buttons on Status Bar: Personal Info button, System Test & Logout */}
+          {/* Action buttons on Status Bar: Admin button, Personal Info button, System Test & Logout */}
           <div className="flex items-center gap-2 ml-auto flex-wrap">
+            {/* Prominent "เฉพาะ Admin" Button as explicitly requested */}
+            <button
+              type="button"
+              id="btn-portal-only-admin"
+              onClick={handleOpenAdminPortal}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-yellow-600/30 to-orange-600/30 hover:from-amber-500/40 hover:to-orange-600/50 border border-amber-400/50 text-amber-200 hover:text-white text-xs font-semibold shadow-md shadow-amber-950/40 transition-all cursor-pointer group hover:border-amber-300"
+              title="ศูนย์ควบคุมและแดชบอร์ดเฉพาะ Admin (weerapong1625@acu.ac.th)"
+            >
+              <ShieldCheck className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform" />
+              <span>เฉพาะ Admin</span>
+              {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() ? (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" title="สิทธิ์ Super Admin"></span>
+              ) : (
+                <Lock className="w-3 h-3 text-amber-400/70" />
+              )}
+            </button>
+
             {/* Prominent "ข้อมูลส่วนตัว" Button as explicitly requested */}
             <button
               type="button"
@@ -514,6 +543,46 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
               <ArrowRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
             </div>
           </button>
+        </div>
+
+        {/* =========================================================================
+            SECTION: เฉพาะ Admin (Admin Portal Access Card)
+            - Requires Gmail: weerapong1625@acu.ac.th
+            - Links to statistics, logo management, and Google Sheets
+           ========================================================================= */}
+        <div className="w-full max-w-3xl mx-auto mt-6">
+          <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-slate-900/95 via-amber-950/40 to-slate-900/95 border border-amber-500/30 shadow-2xl backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="flex items-center gap-4 text-center sm:text-left">
+              <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-400/30 text-amber-400 flex items-center justify-center flex-shrink-0 shadow-lg">
+                <ShieldCheck className="w-7 h-7" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2 justify-center sm:justify-start">
+                  <h4 className="text-base font-extrabold text-white">เฉพาะ Admin (ผู้ดูแลระบบ)</h4>
+                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px] font-bold">
+                    Super Admin Only
+                  </span>
+                </div>
+                <p className="text-xs text-slate-300/85 mt-1">
+                  ศูนย์ควบคุมระบบ สรุปข้อมูลและสถิติเว็บไซต์ จัดการภาพโลโก้โรงเรียน และซิงค์เชื่อมโยง Google Sheets
+                </p>
+                <p className="text-[11px] text-amber-400 font-mono mt-0.5">
+                  สงวนสิทธิ์เฉพาะ Gmail: {SUPER_ADMIN_EMAIL}
+                </p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              id="btn-admin-portal-main-card"
+              onClick={handleOpenAdminPortal}
+              className="px-5 py-3 rounded-2xl bg-gradient-to-r from-amber-500 via-yellow-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs shadow-lg shadow-amber-950/50 flex items-center gap-2 whitespace-nowrap transition-all cursor-pointer hover:scale-105"
+            >
+              <ShieldCheck className="w-4 h-4 text-slate-950" />
+              <span>เข้าสู่ระบบเฉพาะ Admin</span>
+              <ArrowRight className="w-4 h-4 text-slate-950" />
+            </button>
+          </div>
         </div>
 
         {/* Selected Confirmation Banner when clicked */}
@@ -721,16 +790,67 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       />
 
       {/* =========================================================================
-          EDIT PROFILE PHOTO MODAL
+          ADMIN ACCESS RESTRICTION MODAL
+          - Shown when non-admin clicks "เฉพาะ Admin"
          ========================================================================= */}
-      <EditProfileModal
-        isOpen={showEditProfileModal}
-        onClose={() => setShowEditProfileModal(false)}
-        userEmail={userEmail}
-        displayName={userName}
-        currentAvatarUrl={avatarUrl}
-        onSaveAvatar={handleSaveAvatar}
-      />
+      {showAdminAccessDeniedModal && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
+          onClick={() => setShowAdminAccessDeniedModal(false)}
+        >
+          <div
+            className="relative w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-3xl p-6 sm:p-7 shadow-2xl text-slate-100"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-400/30 text-amber-400 flex items-center justify-center mx-auto mb-4">
+              <Lock className="w-7 h-7" />
+            </div>
+
+            <div className="text-center mb-5">
+              <h3 className="text-lg font-bold text-white mb-1">
+                พื้นที่สงวนสิทธิ์เฉพาะ Admin
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                หน้านี้เปิดให้เข้าถึงได้เฉพาะบัญชีผู้ดูแลระบบสูงสุด (<span className="text-amber-300 font-mono font-semibold">{SUPER_ADMIN_EMAIL}</span>) เท่านั้น
+              </p>
+              <div className="mt-3 p-3 rounded-xl bg-slate-800/80 border border-slate-700/80 text-left text-xs">
+                <div className="text-slate-400 text-[11px]">บัญชีปัจจุบันของคุณ:</div>
+                <div className="font-mono text-slate-200 font-semibold truncate">{userEmail}</div>
+                <div className="text-[10px] text-red-400 mt-1 flex items-center gap-1">
+                  <ShieldAlert className="w-3 h-3 flex-shrink-0" />
+                  <span>ไม่มีสิทธิ์เข้าถึงแดชบอร์ดผู้ดูแลระบบ</span>
+                </div>
+              </div>
+            </div>
+
+            <div className="space-y-2.5">
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    localStorage.setItem('acu_current_user_email', SUPER_ADMIN_EMAIL);
+                  } catch {
+                    // ignore
+                  }
+                  window.location.reload();
+                }}
+                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs shadow-lg transition-all cursor-pointer flex items-center justify-center gap-1.5"
+              >
+                <ShieldCheck className="w-4 h-4 text-slate-950" />
+                <span>สลับเข้าใช้งานด้วย {SUPER_ADMIN_EMAIL}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setShowAdminAccessDeniedModal(false)}
+                className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                ปิดหน้าต่าง
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
