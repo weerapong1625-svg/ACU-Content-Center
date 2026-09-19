@@ -4,14 +4,38 @@
  */
 
 import React, { useState } from 'react';
-import { Megaphone } from 'lucide-react';
+import { Megaphone, Camera } from 'lucide-react';
 import { SchoolLogo } from './components/SchoolLogo';
 import { GmailLoginForm } from './components/GmailLoginForm';
 import { RoleSelectionDashboard } from './components/RoleSelectionDashboard';
 import { AnnouncementPopupModal } from './components/AnnouncementPopupModal';
 
 export default function App() {
-  const [loggedInUser, setLoggedInUser] = useState<string | null>(null);
+  const [loggedInUser, setLoggedInUser] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem('acu_current_user_email');
+    } catch {
+      return null;
+    }
+  });
+
+  const handleLogout = () => {
+    setLoggedInUser(null);
+    try {
+      localStorage.removeItem('acu_current_user_email');
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleLoginSuccess = (email: string) => {
+    setLoggedInUser(email);
+    try {
+      localStorage.setItem('acu_current_user_email', email);
+    } catch {
+      // ignore
+    }
+  };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)
   const [isAnnouncementOpen, setIsAnnouncementOpen] = useState(() => {
@@ -29,7 +53,7 @@ export default function App() {
     return (
       <RoleSelectionDashboard
         userEmail={loggedInUser}
-        onLogout={() => setLoggedInUser(null)}
+        onLogout={handleLogout}
       />
     );
   }
@@ -78,35 +102,49 @@ export default function App() {
            ========================================================================= */}
         <header
           id="row-1-school-identity"
-          className="w-full flex items-center justify-start gap-3.5 sm:gap-4.5 pt-2 pb-4"
+          className="w-full flex items-center justify-between flex-wrap gap-4 pt-2 pb-4"
         >
-          {/* ขอบซ้ายมือสุด: รูปโลโก้โรงเรียน */}
-          <div className="flex-shrink-0">
-            <SchoolLogo size="md" showUploadHint={true} />
-          </div>
+          <div className="flex items-center gap-3.5 sm:gap-4.5">
+            {/* ขอบซ้ายมือสุด: รูปโลโก้โรงเรียน (Clickable to change logo for Admin) */}
+            <div className="flex-shrink-0">
+              <SchoolLogo size="md" currentUserEmail={loggedInUser} />
+            </div>
 
-          {/* ตามด้วย: ชื่อโรงเรียน Assumption College Ubonratchathani */}
-          <div className="flex flex-col justify-center">
-            <h1
-              id="school-name-text"
-              className="font-['Roboto',sans-serif] font-black tracking-tight text-xl sm:text-2xl md:text-3xl select-none"
-              style={{
-                background: 'linear-gradient(90deg, #60a5fa 0%, #93c5fd 32%, #f87171 78%, #ef4444 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                filter: 'drop-shadow(0 2px 8px rgba(0, 0, 0, 0.75)) drop-shadow(0 0 1px rgba(255, 255, 255, 0.4))',
-              }}
-            >
-              Assumption College Ubonratchathani
-            </h1>
-            <p
-              className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90 drop-shadow-sm"
-              style={{
-                textShadow: '0 1px 3px rgba(0, 0, 0, 0.8)',
-              }}
-            >
-              โรงเรียนอัสสัมชัญอุบลราชธานี
-            </p>
+            {/* ตามด้วย: ชื่อโรงเรียน Assumption College Ubonratchathani */}
+            <div className="flex flex-col justify-center">
+              <h1
+                id="school-name-text"
+                className="font-['Roboto',sans-serif] font-black tracking-tight text-xl sm:text-2xl md:text-3xl select-none"
+                style={{
+                  background: 'linear-gradient(90deg, #60a5fa 0%, #93c5fd 32%, #f87171 78%, #ef4444 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  filter: 'drop-shadow(0 2px 8px rgba(0, 0, 0, 0.75)) drop-shadow(0 0 1px rgba(255, 255, 255, 0.4))',
+                }}
+              >
+                Assumption College Ubonratchathani
+              </h1>
+              <div className="flex items-center gap-2">
+                <p
+                  className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90 drop-shadow-sm"
+                  style={{
+                    textShadow: '0 1px 3px rgba(0, 0, 0, 0.8)',
+                  }}
+                >
+                  โรงเรียนอัสสัมชัญอุบลราชธานี
+                </p>
+                <button
+                  type="button"
+                  id="btn-app-change-logo"
+                  onClick={() => window.dispatchEvent(new CustomEvent('open_admin_logo_modal'))}
+                  className="px-2 py-0.5 rounded-lg bg-blue-600/30 hover:bg-blue-600/60 text-blue-300 hover:text-white border border-blue-400/40 text-[11px] font-semibold flex items-center gap-1 transition-all cursor-pointer"
+                  title="คลิกเพื่อจัดการหรือเปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)"
+                >
+                  <Camera className="w-3 h-3 text-blue-300" />
+                  <span>เปลี่ยนภาพโลโก้ (Admin)</span>
+                </button>
+              </div>
+            </div>
           </div>
         </header>
 
@@ -159,7 +197,7 @@ export default function App() {
             id="row-3-gmail-login-section"
             className="w-full flex items-center justify-center animate-in fade-in zoom-in-95 duration-700"
           >
-            <GmailLoginForm onLoginSuccess={(user) => setLoggedInUser(user)} />
+            <GmailLoginForm onLoginSuccess={handleLoginSuccess} />
           </section>
 
         </main>

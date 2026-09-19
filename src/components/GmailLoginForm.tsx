@@ -39,6 +39,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       setIsLoading(false);
       setIsSuccess(true);
       setActiveUser(trimmed);
+      try {
+        localStorage.setItem('acu_current_user_email', trimmed);
+      } catch {
+        // ignore
+      }
       onLoginSuccess?.(trimmed);
     }, 600);
   };
@@ -51,6 +56,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       setIsLoading(false);
       setIsSuccess(true);
       setActiveUser(user);
+      try {
+        localStorage.setItem('acu_current_user_email', user);
+      } catch {
+        // ignore
+      }
       onLoginSuccess?.(user);
     }, 600);
   };
@@ -66,6 +76,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setActiveUser(null);
     setEmail('');
     setPassword('');
+    try {
+      localStorage.removeItem('acu_current_user_email');
+    } catch {
+      // ignore
+    }
   };
 
   if (isSuccess && activeUser) {

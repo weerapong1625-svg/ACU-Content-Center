@@ -208,20 +208,34 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       >
         {/* Left: School Logo & English Name (preserves identity) */}
         <div id="school-identity-nav" className="flex items-center gap-3.5 sm:gap-4.5">
-          <SchoolLogo size="md" />
+          <SchoolLogo size="md" currentUserEmail={userEmail} />
           <div className="flex flex-col justify-center">
-            <h1
-              id="school-name-text-nav"
-              className="font-['Roboto',sans-serif] font-black tracking-tight text-lg sm:text-xl md:text-2xl select-none"
-              style={{
-                background: 'linear-gradient(90deg, #60a5fa 0%, #93c5fd 32%, #f87171 78%, #ef4444 100%)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent',
-                filter: 'drop-shadow(0 2px 6px rgba(0, 0, 0, 0.75))',
-              }}
-            >
-              Assumption College Ubonratchathani
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1
+                id="school-name-text-nav"
+                className="font-['Roboto',sans-serif] font-black tracking-tight text-lg sm:text-xl md:text-2xl select-none"
+                style={{
+                  background: 'linear-gradient(90deg, #60a5fa 0%, #93c5fd 32%, #f87171 78%, #ef4444 100%)',
+                  WebkitBackgroundClip: 'text',
+                  WebkitTextFillColor: 'transparent',
+                  filter: 'drop-shadow(0 2px 6px rgba(0, 0, 0, 0.75))',
+                }}
+              >
+                Assumption College Ubonratchathani
+              </h1>
+              {userEmail.trim().toLowerCase() === 'weerapong1625@acu.ac.th' && (
+                <button
+                  type="button"
+                  id="btn-admin-change-logo-rolescreen"
+                  onClick={() => window.dispatchEvent(new CustomEvent('open_admin_logo_modal'))}
+                  className="px-2 py-0.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                  title="เปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)"
+                >
+                  <Camera className="w-3 h-3 text-blue-200" />
+                  <span>เปลี่ยนภาพโลโก้ (Admin)</span>
+                </button>
+              )}
+            </div>
             <p
               className="text-xs sm:text-sm font-semibold tracking-wider text-slate-200/90"
               style={{ textShadow: '0 1px 3px rgba(0, 0, 0, 0.8)' }}

@@ -8,6 +8,11 @@ import {
   saveFullUserProfile 
 } from '../services/userProfileService';
 import { UserProfileModal } from './UserProfileModal';
+import { FacilityUsageSubmissionModal } from './FacilityUsageSubmissionModal';
+import { TeacherInnovationSubmissionModal } from './TeacherInnovationSubmissionModal';
+import { MediaTypesPopupModal } from './MediaTypesPopupModal';
+import { TeacherMediaRepositoryModal } from './TeacherMediaRepositoryModal';
+import { IdeaBankModal } from './IdeaBankModal';
 import { 
   UploadCloud, 
   BookOpenCheck, 
@@ -37,7 +42,8 @@ import {
   Compass, 
   Layers, 
   Info, 
-  Send 
+  Send,
+  Camera 
 } from 'lucide-react';
 
 interface TeacherDashboardProps {
@@ -201,10 +207,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       id: 'btn-7',
       // Explicitly: ปุ่มนี้ไม่ต้องใส่หมายเลข
       number: undefined,
-      title: 'ศูนย์ประสานงาน & คู่มือการใช้งาน',
-      badge: 'บริการข้อมูลและช่วยเหลือ',
-      description: 'แนวปฏิบัติ การติดต่อฝ่ายวิชาการและนวัตกรรมการเรียนรู้ ดาวน์โหลดแบบฟอร์ม และข้อเสนอแนะ',
-      icon: HelpCircle,
+      title: 'ส่งสื่อเข้าประกวด',
+      badge: 'การประกวดสื่อนวัตกรรม',
+      description: 'ระบบเปิดรับและจัดส่งผลงานสื่อนวัตกรรมการจัดการเรียนรู้เข้าสู่การประกวดประจำปี',
+      icon: Sparkles,
       gradient: 'from-rose-500 via-pink-600 to-red-600',
       bgLight: 'bg-rose-50/70 hover:bg-rose-50',
       borderClass: 'border-rose-200/90 hover:border-rose-400',
@@ -310,7 +316,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           {/* ขอบซ้าย: คง ในส่วนของโลโก้โรงเรียน (School Logo + Title) */}
           <div className="flex items-center gap-3.5 sm:gap-4 w-full md:w-auto justify-start">
             <div className="flex-shrink-0">
-              <SchoolLogo size="md" />
+              <SchoolLogo size="md" currentUserEmail={userEmail} />
             </div>
 
             <div className="flex flex-col">
@@ -324,6 +330,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-500/20 text-blue-300 border border-blue-400/30">
                   ห้องปฏิบัติการครูผู้สอน
                 </span>
+                {userEmail.trim().toLowerCase() === 'weerapong1625@acu.ac.th' && (
+                  <button
+                    type="button"
+                    id="btn-admin-change-logo-teacherdash"
+                    onClick={() => window.dispatchEvent(new CustomEvent('open_admin_logo_modal'))}
+                    className="px-2 py-0.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-[11px] font-semibold flex items-center gap-1 shadow-sm transition-colors cursor-pointer"
+                    title="เปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)"
+                  >
+                    <Camera className="w-3 h-3 text-blue-200" />
+                    <span>เปลี่ยนภาพโลโก้ (Admin)</span>
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -515,454 +533,38 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           INTERACTIVE MODALS FOR EACH OF THE 7 BUTTONS
          ========================================================================= */}
 
-      {/* Modal 1: ส่งสื่อ/นวัตกรรม 5 ชิ้น */}
+      {/* Modal 1: ส่งสื่อ/นวัตกรรม 5 ชิ้น (แบบฟอร์ม 5 ชิ้น, ระดับชั้น, กลุ่มสาระ, เช็คสถานะผ่านอีเมล, สรุป Google Sheets ถึง weerapong1625@acu.ac.th ฐานข้อมูล System Test) */}
       {activeModalId === 'btn-1' && (
-        <div
-          id="modal-innovation-5-items"
-          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveModalId(null);
-          }}
-        >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-indigo-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            {/* Header */}
-            <div className="p-5 bg-gradient-to-r from-blue-900/60 via-indigo-900/50 to-slate-900 border-b border-indigo-500/30 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-indigo-600/30 border border-indigo-400/40 flex items-center justify-center text-indigo-300">
-                  <UploadCloud className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white flex items-center gap-2">
-                    1. ส่งสื่อ/นวัตกรรม 5 ชิ้น
-                    <span className="text-xs px-2.5 py-0.5 rounded-full bg-indigo-500/20 text-indigo-300 border border-indigo-400/30">
-                      เป้าหมายครูผู้สอน
-                    </span>
-                  </h3>
-                  <p className="text-xs text-slate-300">
-                    ติดตามและจัดการสื่อนวัตกรรมการจัดการเรียนรู้ประจำปีการศึกษาให้ครบ 5 ชิ้น
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* List of 5 Innovation Items */}
-            <div className="p-5 overflow-y-auto space-y-3.5 flex-grow">
-              {(profile?.innovations || []).map((item) => (
-                <div
-                  key={item.id}
-                  className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700 hover:border-indigo-400/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
-                >
-                  <div className="flex items-start gap-3">
-                    <span className="w-7 h-7 rounded-full bg-indigo-600 text-white font-bold text-xs flex items-center justify-center flex-shrink-0 mt-0.5">
-                      {item.id}
-                    </span>
-                    <div>
-                      <h4 className="text-sm font-bold text-white">{item.title}</h4>
-                      <p className="text-xs text-slate-400 mt-0.5">{item.category}</p>
-                      {item.notes && <p className="text-xs text-indigo-300/90 mt-1 italic">{item.notes}</p>}
-                    </div>
-                  </div>
-
-                  <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-                    <span
-                      className={`text-xs px-2.5 py-1 rounded-full font-semibold border ${
-                        item.status === 'approved'
-                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                          : item.status === 'submitted'
-                          ? 'bg-blue-500/20 text-blue-300 border-blue-500/30'
-                          : 'bg-amber-500/20 text-amber-300 border-amber-500/30'
-                      }`}
-                    >
-                      {item.status === 'approved' ? '✓ อนุมัติแล้ว' : item.status === 'submitted' ? 'ส่งแล้ว' : 'รอจัดส่ง'}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setActiveModalId(null);
-                        setIsProfileModalOpen(true);
-                      }}
-                      className="px-3 py-1 rounded-xl bg-slate-700 hover:bg-indigo-600 text-white text-xs font-medium transition-colors"
-                    >
-                      แก้ไข/แนบลิงก์
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveModalId(null);
-                  setIsProfileModalOpen(true);
-                }}
-                className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold shadow-md transition-colors"
-              >
-                เปิดหน้าจัดการสื่อ 5 ชิ้นแบบละเอียดในโปรไฟล์
-              </button>
-            </div>
-          </div>
-        </div>
+        <TeacherInnovationSubmissionModal
+          userEmail={userEmail}
+          defaultTeacherName={profile?.fullName}
+          onClose={() => setActiveModalId(null)}
+        />
       )}
 
-      {/* Modal 2: ศึกษาเกณฑ์/ประเภทสื่อ */}
+      {/* Modal 2: ศึกษาเกณฑ์/ประเภทสื่อ (แสดงเฉพาะกราฟิกป๊อปอัปไฟล์ ประเภทสื่อ .png เท่านั้น - แอดมิน weerapong1625@acu.ac.th อัปโหลดได้คนเดียว) */}
       {activeModalId === 'btn-2' && (
-        <div
-          id="modal-criteria-guide"
-          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveModalId(null);
-          }}
-        >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-sky-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-gradient-to-r from-sky-900/60 via-blue-900/50 to-slate-900 border-b border-sky-500/30 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-sky-600/30 border border-sky-400/40 flex items-center justify-center text-sky-300">
-                  <BookOpenCheck className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">2. ศึกษาเกณฑ์/ประเภทสื่อและนวัตกรรม</h3>
-                  <p className="text-xs text-slate-300">
-                    เกณฑ์มาตรฐานฝ่ายวิชาการ โรงเรียนอัสสัมชัญอุบลราชธานี
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-5 overflow-y-auto space-y-4 text-xs sm:text-sm text-slate-300">
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-sky-500/30">
-                  <h4 className="font-bold text-white text-base mb-2 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                    ประเภทที่ 1: สื่อมัลติมีเดียและดิจิทัล
-                  </h4>
-                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-xs">
-                    <li>วิดีโอคลิปการสอนความละเอียดสูง (อย่างน้อย 1080p)</li>
-                    <li>บทเรียนปฏิสัมพันธ์ (Interactive E-Learning / SCORM)</li>
-                    <li>แอปพลิเคชันหรือแพลตฟอร์มการเรียนรู้ที่ครูพัฒนาขึ้น</li>
-                  </ul>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-sky-500/30">
-                  <h4 className="font-bold text-white text-base mb-2 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                    ประเภทที่ 2: แผนการสอนและชุดนวัตกรรมเชิงรุก
-                  </h4>
-                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-xs">
-                    <li>แผนการจัดการเรียนรู้ Active Learning อิงสมรรถนะ</li>
-                    <li>ชุดใบงาน ใบความรู้ และเครื่องมือการประเมินสภาพจริง</li>
-                    <li>คู่มือการใช้สื่อนวัตกรรมที่มีขั้นตอนชัดเจน</li>
-                  </ul>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-sky-500/30">
-                  <h4 className="font-bold text-white text-base mb-2 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                    ประเภทที่ 3: สื่อนวัตกรรมเกมจำลอง (Gamification)
-                  </h4>
-                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-xs">
-                    <li>บอร์ดเกมการศึกษาและเกมสถานการณ์จำลอง</li>
-                    <li>ชุดปฏิบัติการและโมเดลสามมิติเพื่อการอธิบายมโนทัศน์</li>
-                    <li>แบบจำลองเสมือนจริง (VR / AR Simulations)</li>
-                  </ul>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-sky-500/30">
-                  <h4 className="font-bold text-white text-base mb-2 flex items-center gap-2">
-                    <span className="w-2.5 h-2.5 rounded-full bg-sky-400" />
-                    ประเภทที่ 4: รายงานวิจัยและผลสัมฤทธิ์นวัตกรรม
-                  </h4>
-                  <ul className="list-disc list-inside space-y-1 text-slate-300 text-xs">
-                    <li>รายงานการวิจัยในชั้นเรียน (Classroom Action Research)</li>
-                    <li>การเปรียบเทียบผลสัมฤทธิ์ก่อน-หลังใช้นวัตกรรม</li>
-                    <li>ผลการประเมินความพึงพอใจและข้อเสนอแนะในการพัฒนาต่อยอด</li>
-                  </ul>
-                </div>
-              </div>
-
-              {/* Rubric Table */}
-              <div className="mt-4 p-4 rounded-2xl bg-slate-950/60 border border-slate-800">
-                <h4 className="font-bold text-white mb-2">เกณฑ์การประเมินคุณภาพ (Rubric Scores)</h4>
-                <div className="grid grid-cols-4 gap-2 text-center text-xs">
-                  <div className="p-2 rounded-xl bg-slate-800 font-semibold text-slate-200">
-                    ความถูกต้องทางวิชาการ (30%)
-                  </div>
-                  <div className="p-2 rounded-xl bg-slate-800 font-semibold text-slate-200">
-                    ความคิดสร้างสรรค์/แปลกใหม่ (25%)
-                  </div>
-                  <div className="p-2 rounded-xl bg-slate-800 font-semibold text-slate-200">
-                    ประสิทธิภาพและการนำไปใช้จริง (25%)
-                  </div>
-                  <div className="p-2 rounded-xl bg-slate-800 font-semibold text-slate-200">
-                    ผลสัมฤทธิ์ของผู้เรียน (20%)
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold"
-              >
-                เข้าใจแล้ว / ปิดหน้าต่าง
-              </button>
-            </div>
-          </div>
-        </div>
+        <MediaTypesPopupModal
+          userEmail={userEmail}
+          onClose={() => setActiveModalId(null)}
+        />
       )}
 
-      {/* Modal 3: คลังสื่อคุณครูผลิตเอง */}
+      {/* Modal 3: คลังสื่อคุณครูผลิตเอง (สุ่มสื่อ 5 ชิ้น มีภาพตัวอย่างเล็กๆ คุณครู กลุ่มสาระ วิชา กดชม และให้คะแนนดาวได้) */}
       {activeModalId === 'btn-3' && (
-        <div
-          id="modal-teacher-media-repo"
-          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveModalId(null);
-          }}
-        >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-purple-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-gradient-to-r from-purple-900/60 via-violet-900/50 to-slate-900 border-b border-purple-500/30 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-purple-600/30 border border-purple-400/40 flex items-center justify-center text-purple-300">
-                  <FolderArchive className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">3. คลังสื่อคุณครูผลิตเอง</h3>
-                  <p className="text-xs text-slate-300">
-                    คลังรวมสื่อการเรียนรู้ วิดีโอคลิป และเอกสารที่ครู ACU ร่วมกันสร้างสรรค์
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Filter bar */}
-            <div className="px-5 py-3 bg-slate-950/60 border-b border-slate-800 flex flex-col sm:flex-row gap-2.5 items-center justify-between">
-              <div className="relative w-full sm:w-72">
-                <Search className="w-4 h-4 absolute left-3 top-2.5 text-slate-400" />
-                <input
-                  type="text"
-                  placeholder="ค้นหาชื่อสื่อ หรือครูผู้ผลิต..."
-                  value={searchMedia}
-                  onChange={(e) => setSearchMedia(e.target.value)}
-                  className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-purple-400"
-                />
-              </div>
-
-              <div className="flex items-center gap-1.5 overflow-x-auto w-full sm:w-auto">
-                {['all', 'มัธยมศึกษา', 'ประถมศึกษา', 'ปฐมวัย', 'สะเต็มศึกษา'].map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setSelectedCategoryFilter(cat)}
-                    className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                      selectedCategoryFilter === cat
-                        ? 'bg-purple-600 text-white'
-                        : 'bg-slate-800 text-slate-300 hover:bg-slate-700'
-                    }`}
-                  >
-                    {cat === 'all' ? 'ทั้งหมด' : cat}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Repository Cards */}
-            <div className="p-5 overflow-y-auto space-y-3">
-              {[
-                { title: 'ชุดการเรียนรู้เรื่อง พันธุศาสตร์และ DNA ผ่านภาพจำลอง 3D', author: 'ม.วีระพงศ์ คำสอน', level: 'มัธยมศึกษา', views: 320, downloads: 88, format: 'วิดีโอ & สไลด์' },
-                { title: 'แบบฝึกหัดคำศัพท์ภาษาอังกฤษสะเต็ม (STEM Vocabulary Challenge)', author: 'มิสรัตนาภรณ์ แสนแก้ว', level: 'มัธยมศึกษา', views: 245, downloads: 110, format: 'Interactive PDF' },
-                { title: 'นิทานบูรณาการคณิตศาสตร์และคุณธรรมสำหรับเด็กปฐมวัย', author: 'มิสกานดา รุ่งเรือง', level: 'ปฐมวัย', views: 198, downloads: 74, format: 'E-Book สีสันสดใส' },
-                { title: 'คู่มือทดลองเคมีในครัวเรือน (Green Chemistry Lab)', author: 'ม.ประสิทธิ์ โคตรพงษ์', level: 'มัธยมศึกษา', views: 412, downloads: 156, format: 'คู่มือปฏิบัติการ' },
-              ].map((m, idx) => (
-                <div
-                  key={idx}
-                  className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700 hover:border-purple-400/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3"
-                >
-                  <div>
-                    <h4 className="font-bold text-white text-sm">{m.title}</h4>
-                    <p className="text-xs text-slate-400 mt-0.5">
-                      ผู้ผลิต: <strong className="text-purple-300">{m.author}</strong> • ระดับชั้น: {m.level} • รูปแบบ: {m.format}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs text-slate-400">เข้าชม {m.views} ครั้ง</span>
-                    <button
-                      type="button"
-                      className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1 shadow-sm"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>เปิดดูสื่อ</span>
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs"
-              >
-                ปิดหน้าต่าง
-              </button>
-            </div>
-          </div>
-        </div>
+        <TeacherMediaRepositoryModal
+          userEmail={userEmail}
+          onClose={() => setActiveModalId(null)}
+        />
       )}
 
-      {/* Modal 4: บันทึกแหล่งเรียนรู้ภายในโรงเรียนอัสสัมชัญอุบลราชธานี */}
+      {/* Modal 4: บันทึกแหล่งการเรียนรู้ภายในโรงเรียนอัสสัมชัญอุบลราชธานี (33 แหล่งเรียนรู้, 9 กลุ่มสาระ, 9 คาบเรียน, สรุป Google Sheets ถึง weerapong1625@acu.ac.th) */}
       {activeModalId === 'btn-4' && (
-        <div
-          id="modal-internal-learning-centers"
-          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveModalId(null);
-          }}
-        >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-emerald-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-gradient-to-r from-emerald-900/60 via-teal-900/50 to-slate-900 border-b border-emerald-500/30 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-emerald-600/30 border border-emerald-400/40 flex items-center justify-center text-emerald-300">
-                  <School className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">4. บันทึกแหล่งเรียนรู้ภายในโรงเรียนอัสสัมชัญอุบลราชธานี</h3>
-                  <p className="text-xs text-slate-300">
-                    บันทึกและสืบค้นห้องปฏิบัติการ ศูนย์การเรียนรู้ และมุมสาระภายในโรงเรียน (On-Campus)
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Content: Form to add + List */}
-            <div className="p-5 overflow-y-auto space-y-4">
-              {/* Add form */}
-              <form onSubmit={handleAddInternal} className="p-4 rounded-2xl bg-emerald-950/30 border border-emerald-500/30">
-                <h4 className="text-sm font-bold text-emerald-300 mb-3 flex items-center gap-1.5">
-                  <Plus className="w-4 h-4" />
-                  เพิ่มแหล่งเรียนรู้ภายในโรงเรียนใหม่
-                </h4>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                  <div>
-                    <label className="text-slate-300 block mb-1">ชื่อแหล่งเรียนรู้ / ห้องปฏิบัติการ</label>
-                    <input
-                      type="text"
-                      placeholder="เช่น ห้องดาราศาสตร์และสำรวจอวกาศ"
-                      value={newInternalLocation.name}
-                      onChange={(e) => setNewInternalLocation(prev => ({ ...prev, name: e.target.value }))}
-                      required
-                      className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-emerald-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-300 block mb-1">อาคาร / ชั้น / พิกัดสถานที่</label>
-                    <input
-                      type="text"
-                      placeholder="เช่น อาคารเฉลิมพระเกียรติ ชั้น 4"
-                      value={newInternalLocation.zone}
-                      onChange={(e) => setNewInternalLocation(prev => ({ ...prev, zone: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-emerald-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-300 block mb-1">วัตถุประสงค์และสาระการเรียนรู้</label>
-                    <input
-                      type="text"
-                      placeholder="เช่น การสังเกตปรากฏการณ์บนท้องฟ้า"
-                      value={newInternalLocation.purpose}
-                      onChange={(e) => setNewInternalLocation(prev => ({ ...prev, purpose: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-emerald-400"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-300 block mb-1">ความจุผู้เรียน</label>
-                    <input
-                      type="text"
-                      placeholder="เช่น 40-50 คน"
-                      value={newInternalLocation.capacity}
-                      onChange={(e) => setNewInternalLocation(prev => ({ ...prev, capacity: e.target.value }))}
-                      className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-emerald-400"
-                    />
-                  </div>
-                </div>
-                <div className="mt-3 flex justify-end">
-                  <button
-                    type="submit"
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-md transition-colors"
-                  >
-                    + บันทึกข้อมูลแหล่งเรียนรู้
-                  </button>
-                </div>
-              </form>
-
-              {/* Registered List */}
-              <div className="space-y-3">
-                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-400">
-                  รายการแหล่งเรียนรู้ภายในที่บันทึกแล้ว ({internalLocationsList.length} แห่ง)
-                </h4>
-                {internalLocationsList.map((loc) => (
-                  <div key={loc.id} className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="w-2 h-2 rounded-full bg-emerald-400" />
-                        <h5 className="font-bold text-white text-sm">{loc.name}</h5>
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                          {loc.zone}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-300 mt-1">{loc.purpose}</p>
-                    </div>
-                    <span className="text-xs text-slate-400 flex-shrink-0">
-                      รองรับ: {loc.capacity}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs"
-              >
-                ปิดหน้าต่าง
-              </button>
-            </div>
-          </div>
-        </div>
+        <FacilityUsageSubmissionModal
+          userEmail={userEmail}
+          defaultTeacherName={profile?.fullName}
+          onClose={() => setActiveModalId(null)}
+        />
       )}
 
       {/* Modal 5: บันทึกแหล่งเรียนรู้ภายนอกโรงเรียนอัสสัมชัญอุบลราชธานี */}
@@ -1092,136 +694,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         </div>
       )}
 
-      {/* Modal 6: คลังไอเดีย (IDEA) */}
+      {/* Modal 6: คลังไอเดีย (IDEA) (รวมเว็บการศึกษา วิจัย คลังข้อสอบ เพจเฟซบุ๊ก Canva AI อัปเดตทุกวัน) */}
       {activeModalId === 'btn-6' && (
-        <div
-          id="modal-idea-bank"
-          className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={(e) => {
-            if (e.target === e.currentTarget) setActiveModalId(null);
-          }}
-        >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-yellow-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-gradient-to-r from-yellow-900/60 via-amber-900/50 to-slate-900 border-b border-yellow-500/30 flex items-center justify-between">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-yellow-600/30 border border-yellow-400/40 flex items-center justify-center text-yellow-300">
-                  <Lightbulb className="w-6 h-6" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">6. คลังไอเดีย (IDEA)</h3>
-                  <p className="text-xs text-slate-300">
-                    พื้นที่ระดมและแบ่งปันไอเดียสร้างสรรค์การจัดการเรียนรู้สำหรับครู ACU
-                  </p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-5 overflow-y-auto space-y-4">
-              {/* Form to submit Idea */}
-              <form onSubmit={handleAddIdea} className="p-4 rounded-2xl bg-yellow-950/20 border border-yellow-500/30">
-                <h4 className="text-sm font-bold text-yellow-300 mb-2 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4" />
-                  แบ่งปันไอเดียการสอนใหม่ (Share IDEA)
-                </h4>
-                <div className="space-y-2 text-xs">
-                  <input
-                    type="text"
-                    placeholder="หัวข้อไอเดียการสอน เช่น เทคนิคการใช้สถานการณ์จริงกระตุ้นความอยากรู้..."
-                    value={newIdeaTitle}
-                    onChange={(e) => setNewIdeaTitle(e.target.value)}
-                    required
-                    className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-yellow-400"
-                  />
-                  <div className="flex flex-col sm:flex-row gap-2">
-                    <select
-                      value={newIdeaCategory}
-                      onChange={(e) => setNewIdeaCategory(e.target.value)}
-                      className="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs focus:outline-none"
-                    >
-                      <option value="เทคนิคการสอนเชิงรุก (Active Learning)">เทคนิคการสอนเชิงรุก (Active Learning)</option>
-                      <option value="เทคโนโลยีดิจิทัล & AI">เทคโนโลยีดิจิทัล & AI</option>
-                      <option value="Gamification & สื่อสร้างสรรค์">Gamification & สื่อสร้างสรรค์</option>
-                      <option value="การวัดผลประเมินผล">การวัดผลประเมินผล</option>
-                    </select>
-                    <button
-                      type="submit"
-                      className="px-4 py-2 rounded-xl bg-yellow-600 hover:bg-yellow-500 text-slate-900 font-bold text-xs shadow-md transition-colors"
-                    >
-                      + โพสต์ไอเดียสู่คลัง
-                    </button>
-                  </div>
-                </div>
-              </form>
-
-              {/* Ideas List */}
-              <div className="space-y-3">
-                {ideasList.map((idea) => (
-                  <div key={idea.id} className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-                    <div>
-                      <div className="flex items-center gap-2">
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-yellow-500/20 text-yellow-300 border border-yellow-500/30">
-                          {idea.category}
-                        </span>
-                        <span className="text-[11px] text-slate-400">{idea.date}</span>
-                      </div>
-                      <h4 className="font-bold text-white text-sm mt-1">{idea.title}</h4>
-                      <p className="text-xs text-slate-400 mt-0.5">แบ่งปันโดย: <strong className="text-slate-300">{idea.teacher}</strong></p>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setIdeasList(prev => prev.map(item => item.id === idea.id ? { ...item, likes: item.likes + 1 } : item));
-                      }}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-700/80 hover:bg-yellow-500/20 text-yellow-300 border border-yellow-500/30 text-xs font-semibold transition-colors"
-                    >
-                      <Star className="w-3.5 h-3.5 fill-yellow-400" />
-                      <span>{idea.likes} ชื่นชอบ</span>
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end">
-              <button
-                type="button"
-                onClick={() => setActiveModalId(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs"
-              >
-                ปิดหน้าต่าง
-              </button>
-            </div>
-          </div>
-        </div>
+        <IdeaBankModal onClose={() => setActiveModalId(null)} />
       )}
 
-      {/* Modal 7: ศูนย์ประสานงาน & คู่มือการใช้งาน (ปุ่มนี้ไม่ต้องใส่หมายเลข) */}
+      {/* Modal 7: ส่งสื่อเข้าประกวด (ปุ่มนี้ไม่ต้องใส่หมายเลข และด้านในให้ว่างไว้ตามสั่ง) */}
       {activeModalId === 'btn-7' && (
         <div
-          id="modal-help-and-guidance"
+          id="modal-contest-submission"
           className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
           onClick={(e) => {
             if (e.target === e.currentTarget) setActiveModalId(null);
           }}
         >
-          <div className="relative w-full max-w-4xl bg-slate-900 border border-rose-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]">
-            <div className="p-5 bg-gradient-to-r from-rose-900/60 via-red-900/50 to-slate-900 border-b border-rose-500/30 flex items-center justify-between">
+          <div className="relative w-full max-w-3xl bg-slate-900 border border-rose-500/40 rounded-3xl shadow-2xl overflow-hidden flex flex-col min-h-[360px]">
+            {/* Header */}
+            <div className="p-5 bg-gradient-to-r from-rose-900/60 via-pink-900/50 to-slate-900 border-b border-rose-500/30 flex items-center justify-between">
               <div className="flex items-center gap-3">
                 <div className="w-10 h-10 rounded-xl bg-rose-600/30 border border-rose-400/40 flex items-center justify-center text-rose-300">
-                  <HelpCircle className="w-6 h-6" />
+                  <Sparkles className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-bold text-white">ศูนย์ประสานงาน & คู่มือการใช้งาน</h3>
+                  <h3 className="text-lg font-bold text-white">ส่งสื่อเข้าประกวด</h3>
                   <p className="text-xs text-slate-300">
-                    คำแนะนำการใช้งานระบบ และการติดต่อประสานงานฝ่ายวิชาการและนวัตกรรม
+                    งานพัฒนาสื่อและนวัตกรรมการเรียนรู้ โรงเรียนอัสสัมชัญอุบลราชธานี
                   </p>
                 </div>
               </div>
@@ -1234,38 +731,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
               </button>
             </div>
 
-            <div className="p-5 overflow-y-auto space-y-4 text-xs sm:text-sm text-slate-300">
-              <div className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700">
-                <h4 className="font-bold text-white mb-2 flex items-center gap-2">
-                  <Info className="w-4 h-4 text-rose-400" />
-                  ขั้นตอนการส่งสื่อนวัตกรรมประจำภาคเรียน
-                </h4>
-                <ol className="list-decimal list-inside space-y-1.5 text-slate-300 text-xs">
-                  <li>ตรวจสอบรายการสื่อ 5 ชิ้นในปุ่มที่ 1 หรือในหน้าโปรไฟล์ของคุณ</li>
-                  <li>จัดเตรียมไฟล์ หรือ Google Drive ลิงก์ที่เปิดสิทธิ์ให้อาจารย์ฝ่ายวิชาการเข้าถึงได้</li>
-                  <li>กดปุ่ม &quot;แก้ไข/แนบลิงก์&quot; เพื่อกรอก URL สื่อ หรือแนบไฟล์ให้เรียบร้อย</li>
-                  <li>ฝ่ายวิชาการจะดำเนินการตรวจประเมินตามเกณฑ์ในปุ่มที่ 2 และแจ้งสถานะอนุมัติอัตโนมัติ</li>
-                </ol>
-              </div>
-
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700">
-                  <h4 className="font-bold text-white mb-1">ติดต่อฝ่ายวิชาการและนวัตกรรมการเรียนรู้</h4>
-                  <p className="text-xs text-slate-300">โรงเรียนอัสสัมชัญอุบลราชธานี</p>
-                  <p className="text-xs text-slate-400 mt-2">
-                    โทรศัพท์: 045-284-444 ต่อ ฝ่ายวิชาการ<br />
-                    อีเมล: academic@acu.ac.th
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700">
-                  <h4 className="font-bold text-white mb-1">เวลาทำการระบบสนับสนุน</h4>
-                  <p className="text-xs text-slate-300">
-                    วันจันทร์ - วันศุกร์: 07:30 - 16:30 น.<br />
-                    วันเสาร์ (กิจกรรมวิชาการ): 08:30 - 12:00 น.
-                  </p>
-                </div>
-              </div>
+            {/* Content: Empty inside as requested (ด้านในว่างไว้) */}
+            <div className="p-8 sm:p-16 flex-grow flex flex-col items-center justify-center text-center">
+              {/* Intentionally kept blank/empty per user requirement */}
             </div>
 
             <div className="p-4 bg-slate-950/80 border-t border-slate-800 flex justify-end">

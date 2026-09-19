@@ -18,5 +18,20 @@ service cloud.firestore {
     match /system_settings/{settingId} {
       allow read, create, update, write: if true;
     }
+
+    // system_test_submissions collection for 5 media / learning center records and Google Sheet export
+    match /system_test_submissions/{submissionId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // teacher_innovations_submissions for 5 media innovations
+    match /teacher_innovations_submissions/{submissionId} {
+      allow read, create, update, delete: if true;
+    }
+
+    // teacher_media_repository collection for teacher produced media and community star ratings
+    match /teacher_media_repository/{mediaId} {
+      allow read, create, update, delete: if true;
+    }
   }
 }
