@@ -545,46 +545,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
           </button>
         </div>
 
-        {/* =========================================================================
-            SECTION: เฉพาะ Admin (Admin Portal Access Card)
-            - Requires Gmail: weerapong1625@acu.ac.th
-            - Links to statistics, logo management, and Google Sheets
-           ========================================================================= */}
-        <div className="w-full max-w-3xl mx-auto mt-6">
-          <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-slate-900/95 via-amber-950/40 to-slate-900/95 border border-amber-500/30 shadow-2xl backdrop-blur-md flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-4 text-center sm:text-left">
-              <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-400/30 text-amber-400 flex items-center justify-center flex-shrink-0 shadow-lg">
-                <ShieldCheck className="w-7 h-7" />
-              </div>
-              <div>
-                <div className="flex items-center gap-2 justify-center sm:justify-start">
-                  <h4 className="text-base font-extrabold text-white">เฉพาะ Admin (ผู้ดูแลระบบ)</h4>
-                  <span className="px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px] font-bold">
-                    Super Admin Only
-                  </span>
-                </div>
-                <p className="text-xs text-slate-300/85 mt-1">
-                  ศูนย์ควบคุมระบบ สรุปข้อมูลและสถิติเว็บไซต์ จัดการภาพโลโก้โรงเรียน และซิงค์เชื่อมโยง Google Sheets
-                </p>
-                <p className="text-[11px] text-amber-400 font-mono mt-0.5">
-                  สงวนสิทธิ์เฉพาะ Gmail: {SUPER_ADMIN_EMAIL}
-                </p>
-              </div>
-            </div>
-
-            <button
-              type="button"
-              id="btn-admin-portal-main-card"
-              onClick={handleOpenAdminPortal}
-              className="px-5 py-3 rounded-2xl bg-gradient-to-r from-amber-500 via-yellow-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs shadow-lg shadow-amber-950/50 flex items-center gap-2 whitespace-nowrap transition-all cursor-pointer hover:scale-105"
-            >
-              <ShieldCheck className="w-4 h-4 text-slate-950" />
-              <span>เข้าสู่ระบบเฉพาะ Admin</span>
-              <ArrowRight className="w-4 h-4 text-slate-950" />
-            </button>
-          </div>
-        </div>
-
         {/* Selected Confirmation Banner when clicked */}
         {selectedRole && (
           <div

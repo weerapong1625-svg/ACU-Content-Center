@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck } from 'lucide-react';
+import { logUserLogin } from '../services/auditService';
 
 interface GmailLoginFormProps {
   onLoginSuccess?: (email: string) => void;
@@ -14,6 +15,14 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [error, setError] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [activeUser, setActiveUser] = useState<string | null>(null);
+
+  // Google SSO Modal State (Forces fresh Gmail sign-in every time)
+  const [isGoogleModalOpen, setIsGoogleModalOpen] = useState(false);
+  const [googleEmail, setGoogleEmail] = useState('');
+  const [googlePassword, setGooglePassword] = useState('');
+  const [showGooglePassword, setShowGooglePassword] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
 
   const validateEmail = (val: string) => {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
@@ -35,7 +44,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     }
 
     setIsLoading(true);
-    setTimeout(() => {
+    setTimeout(async () => {
       setIsLoading(false);
       setIsSuccess(true);
       setActiveUser(trimmed);
@@ -44,31 +53,85 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       } catch {
         // ignore
       }
+      // Record audit log
+      await logUserLogin({
+        email: trimmed,
+        loginMethod: 'Email & Password Login',
+        role: trimmed === 'weerapong1625@acu.ac.th' ? 'teacher' : 'teacher',
+      });
       onLoginSuccess?.(trimmed);
     }, 600);
   };
 
-  const handleGoogleSso = () => {
+  // Open Google SSO Modal - Guaranteed fresh state every time (never auto-fills or remembers previous account)
+  const handleOpenGoogleSso = () => {
     setError(null);
-    setIsLoading(true);
-    setTimeout(() => {
-      const user = email.trim() || 'weerapong1625@acu.ac.th';
-      setIsLoading(false);
+    setGoogleEmail('');
+    setGooglePassword('');
+    setGoogleError(null);
+    setShowGooglePassword(false);
+    setIsGoogleModalOpen(true);
+  };
+
+  // Submit Google SSO - Validates and processes the fresh Gmail entry
+  const handleGoogleSsoSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setGoogleError(null);
+
+    const trimmedEmail = googleEmail.trim();
+    if (!trimmedEmail) {
+      setGoogleError('กรุณากรอกอีเมล Gmail หรือบัญชี Google ของคุณ');
+      return;
+    }
+
+    if (!validateEmail(trimmedEmail)) {
+      setGoogleError('รูปแบบอีเมลไม่ถูกต้อง (เช่น yourname@gmail.com หรือ user@acu.ac.th)');
+      return;
+    }
+
+    if (!googlePassword) {
+      setGoogleError('กรุณาป้อนรหัสผ่านบัญชี Google ของคุณ');
+      return;
+    }
+
+    setIsGoogleSubmitting(true);
+    setTimeout(async () => {
+      setIsGoogleSubmitting(false);
+      setIsGoogleModalOpen(false);
       setIsSuccess(true);
-      setActiveUser(user);
+      setActiveUser(trimmedEmail);
+
       try {
-        localStorage.setItem('acu_current_user_email', user);
+        localStorage.setItem('acu_current_user_email', trimmedEmail);
       } catch {
         // ignore
       }
-      onLoginSuccess?.(user);
-    }, 600);
+
+      // Record audit log
+      await logUserLogin({
+        email: trimmedEmail,
+        loginMethod: 'Google Account SSO (เข้าสู่ระบบ Gmail ใหม่)',
+        role: trimmedEmail === 'weerapong1625@acu.ac.th' ? 'teacher' : 'teacher',
+      });
+
+      onLoginSuccess?.(trimmedEmail);
+    }, 800);
   };
 
   const handleQuickFill = (presetEmail: string) => {
     setEmail(presetEmail);
     setPassword('••••••••••••');
     setError(null);
+  };
+
+  const handleQuickFillGoogle = (suffix: string) => {
+    if (googleEmail.includes('@')) {
+      const prefix = googleEmail.split('@')[0];
+      setGoogleEmail(`${prefix}${suffix}`);
+    } else {
+      setGoogleEmail(`${googleEmail}${suffix}`);
+    }
+    setGoogleError(null);
   };
 
   const handleReset = () => {
@@ -158,9 +221,10 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       <button
         type="button"
         id="btn-google-sso"
-        onClick={handleGoogleSso}
+        onClick={handleOpenGoogleSso}
         disabled={isLoading}
-        className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-xl bg-white border border-slate-300 hover:border-slate-400 text-slate-700 font-medium shadow-sm hover:shadow-md transition-all duration-200 active:scale-[0.99] disabled:opacity-60 mb-5 group"
+        className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-xl bg-white border border-slate-300 hover:border-slate-400 text-slate-700 font-medium shadow-sm hover:shadow-md transition-all duration-200 active:scale-[0.99] disabled:opacity-60 mb-5 group cursor-pointer"
+        title="เข้าสู่ระบบด้วยบัญชี Google (กรอก Gmail ใหม่ทุกครั้ง)"
       >
         {/* Official Google G Logo SVG */}
         <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24">
