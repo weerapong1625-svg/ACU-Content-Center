@@ -23,6 +23,8 @@ export default function App() {
     setLoggedInUser(null);
     try {
       localStorage.removeItem('acu_current_user_email');
+      localStorage.removeItem('acu_user_role');
+      sessionStorage.clear();
     } catch {
       // ignore
     }

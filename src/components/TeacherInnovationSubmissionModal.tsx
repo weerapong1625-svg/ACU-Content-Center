@@ -14,7 +14,10 @@ import {
   Mail,
   Copy,
   Download,
-  BookOpen
+  BookOpen,
+  Edit3,
+  Trash2,
+  AlertCircle
 } from 'lucide-react';
 import { 
   GRADE_LEVELS, 
@@ -23,10 +26,13 @@ import {
   PRODUCTION_TYPES, 
   InnovationSubmission,
   saveInnovationSubmission, 
+  updateInnovationSubmission,
+  deleteInnovationSubmission,
   subscribeUserInnovations,
   subscribeAllInnovations,
   exportInnovationsToGoogleSheetsCSV,
-  ADMIN_TARGET_EMAIL
+  ADMIN_TARGET_EMAIL,
+  canUserModify
 } from '../services/submissionService';
 
 interface TeacherInnovationSubmissionModalProps {
@@ -53,6 +59,9 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [onlineUrl, setOnlineUrl] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
 
+  // Edit mode state
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   // Status & List states
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
@@ -60,6 +69,11 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [userSubmissions, setUserSubmissions] = useState<InnovationSubmission[]>([]);
   const [allSubmissions, setAllSubmissions] = useState<InnovationSubmission[]>([]);
   const [copyNotice, setCopyNotice] = useState(false);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  // Admin permission check
+  const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
+  const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -132,6 +146,42 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
     setIsSubmitting(true);
 
+    if (editingId) {
+      // Perform Update
+      const res = await updateInnovationSubmission(
+        editingId,
+        {
+          teacherName: teacherName.trim(),
+          gradeLevel,
+          itemNumber,
+          mediaTitle: mediaTitle.trim(),
+          mediaType,
+          productionType,
+          usageDetails: usageDetails.trim(),
+          onlineUrl: onlineUrl.trim(),
+          imageUrl: imagePreview || undefined,
+        },
+        userEmail
+      );
+
+      setIsSubmitting(false);
+
+      if (res.success) {
+        setActionNotice(`บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber} เรียบร้อยแล้ว`);
+        setEditingId(null);
+        setMediaTitle('');
+        setUsageDetails('');
+        setOnlineUrl('');
+        setImagePreview(null);
+        setActiveTab('status');
+        setTimeout(() => setActionNotice(null), 3000);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+      }
+      return;
+    }
+
+    // Perform Create
     const res = await saveInnovationSubmission({
       teacherName: teacherName.trim(),
       gradeLevel,
@@ -160,6 +210,41 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       }
     } else {
       alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    }
+  };
+
+  const handleStartEdit = (sub: InnovationSubmission) => {
+    setEditingId(sub.id);
+    setTeacherName(sub.teacherName);
+    setGradeLevel(sub.gradeLevel);
+    setItemNumber(sub.itemNumber);
+    setMediaTitle(sub.mediaTitle);
+    setMediaType(sub.mediaType);
+    setProductionType(sub.productionType);
+    setUsageDetails(sub.usageDetails);
+    setOnlineUrl(sub.onlineUrl || '');
+    setImagePreview(sub.imageUrl || null);
+    setActiveTab('form');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setMediaTitle('');
+    setUsageDetails('');
+    setOnlineUrl('');
+    setImagePreview(null);
+  };
+
+  const handleDeleteSubmission = async (sub: InnovationSubmission) => {
+    if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${sub.mediaTitle}" (ชิ้นที่ ${sub.itemNumber})?`)) {
+      return;
+    }
+    const res = await deleteInnovationSubmission(sub.id, userEmail);
+    if (res.success) {
+      setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
+      setTimeout(() => setActionNotice(null), 3000);
+    } else {
+      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
     }
   };
 
@@ -301,10 +386,50 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
         {/* Modal Body */}
         <div className="p-4 sm:p-6 overflow-y-auto flex-1 space-y-6 text-slate-200">
           
+          {/* Action notification toast */}
+          {actionNotice && (
+            <div className="p-3.5 rounded-2xl bg-emerald-950/80 border border-emerald-500/50 flex items-center justify-between gap-3 text-emerald-300 text-xs font-semibold animate-in fade-in">
+              <div className="flex items-center gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <span>{actionNotice}</span>
+              </div>
+              <button 
+                type="button" 
+                onClick={() => setActionNotice(null)}
+                className="text-emerald-400 hover:text-white"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* TAB 1: FORM */}
           {activeTab === 'form' && (
             <div>
-              {submitSuccess && (
+              {editingId && (
+                <div className="mb-5 p-4 rounded-2xl bg-amber-950/60 border border-amber-500/50 flex items-center justify-between gap-3 animate-in fade-in">
+                  <div className="flex items-center gap-2.5">
+                    <Edit3 className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                    <div>
+                      <h4 className="text-xs sm:text-sm font-bold text-amber-300">
+                        กำลังอยู่ในโหมดแก้ไขข้อมูล: สื่อชิ้นที่ {itemNumber}
+                      </h4>
+                      <p className="text-[11px] text-amber-200/70">
+                        ปรับแก้ข้อมูลตามต้องการ แล้วกดปุ่ม "บันทึกการแก้ไข" ด้านล่าง
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCancelEdit}
+                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors"
+                  >
+                    ยกเลิกการแก้ไข
+                  </button>
+                </div>
+              )}
+
+              {submitSuccess && !editingId && (
                 <div className="mb-6 p-4 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 flex items-start gap-3">
                   <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
                   <div className="flex-1">
@@ -573,10 +698,20 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                     <button
                       type="submit"
                       disabled={isSubmitting}
-                      className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-xs sm:text-sm font-bold text-white shadow-lg shadow-blue-500/25 flex items-center gap-2 transition-all disabled:opacity-50"
+                      className={`px-6 py-2.5 rounded-xl text-xs sm:text-sm font-bold text-white shadow-lg flex items-center gap-2 transition-all disabled:opacity-50 ${
+                        editingId 
+                          ? 'bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 shadow-amber-500/25' 
+                          : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-blue-500/25'
+                      }`}
                     >
                       <Send className="w-4 h-4" />
-                      <span>{isSubmitting ? 'กำลังบันทึกข้อมูล...' : `ส่งสื่อชิ้นที่ ${itemNumber}`}</span>
+                      <span>
+                        {isSubmitting 
+                          ? 'กำลังบันทึก...' 
+                          : editingId 
+                            ? `บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber}` 
+                            : `ส่งสื่อชิ้นที่ ${itemNumber}`}
+                      </span>
                     </button>
                   </div>
                 </div>
@@ -589,27 +724,51 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
             <div className="space-y-4">
               <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700 flex flex-wrap items-center justify-between gap-3">
                 <div>
-                  <h4 className="text-sm font-bold text-white">
-                    สถานะการส่งสื่อของอีเมล: <span className="text-blue-300">{userEmail}</span>
+                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                    <span>
+                      {isAdmin && showAllUsersForAdmin
+                        ? 'สถานะการส่งสื่อของคุณครูทุกคน (สิทธิ์ Admin)'
+                        : `สถานะการส่งสื่อของอีเมล: ${userEmail}`}
+                    </span>
+                    {isAdmin && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold">
+                        Admin Mode
+                      </span>
+                    )}
                   </h4>
                   <p className="text-xs text-slate-400">
-                    ส่งแล้วทั้งหมด {userSubmissions.length} รายการ (เป้าหมาย 5 ชิ้น)
+                    ส่งแล้วทั้งหมด {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length} รายการ
+                    {!(isAdmin && showAllUsersForAdmin) && ' (เป้าหมาย 5 ชิ้น)'}
                   </p>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                    {userSubmissions.length >= 5 ? 'ครบ 5 ชิ้นแล้ว' : `ขาดอีก ${5 - userSubmissions.length} ชิ้น`}
-                  </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {isAdmin && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllUsersForAdmin(!showAllUsersForAdmin)}
+                      className="text-xs px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-amber-300 border border-amber-500/40 font-semibold transition-colors"
+                    >
+                      {showAllUsersForAdmin ? 'แสดงเฉพาะของฉัน' : 'แสดงของทุกคน (Admin)'}
+                    </button>
+                  )}
+                  {!(isAdmin && showAllUsersForAdmin) && (
+                    <span className="text-xs px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                      {userSubmissions.length >= 5 ? 'ครบ 5 ชิ้นแล้ว' : `ขาดอีก ${5 - userSubmissions.length} ชิ้น`}
+                    </span>
+                  )}
                 </div>
               </div>
 
-              {userSubmissions.length === 0 ? (
+              {((isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length === 0) ? (
                 <div className="py-12 text-center text-slate-400">
                   <BookOpen className="w-10 h-10 mx-auto mb-2 text-slate-600" />
-                  <p className="text-sm">ยังไม่พบรายการส่งสื่อของอีเมลนี้</p>
+                  <p className="text-sm">ยังไม่พบรายการส่งสื่อ (เริ่มต้น 0 รายการ)</p>
                   <button
                     type="button"
-                    onClick={() => setActiveTab('form')}
+                    onClick={() => {
+                      setEditingId(null);
+                      setActiveTab('form');
+                    }}
                     className="mt-3 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-semibold transition-colors"
                   >
                     ส่งสื่อชิ้นที่ 1 ตอนนี้
@@ -617,12 +776,12 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {userSubmissions.map((sub) => (
+                  {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).map((sub) => (
                     <div
                       key={sub.id}
                       className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 hover:border-blue-500/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
                     >
-                      <div className="flex items-start gap-3">
+                      <div className="flex items-start gap-3 flex-1 min-w-0">
                         {sub.imageUrl ? (
                           <img
                             src={sub.imageUrl}
@@ -634,7 +793,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                             <Layers className="w-6 h-6" />
                           </div>
                         )}
-                        <div>
+                        <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2 flex-wrap mb-1">
                             <span className="px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 font-bold text-xs">
                               สื่อชิ้นที่ {sub.itemNumber}
@@ -643,32 +802,66 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                             <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
                               {sub.status}
                             </span>
+                            {isAdmin && sub.userEmail !== userEmail && (
+                              <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-400/30">
+                                ครู: {sub.userEmail}
+                              </span>
+                            )}
                           </div>
-                          <h5 className="text-sm font-bold text-white">{sub.mediaTitle}</h5>
+                          <h5 className="text-sm font-bold text-white truncate">{sub.mediaTitle}</h5>
                           <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
                             {sub.usageDetails}
                           </p>
-                          <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400">
+                          <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
                             <span className="flex items-center gap-1">
                               <Clock className="w-3 h-3 text-slate-500" />
                               {new Date(sub.submittedAt).toLocaleString('th-TH')}
                             </span>
                             <span>การจัดทำ: {sub.productionType}</span>
+                            <span>ครูผู้สอน: <strong>{sub.teacherName}</strong></span>
                           </div>
                         </div>
                       </div>
 
-                      {sub.onlineUrl && (
-                        <a
-                          href={sub.onlineUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-xs text-blue-300 flex items-center gap-1.5 transition-colors self-end sm:self-center"
-                        >
-                          <ExternalLink className="w-3.5 h-3.5" />
-                          <span>เปิดดูสื่อ</span>
-                        </a>
-                      )}
+                      {/* Actions: Open URL, Edit, Delete */}
+                      <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
+                        {sub.onlineUrl && (
+                          <a
+                            href={sub.onlineUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 rounded-xl bg-slate-700/80 hover:bg-slate-700 text-xs text-blue-300 flex items-center gap-1 transition-colors"
+                            title="เปิดดูสื่อออนไลน์"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5" />
+                            <span className="hidden md:inline">เปิดดู</span>
+                          </a>
+                        )}
+
+                        {canUserModify(sub.userEmail, userEmail) && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleStartEdit(sub)}
+                              className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                              title="แก้ไขข้อมูลสื่อ"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                              <span>แก้ไข</span>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSubmission(sub)}
+                              className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                              title="ลบข้อมูลสื่อ"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>ลบ</span>
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -734,7 +927,9 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                         <th className="p-3">ประเภท</th>
                         <th className="p-3">การจัดทำ</th>
                         <th className="p-3">วันเวลาส่ง</th>
+                        <th className="p-3">อีเมล</th>
                         <th className="p-3">สถานะ</th>
+                        {isAdmin && <th className="p-3 text-center text-amber-300 font-semibold">จัดการ (Admin)</th>}
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800 text-slate-300">
@@ -750,11 +945,34 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                           <td className="p-3 text-slate-400 whitespace-nowrap">
                             {new Date(item.submittedAt).toLocaleDateString('th-TH')}
                           </td>
+                          <td className="p-3 text-slate-400 whitespace-nowrap">{item.userEmail}</td>
                           <td className="p-3">
                             <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px]">
                               {item.status}
                             </span>
                           </td>
+                          {isAdmin && (
+                            <td className="p-3 whitespace-nowrap text-center">
+                              <div className="flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEdit(item)}
+                                  className="p-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30"
+                                  title="Admin: แก้ไขสื่อนี้"
+                                >
+                                  <Edit3 className="w-3 h-3" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSubmission(item)}
+                                  className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                                  title="Admin: ลบสื่อนี้"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              </div>
+                            </td>
+                          )}
                         </tr>
                       ))}
                     </tbody>

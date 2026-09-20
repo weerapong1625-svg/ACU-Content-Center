@@ -32,8 +32,10 @@ import {
   saveFullUserProfile, 
   addVisitorPraiseAndRating, 
   recordProfileVisit,
-  getCachedUserProfile
+  getCachedUserProfile,
+  DEFAULT_INNOVATION_ITEMS
 } from '../services/userProfileService';
+import { subscribeUserInnovations } from '../services/submissionService';
 import { EditProfileModal } from './EditProfileModal';
 
 interface UserProfileModalProps {
@@ -59,68 +61,29 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [activeTab, setActiveTab] = useState<'info' | 'innovations' | 'stats' | 'praise'>('info');
 
   // Profile Data State initialized synchronously to prevent delay
+  const isMasterWeerapong = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
   const [profile, setProfile] = useState<FullUserProfile>(() => {
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
-      fullName: userName || 'มาสเตอร์วีระพงศ์ คำสอน',
-      nickname: 'ครูปอย',
+      fullName: isMasterWeerapong ? 'มาสเตอร์วีระพงศ์ คำสอน' : (userName || userEmail.split('@')[0]),
+      nickname: isMasterWeerapong ? 'ครูปอย' : '',
       school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
       displayName: userName || userEmail.split('@')[0],
       avatarUrl: avatarUrl,
-      role: 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
-      innovations: [
-        {
-          id: 1,
-          title: 'แผนการจัดการเรียนรู้ดิจิทัลและคู่มือนวัตกรรมเชิงรุก',
-          category: 'แผนการสอนและนวัตกรรม',
-          status: 'approved',
-          submittedDate: '10 มี.ค. 2569',
-          linkUrl: 'https://drive.google.com',
-          notes: 'แผนการสอนบูรณาการเทคโนโลยี AI & ดิจิทัล',
-        },
-        {
-          id: 2,
-          title: 'สื่อวิดีโอนวัตกรรมและบทเรียนปฏิสัมพันธ์',
-          category: 'สื่อมัลติมีเดียและดิจิทัล',
-          status: 'approved',
-          submittedDate: '12 มี.ค. 2569',
-          linkUrl: 'https://youtube.com',
-          notes: 'วิดีโอคลิปการสอน 4K พร้อมแบบทดสอบโต้ตอบ',
-        },
-        {
-          id: 3,
-          title: 'สื่อนวัตกรรมเกมจำลองสถานการณ์เพื่อการเรียนรู้',
-          category: 'สื่อนวัตกรรมสร้างสรรค์',
-          status: 'submitted',
-          submittedDate: '15 มี.ค. 2569',
-          linkUrl: 'https://acu.ac.th',
-          notes: 'แบบจำลองปฏิบัติการวิทย์-คณิต',
-        },
-        {
-          id: 4,
-          title: 'คลังแบบทดสอบและเครื่องมือประเมินสมรรถนะผู้เรียน',
-          category: 'การวัดและประเมินผล',
-          status: 'under_review',
-          submittedDate: '16 มี.ค. 2569',
-          linkUrl: '',
-          notes: 'เกณฑ์รูบริกส์วัดสมรรถนะผู้เรียน',
-        },
-        {
-          id: 5,
-          title: 'รายงานผลการใช้นวัตกรรมการศึกษาเพื่อยกระดับผลสัมฤทธิ์',
-          category: 'รายงานวิจัยและผลงานนวัตกรรม',
-          status: 'pending',
-          submittedDate: '-',
-          linkUrl: '',
-          notes: 'กำลังจัดทำรายงานสังเคราะห์ผลสัมฤทธิ์',
-        },
-      ],
-      stats: {
+      role: isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+      innovations: DEFAULT_INNOVATION_ITEMS,
+      stats: isMasterWeerapong ? {
         totalViews: 148,
         uniqueVisitors: 96,
         points: 285,
         averageRating: 5.0,
         totalRatings: 3,
+      } : {
+        totalViews: 0,
+        uniqueVisitors: 0,
+        points: 0,
+        averageRating: 0,
+        totalRatings: 0,
       },
       praises: [],
       updatedAt: new Date().toISOString(),
@@ -186,6 +149,45 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       setRoleInput(profile.role || 'ครูผู้สอน');
     }
   }, [profile, userName]);
+
+  // Synchronize user innovations dynamically from Firestore in real-time
+  useEffect(() => {
+    if (!isOpen || !userEmail) return;
+
+    const unsubscribe = subscribeUserInnovations(userEmail, (userInnos) => {
+      setProfile((prev) => {
+        // Map real submissions into the 5 slots
+        const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
+          const match = userInnos.find((u) => u.itemNumber === defItem.id);
+          if (match) {
+            return {
+              id: defItem.id,
+              title: match.mediaTitle,
+              category: match.mediaType,
+              status: 'submitted' as const,
+              submittedDate: match.submittedAt
+                ? new Date(match.submittedAt).toLocaleDateString('th-TH', {
+                    day: 'numeric',
+                    month: 'short',
+                    year: 'numeric',
+                  })
+                : 'ส่งแล้ว',
+              linkUrl: match.onlineUrl || '',
+              notes: `${match.productionType}${match.usageDetails ? ` • ${match.usageDetails}` : ''}`,
+            };
+          }
+          return defItem;
+        });
+
+        return {
+          ...prev,
+          innovations: updatedInnovations,
+        };
+      });
+    });
+
+    return () => unsubscribe();
+  }, [isOpen, userEmail]);
 
   if (!isOpen) return null;
 

@@ -18,7 +18,9 @@ import {
   AlertCircle,
   Filter,
   Mail,
-  Database
+  Database,
+  Edit3,
+  Trash2
 } from 'lucide-react';
 import { 
   SUBJECT_GROUPS, 
@@ -26,10 +28,13 @@ import {
   PERIODS_LIST, 
   FacilitySubmission, 
   saveFacilitySubmission, 
+  updateFacilitySubmission,
+  deleteFacilitySubmission,
   subscribeUserSubmissions, 
   subscribeAllSubmissions, 
   exportToGoogleSheetsCSV,
-  ADMIN_TARGET_EMAIL
+  ADMIN_TARGET_EMAIL,
+  canUserModify
 } from '../services/submissionService';
 
 interface FacilityUsageSubmissionModalProps {
@@ -65,10 +70,18 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   const [feedback, setFeedback] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
 
+  // Edit State
+  const [editingId, setEditingId] = useState<string | null>(null);
+
   // Status & Submit State
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
+
+  // Admin permission check
+  const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
+  const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
 
   // Submissions lists (Real-time from Firestore Project: System Test)
   const [userSubmissions, setUserSubmissions] = useState<FacilitySubmission[]>([]);
@@ -158,6 +171,36 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     setIsSubmitting(true);
     setSubmitSuccessMsg(null);
 
+    if (editingId) {
+      const result = await updateFacilitySubmission(
+        editingId,
+        {
+          teacherName: teacherName.trim(),
+          subjectGroup,
+          learningCenter,
+          periods: selectedPeriods,
+          usageDateTime,
+          feedback: feedback.trim(),
+          imageUrl: imagePreview || undefined,
+        },
+        userEmail
+      );
+
+      setIsSubmitting(false);
+
+      if (result.success) {
+        setActionNotice(`บันทึกการแก้ไขข้อมูลการใช้ ${learningCenter} เรียบร้อยแล้ว`);
+        setEditingId(null);
+        setFeedback('');
+        setImagePreview(null);
+        setActiveTab('status');
+        setTimeout(() => setActionNotice(null), 3000);
+      } else {
+        alert(result.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+      }
+      return;
+    }
+
     const result = await saveFacilitySubmission({
       teacherName: teacherName.trim(),
       subjectGroup,
@@ -180,6 +223,37 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
       }, 1500);
     } else {
       alert(result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    }
+  };
+
+  const handleStartEdit = (sub: FacilitySubmission) => {
+    setEditingId(sub.id);
+    setTeacherName(sub.teacherName);
+    setSubjectGroup(sub.subjectGroup);
+    setLearningCenter(sub.learningCenter);
+    setSelectedPeriods(sub.periods);
+    setUsageDateTime(sub.usageDateTime);
+    setFeedback(sub.feedback || '');
+    setImagePreview(sub.imageUrl || null);
+    setActiveTab('form');
+  };
+
+  const handleCancelEdit = () => {
+    setEditingId(null);
+    setFeedback('');
+    setImagePreview(null);
+  };
+
+  const handleDelete = async (sub: FacilitySubmission) => {
+    if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบบันทึกการใช้ "${sub.learningCenter}" (${sub.usageDateTime.replace('T', ' ')})?`)) {
+      return;
+    }
+    const res = await deleteFacilitySubmission(sub.id, userEmail);
+    if (res.success) {
+      setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
+      setTimeout(() => setActionNotice(null), 3000);
+    } else {
+      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
     }
   };
 
@@ -322,7 +396,46 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
         {/* Tab 1: Form Body */}
         {activeTab === 'form' && (
           <form onSubmit={handleSubmit} className="p-4 sm:p-6 overflow-y-auto flex-grow space-y-4 text-slate-200">
-            {submitSuccessMsg && (
+            {actionNotice && (
+              <div className="p-3.5 rounded-2xl bg-emerald-950/80 border border-emerald-500/50 flex items-center justify-between gap-3 text-emerald-300 text-xs font-semibold animate-in fade-in">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  <span>{actionNotice}</span>
+                </div>
+                <button 
+                  type="button" 
+                  onClick={() => setActionNotice(null)}
+                  className="text-emerald-400 hover:text-white"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
+
+            {editingId && (
+              <div className="p-4 rounded-2xl bg-amber-950/60 border border-amber-500/50 flex items-center justify-between gap-3 animate-in fade-in">
+                <div className="flex items-center gap-2.5">
+                  <Edit3 className="w-5 h-5 text-amber-400 flex-shrink-0" />
+                  <div>
+                    <h4 className="text-xs sm:text-sm font-bold text-amber-300">
+                      กำลังอยู่ในโหมดแก้ไขข้อมูลการใช้แหล่งเรียนรู้
+                    </h4>
+                    <p className="text-[11px] text-amber-200/70">
+                      ปรับแก้ข้อมูลแล้วกดปุ่ม "บันทึกการแก้ไข" ด้านล่าง
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCancelEdit}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors"
+                >
+                  ยกเลิกการแก้ไข
+                </button>
+              </div>
+            )}
+
+            {submitSuccessMsg && !editingId && (
               <div className="p-3.5 rounded-2xl bg-emerald-950/70 border border-emerald-500/50 flex items-center gap-2.5 text-emerald-300 text-xs sm:text-sm animate-in fade-in">
                 <CheckCircle2 className="w-5 h-5 text-emerald-400 flex-shrink-0" />
                 <span>{submitSuccessMsg}</span>
@@ -530,10 +643,20 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                 <button
                   type="submit"
                   disabled={isSubmitting}
-                  className="px-6 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs sm:text-sm font-bold flex items-center gap-2 shadow-lg shadow-emerald-600/30 transition-all disabled:opacity-50"
+                  className={`px-6 py-2.5 rounded-xl text-white text-xs sm:text-sm font-bold flex items-center gap-2 shadow-lg transition-all disabled:opacity-50 ${
+                    editingId 
+                      ? 'bg-amber-600 hover:bg-amber-500 shadow-amber-600/30' 
+                      : 'bg-emerald-600 hover:bg-emerald-500 shadow-emerald-600/30'
+                  }`}
                 >
                   <UploadCloud className="w-4 h-4" />
-                  <span>{isSubmitting ? 'กำลังบันทึกลงฐานข้อมูล...' : 'บันทึกข้อมูลการใช้งาน'}</span>
+                  <span>
+                    {isSubmitting 
+                      ? 'กำลังบันทึก...' 
+                      : editingId 
+                        ? 'บันทึกการแก้ไขข้อมูล' 
+                        : 'บันทึกข้อมูลการใช้งาน'}
+                  </span>
                 </button>
               </div>
             </div>
@@ -547,33 +670,60 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
               <div>
                 <h4 className="text-sm font-bold text-white flex items-center gap-2">
                   <User className="w-4 h-4 text-emerald-400" />
-                  ตรวจสอบสถานะการบันทึกของ: <span className="text-emerald-300">{userEmail}</span>
+                  <span>
+                    {isAdmin && showAllUsersForAdmin
+                      ? 'บันทึกการใช้แหล่งเรียนรู้ของคุณครูทุกคน (สิทธิ์ Admin)'
+                      : `ตรวจสอบสถานะการบันทึกของ: ${userEmail}`}
+                  </span>
+                  {isAdmin && (
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
+                      Admin Mode
+                    </span>
+                  )}
                 </h4>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  พบข้อมูลทั้งหมด {userSubmissions.length} รายการ (อัปเดตแบบเรียลไทม์จาก System Test)
+                  พบข้อมูลทั้งหมด {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length} รายการ (อัปเดตแบบเรียลไทม์จาก System Test)
                 </p>
               </div>
 
-              <button
-                type="button"
-                onClick={() => setActiveTab('form')}
-                className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 self-start sm:self-center transition-colors"
-              >
-                <UploadCloud className="w-3.5 h-3.5" />
-                บันทึกรายการใหม่
-              </button>
+              <div className="flex items-center gap-2 flex-wrap">
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setShowAllUsersForAdmin(!showAllUsersForAdmin)}
+                    className="px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-amber-300 text-xs font-semibold border border-amber-500/40 transition-colors"
+                  >
+                    {showAllUsersForAdmin ? 'แสดงเฉพาะของฉัน' : 'แสดงของทุกคน (Admin)'}
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingId(null);
+                    setActiveTab('form');
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 self-start sm:self-center transition-colors"
+                >
+                  <UploadCloud className="w-3.5 h-3.5" />
+                  บันทึกรายการใหม่
+                </button>
+              </div>
             </div>
 
-            {userSubmissions.length === 0 ? (
+            {((isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length === 0) ? (
               <div className="text-center py-12 rounded-2xl bg-slate-950/40 border border-slate-800">
                 <Clock className="w-10 h-10 text-slate-600 mx-auto mb-2" />
-                <h5 className="text-sm font-bold text-slate-300">ยังไม่พบข้อมูลการส่งสำหรับอีเมลนี้</h5>
+                <h5 className="text-sm font-bold text-slate-300">ยังไม่พบข้อมูลการส่ง</h5>
                 <p className="text-xs text-slate-500 mt-1 max-w-sm mx-auto">
                   เมื่อท่านกรอกแบบฟอร์มส่งข้อมูล รายการสถานะและวันเวลาที่ส่งจะปรากฏที่นี่ทันที
                 </p>
                 <button
                   type="button"
-                  onClick={() => setActiveTab('form')}
+                  onClick={() => {
+                    setEditingId(null);
+                    setActiveTab('form');
+                  }}
                   className="mt-4 px-4 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-500 transition-colors"
                 >
                   เริ่มกรอกแบบฟอร์ม
@@ -581,21 +731,26 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
               </div>
             ) : (
               <div className="space-y-3">
-                {userSubmissions.map((sub, idx) => (
+                {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).map((sub, idx) => (
                   <div
                     key={sub.id}
                     className="p-4 rounded-2xl bg-slate-800/90 border border-slate-700 hover:border-emerald-500/40 transition-all flex flex-col md:flex-row md:items-center justify-between gap-4"
                   >
-                    <div className="flex items-start gap-3">
+                    <div className="flex items-start gap-3 flex-1 min-w-0">
                       <span className="w-7 h-7 rounded-full bg-emerald-600 text-white text-xs font-bold flex items-center justify-center flex-shrink-0 mt-0.5">
                         {idx + 1}
                       </span>
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 flex-wrap">
-                          <h5 className="text-sm font-bold text-white">{sub.learningCenter}</h5>
+                          <h5 className="text-sm font-bold text-white truncate">{sub.learningCenter}</h5>
                           <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/30">
                             {sub.subjectGroup}
                           </span>
+                          {isAdmin && sub.userEmail !== userEmail && (
+                            <span className="text-[10px] px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                              ผู้ส่ง: {sub.userEmail}
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-slate-300 mt-1">
                           ครูผู้สอน: <strong>{sub.teacherName}</strong> • คาบ: {sub.periods.join(', ')}
@@ -611,18 +766,43 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                       </div>
                     </div>
 
-                    <div className="flex flex-col sm:flex-row items-end sm:items-center gap-3">
+                    <div className="flex items-center gap-2 self-end md:self-center flex-shrink-0">
                       {sub.imageUrl && (
                         <a
                           href={sub.imageUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="flex items-center gap-1 text-xs text-blue-400 hover:underline"
+                          className="flex items-center gap-1 text-xs text-blue-400 hover:underline px-2 py-1"
                         >
                           <ImageIcon className="w-3.5 h-3.5" />
-                          ดูรูปภาพ
+                          ดูรูป
                         </a>
                       )}
+                      
+                      {canUserModify(sub.userEmail, userEmail) && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(sub)}
+                            className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                            title="แก้ไขข้อมูล"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>แก้ไข</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(sub)}
+                            className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                            title="ลบข้อมูล"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>ลบ</span>
+                          </button>
+                        </>
+                      )}
+
                       <span className="px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5">
                         <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
                         {sub.status}
@@ -704,6 +884,7 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                     <th className="p-3 font-semibold">การตอบกลับ</th>
                     <th className="p-3 font-semibold">อีเมลผู้ส่ง</th>
                     <th className="p-3 font-semibold">สถานะ</th>
+                    {isAdmin && <th className="p-3 font-semibold text-center text-amber-300">จัดการ (Admin)</th>}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800">
@@ -725,6 +906,28 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                           {row.status}
                         </span>
                       </td>
+                      {isAdmin && (
+                        <td className="p-3 whitespace-nowrap text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleStartEdit(row)}
+                              className="p-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30"
+                              title="Admin: แก้ไขบันทึกนี้"
+                            >
+                              <Edit3 className="w-3 h-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDelete(row)}
+                              className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                              title="Admin: ลบบันทึกนี้"
+                            >
+                              <Trash2 className="w-3 h-3" />
+                            </button>
+                          </div>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   Lightbulb, 
@@ -11,23 +11,52 @@ import {
   Plus, 
   Tag, 
   Bookmark,
-  CheckCircle2
+  CheckCircle2,
+  Edit3,
+  Trash2,
+  Lock
 } from 'lucide-react';
 import { IDEA_RESOURCES, IDEA_CATEGORIES, IdeaResource } from '../data/ideaResources';
+import { 
+  subscribeSharedIdeas, 
+  saveSharedIdea, 
+  updateSharedIdea, 
+  deleteSharedIdea, 
+  canUserModify,
+  SharedIdeaItem,
+  ADMIN_TARGET_EMAIL
+} from '../services/submissionService';
 
 interface IdeaBankModalProps {
+  userEmail?: string;
   onClose: () => void;
 }
 
-export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ onClose }) => {
+export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', onClose }) => {
   const [selectedCat, setSelectedCat] = useState<string>('all');
   const [searchQuery, setSearchQuery] = useState('');
-  const [customIdeas, setCustomIdeas] = useState<IdeaResource[]>([]);
+  const [firestoreIdeas, setFirestoreIdeas] = useState<SharedIdeaItem[]>([]);
   const [isAddingIdea, setIsAddingIdea] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [newDesc, setNewDesc] = useState('');
   const [newUrl, setNewUrl] = useState('');
   const [newCategory, setNewCategory] = useState<'canva_ai' | 'education' | 'research' | 'exams' | 'facebook'>('canva_ai');
+  
+  // Edit State
+  const [editingIdea, setEditingIdea] = useState<SharedIdeaItem | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [editUrl, setEditUrl] = useState('');
+  const [editCategory, setEditCategory] = useState<'canva_ai' | 'education' | 'research' | 'exams' | 'facebook'>('canva_ai');
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
+
+  // Subscribe to real-time shared ideas
+  useEffect(() => {
+    const unsubscribe = subscribeSharedIdeas((ideas) => {
+      setFirestoreIdeas(ideas);
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Dynamic Thai Date for Daily Update Indicator
   const todayThai = new Date().toLocaleDateString('th-TH', {
@@ -37,7 +66,20 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ onClose }) => {
     day: 'numeric',
   });
 
-  const allList = [...customIdeas, ...IDEA_RESOURCES];
+  // Convert Firestore ideas to IdeaResource format
+  const firestoreIdeaResources: IdeaResource[] = firestoreIdeas.map((f) => ({
+    id: f.id,
+    category: f.category as any,
+    categoryLabel: f.categoryLabel,
+    title: f.title,
+    description: f.description,
+    url: f.url || '#',
+    tags: f.tags || ['ไอเดียใหม่'],
+    recommendedBadge: 'ไอเดียแบ่งปัน',
+    featuredDaily: true,
+  }));
+
+  const allList = [...firestoreIdeaResources, ...IDEA_RESOURCES];
 
   const filtered = allList.filter((item) => {
     const matchesCat = selectedCat === 'all' || item.category === selectedCat;
@@ -48,28 +90,102 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ onClose }) => {
     return matchesCat && matchesSearch;
   });
 
-  const handleAddCustomIdea = (e: React.FormEvent) => {
+  const handleAddCustomIdea = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
 
     const catObj = IDEA_CATEGORIES.find(c => c.id === newCategory);
-    const newRecord: IdeaResource = {
-      id: `custom_${Date.now()}`,
+    const catLabel = catObj?.label.replace(/^[^\s]+\s*/, '') || 'ไอเดียครู';
+
+    const res = await saveSharedIdea({
       category: newCategory,
-      categoryLabel: catObj?.label.replace(/^[^\s]+\s*/, '') || 'ไอเดียครู',
+      categoryLabel: catLabel,
       title: newTitle.trim(),
       description: newDesc.trim() || 'ไอเดียการจัดการเรียนรู้แบ่งปันโดยคณะครู ACU',
       url: newUrl.trim().startsWith('http') ? newUrl.trim() : (newUrl.trim() ? `https://${newUrl.trim()}` : '#'),
       tags: ['ไอเดียใหม่', 'แบ่งปันโดยครู'],
-      recommendedBadge: 'ไอเดียใหม่วันนี้',
-      featuredDaily: true,
-    };
+      creatorEmail: userEmail || 'anonymous',
+      creatorName: userEmail ? userEmail.split('@')[0] : 'ครู ACU',
+    });
 
-    setCustomIdeas(prev => [newRecord, ...prev]);
-    setNewTitle('');
-    setNewDesc('');
-    setNewUrl('');
-    setIsAddingIdea(false);
+    if (res.success) {
+      setActionNotice('เพิ่มไอเดียการเรียนรู้ใหม่เรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 3000);
+      setNewTitle('');
+      setNewDesc('');
+      setNewUrl('');
+      setIsAddingIdea(false);
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกไอเดีย');
+    }
+  };
+
+  const handleOpenEdit = (item: IdeaResource) => {
+    const raw = firestoreIdeas.find(f => f.id === item.id);
+    if (!raw) {
+      alert('รายการนี้เป็นข้อมูลระบบมาตรฐาน ไม่สามารถแก้ไขได้');
+      return;
+    }
+    if (!canUserModify(raw.creatorEmail, userEmail)) {
+      alert('เฉพาะผู้สร้างไอเดียนี้ หรือ Admin เท่านั้นที่สามารถแก้ไขได้');
+      return;
+    }
+    setEditingIdea(raw);
+    setEditTitle(raw.title);
+    setEditDesc(raw.description);
+    setEditUrl(raw.url || '');
+    setEditCategory((raw.category as any) || 'canva_ai');
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingIdea || !editTitle.trim()) return;
+
+    const catObj = IDEA_CATEGORIES.find(c => c.id === editCategory);
+    const catLabel = catObj?.label.replace(/^[^\s]+\s*/, '') || 'ไอเดียครู';
+
+    const res = await updateSharedIdea(
+      editingIdea.id,
+      {
+        title: editTitle.trim(),
+        description: editDesc.trim(),
+        url: editUrl.trim().startsWith('http') ? editUrl.trim() : (editUrl.trim() ? `https://${editUrl.trim()}` : '#'),
+        category: editCategory,
+        categoryLabel: catLabel,
+      },
+      userEmail
+    );
+
+    if (res.success) {
+      setActionNotice('แก้ไขข้อมูลไอเดียเรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 3000);
+      setEditingIdea(null);
+    } else {
+      alert(res.error || 'ไม่สามารถแก้ไขได้');
+    }
+  };
+
+  const handleDeleteIdea = async (item: IdeaResource) => {
+    const raw = firestoreIdeas.find(f => f.id === item.id);
+    if (!raw) {
+      alert('รายการนี้เป็นข้อมูลระบบมาตรฐาน ไม่สามารถลบได้');
+      return;
+    }
+    if (!canUserModify(raw.creatorEmail, userEmail)) {
+      alert('เฉพาะผู้สร้างไอเดียนี้ หรือ Admin เท่านั้นที่สามารถลบได้');
+      return;
+    }
+    if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบไอเดีย "${item.title}"?`)) {
+      return;
+    }
+
+    const res = await deleteSharedIdea(raw.id, userEmail);
+    if (res.success) {
+      setActionNotice('ลบไอเดียเรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 3000);
+    } else {
+      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+    }
   };
 
   return (
@@ -120,6 +236,107 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ onClose }) => {
             </button>
           </div>
         </div>
+
+        {/* Action notice toast */}
+        {actionNotice && (
+          <div className="mx-4 mt-3 p-3 rounded-2xl bg-emerald-950/90 border border-emerald-500/50 flex items-center justify-between text-emerald-300 text-xs font-semibold animate-in fade-in">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+              <span>{actionNotice}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setActionNotice(null)}
+              className="text-emerald-400 hover:text-white"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
+        {/* Edit Modal Popup */}
+        {editingIdea && (
+          <div className="absolute inset-0 z-30 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4">
+            <form onSubmit={handleSaveEdit} className="w-full max-w-lg bg-slate-900 border border-amber-500/50 rounded-2xl p-5 shadow-2xl space-y-4 animate-in zoom-in-95">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <div className="flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-amber-400" />
+                  <h4 className="text-sm font-bold text-white">แก้ไขไอเดียการจัดการเรียนรู้</h4>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingIdea(null)}
+                  className="w-7 h-7 rounded-full bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">ชื่อไอเดีย / หัวข้อ</label>
+                <input
+                  type="text"
+                  required
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs focus:outline-hidden focus:border-amber-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="text-xs text-slate-300 block mb-1">หมวดหมู่</label>
+                  <select
+                    value={editCategory}
+                    onChange={(e) => setEditCategory(e.target.value as any)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs focus:outline-hidden focus:border-amber-500"
+                  >
+                    <option value="canva_ai">🎨 การทำสื่อด้วย Canva & AI</option>
+                    <option value="education">🌐 เว็บไซต์การศึกษา</option>
+                    <option value="research">📚 วิจัย & บทความวิชาการ</option>
+                    <option value="exams">📝 คลังข้อสอบ & การประเมิน</option>
+                    <option value="facebook">👥 เพจเฟซบุ๊กครูยอดนิยม</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs text-slate-300 block mb-1">ลิงก์ URL</label>
+                  <input
+                    type="text"
+                    value={editUrl}
+                    onChange={(e) => setEditUrl(e.target.value)}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs focus:outline-hidden focus:border-amber-500"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-slate-300 block mb-1">คำอธิบาย</label>
+                <textarea
+                  rows={3}
+                  value={editDesc}
+                  onChange={(e) => setEditDesc(e.target.value)}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs focus:outline-hidden focus:border-amber-500"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingIdea(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold"
+                >
+                  บันทึกการแก้ไข
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
 
         {/* Add Idea Accordion */}
         {isAddingIdea && (
@@ -256,11 +473,46 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ onClose }) => {
               </div>
 
               {/* Action */}
-              <div className="mt-4 pt-3 border-t border-slate-700/80 flex items-center justify-between">
-                <span className="text-[11px] text-slate-500 flex items-center gap-1">
-                  <Bookmark className="w-3 h-3 text-amber-400" />
-                  แหล่งข้อมูลสากล
-                </span>
+              <div className="mt-4 pt-3 border-t border-slate-700/80 flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1">
+                  {(() => {
+                    const raw = firestoreIdeas.find(f => f.id === item.id);
+                    const canEdit = raw ? canUserModify(raw.creatorEmail, userEmail) : false;
+                    
+                    if (raw && canEdit) {
+                      return (
+                        <div className="flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEdit(item)}
+                            className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-[11px] font-medium flex items-center gap-1 transition-colors"
+                            title="แก้ไขไอเดีย"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                            <span>แก้ไข</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteIdea(item)}
+                            className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-[11px] font-medium flex items-center gap-1 transition-colors"
+                            title="ลบไอเดีย"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                            <span>ลบ</span>
+                          </button>
+                        </div>
+                      );
+                    }
+
+                    return (
+                      <span className="text-[11px] text-slate-500 flex items-center gap-1">
+                        <Bookmark className="w-3 h-3 text-amber-400" />
+                        {raw ? 'ไอเดียครู ACU' : 'แหล่งข้อมูลสากล'}
+                      </span>
+                    );
+                  })()}
+                </div>
+
                 <a
                   href={item.url}
                   target="_blank"

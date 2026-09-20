@@ -168,7 +168,22 @@ export interface TeacherMediaWork {
   ratingCount: number;
   views: number;
   userRatings?: { [emailKey: string]: number };
+  submittedByEmail?: string;
   createdAt: string;
+}
+
+/**
+ * Check if the user has permission to modify/delete a resource.
+ * Admin (weerapong1625@acu.ac.th) can modify all resources from everyone.
+ * Individual teachers can only modify their own resources.
+ */
+export function canUserModify(targetOwnerEmail?: string, currentUserEmail?: string): boolean {
+  if (!currentUserEmail) return false;
+  const current = currentUserEmail.trim().toLowerCase();
+  const admin = ADMIN_TARGET_EMAIL.toLowerCase();
+  if (current === admin) return true;
+  if (!targetOwnerEmail) return false;
+  return targetOwnerEmail.trim().toLowerCase() === current;
 }
 
 // =========================================================================
@@ -247,6 +262,7 @@ export async function saveInnovationSubmission(data: {
         ratingAvg: 5.0,
         ratingCount: 1,
         views: 1,
+        submittedByEmail: data.userEmail.trim(),
         createdAt: nowIso,
       };
       const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
@@ -257,6 +273,119 @@ export async function saveInnovationSubmission(data: {
   } catch (error: any) {
     console.error('Error saving innovation submission:', error);
     return { success: false, id: '', error: error.message || 'บันทึกข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Update an existing innovation submission.
+ * Admin can update any submission; teachers can only update their own.
+ */
+export async function updateInnovationSubmission(
+  id: string,
+  updates: Partial<InnovationSubmission>,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, INNOVATIONS_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการที่ต้องการแก้ไข' };
+    }
+    const currentData = snap.data() as InnovationSubmission;
+
+    if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
+    }
+
+    const payload = {
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await updateDoc(docRef, payload);
+
+    // Sync update to system test doc
+    try {
+      const sysRef = doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`);
+      await updateDoc(sysRef, payload);
+    } catch {
+      // ignore
+    }
+
+    // If there is a corresponding media item in teacher media repository, update it as well
+    try {
+      const mediaDocId = `work_${id}`;
+      const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
+      const mediaSnap = await getDoc(mediaRef);
+      if (mediaSnap.exists()) {
+        const mediaUpdate: Partial<TeacherMediaWork> = {};
+        if (updates.mediaTitle) mediaUpdate.title = updates.mediaTitle;
+        if (updates.imageUrl) mediaUpdate.thumbnailUrl = updates.imageUrl;
+        if (updates.onlineUrl !== undefined) mediaUpdate.onlineUrl = updates.onlineUrl;
+        if (updates.mediaType) mediaUpdate.mediaType = updates.mediaType;
+        if (updates.gradeLevel) {
+          mediaUpdate.gradeLevel = updates.gradeLevel;
+          mediaUpdate.subjectGroup = updates.gradeLevel;
+        }
+        if (updates.usageDetails) {
+          mediaUpdate.description = `นำไปใช้: ${updates.usageDetails} | ประเภท: ${updates.mediaType || currentData.mediaType}`;
+        }
+        await updateDoc(mediaRef, mediaUpdate);
+      }
+    } catch {
+      // ignore
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error updating innovation submission:', err);
+    return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Delete an innovation submission.
+ * Admin can delete any submission; teachers can only delete their own.
+ */
+export async function deleteInnovationSubmission(
+  id: string,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, INNOVATIONS_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการที่ต้องการลบ' };
+    }
+    const currentData = snap.data() as InnovationSubmission;
+
+    if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
+    }
+
+    await deleteDoc(docRef);
+
+    // Also delete from system_test_submissions
+    try {
+      const sysRef = doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`);
+      await deleteDoc(sysRef);
+    } catch {
+      // ignore
+    }
+
+    // Also delete from teacher_media_repository if present
+    try {
+      const mediaDocId = `work_${id}`;
+      const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
+      await deleteDoc(mediaRef);
+    } catch {
+      // ignore
+    }
+
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error deleting innovation submission:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
 }
 
@@ -427,6 +556,66 @@ export async function saveFacilitySubmission(data: {
   } catch (error: any) {
     console.error('Error saving facility submission to Firestore:', error);
     return { success: false, id: '', error: error.message || 'บันทึกข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Update an existing facility usage submission.
+ * Admin can update any; teachers can only update their own.
+ */
+export async function updateFacilitySubmission(
+  id: string,
+  updates: Partial<FacilitySubmission>,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, SYSTEM_TEST_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการที่ต้องการแก้ไข' };
+    }
+    const currentData = snap.data() as FacilitySubmission;
+
+    if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขข้อมูลของผู้อื่น (เฉพาะเจ้าของหรือ Admin)' };
+    }
+
+    await updateDoc(docRef, {
+      ...updates,
+      updatedAt: new Date().toISOString(),
+    });
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error updating facility submission:', err);
+    return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Delete a facility usage submission.
+ * Admin can delete any; teachers can only delete their own.
+ */
+export async function deleteFacilitySubmission(
+  id: string,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, SYSTEM_TEST_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการที่ต้องการลบ' };
+    }
+    const currentData = snap.data() as FacilitySubmission;
+
+    if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์ลบข้อมูลของผู้อื่น (เฉพาะเจ้าของหรือ Admin)' };
+    }
+
+    await deleteDoc(docRef);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error deleting facility submission:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
 }
 
@@ -647,7 +836,7 @@ export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [
 ];
 
 /**
- * Subscribe to Teacher Media Repository with live updates
+ * Subscribe to Teacher Media Repository with live updates (Displays 5 items as requested)
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
@@ -668,18 +857,371 @@ export function subscribeTeacherMedia(
         liveList.forEach((w) => mergedMap.set(w.id, w));
 
         const finalWorks = Array.from(mergedMap.values());
-        callback(finalWorks);
+        // Sort newest first so real teacher submissions appear at the top
+        finalWorks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        // Show 5 items as strictly requested
+        callback(finalWorks.slice(0, 5));
       },
       (err) => {
         console.warn('subscribeTeacherMedia fallback to initial:', err);
-        callback(INITIAL_TEACHER_WORKS);
+        callback(INITIAL_TEACHER_WORKS.slice(0, 5));
       }
     );
     return unsubscribe;
   } catch (err) {
     console.error('subscribeTeacherMedia failed:', err);
-    callback(INITIAL_TEACHER_WORKS);
+    callback(INITIAL_TEACHER_WORKS.slice(0, 5));
     return () => {};
+  }
+}
+
+/**
+ * Update teacher's media item.
+ * Admin can update any; creator can update their own.
+ */
+export async function updateTeacherMedia(
+  id: string,
+  updates: Partial<TeacherMediaWork>,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการสื่อที่ต้องการแก้ไข' };
+    }
+    const currentData = snap.data() as TeacherMediaWork;
+
+    if (!canUserModify(currentData.submittedByEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
+    }
+
+    await updateDoc(docRef, updates);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error updating teacher media:', err);
+    return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Delete teacher's media item.
+ * Admin can delete any; creator can delete their own.
+ */
+export async function deleteTeacherMedia(
+  id: string,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการสื่อที่ต้องการลบ' };
+    }
+    const currentData = snap.data() as TeacherMediaWork;
+
+    if (!canUserModify(currentData.submittedByEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์ลบสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
+    }
+
+    await deleteDoc(docRef);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error deleting teacher media:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
+  }
+}
+
+// =========================================================================
+// 3.5 คลังไอเดีย (Shared Idea Bank) - Firestore Sync, User Ratings, Admin Oversight
+// =========================================================================
+
+export interface SharedIdeaItem {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  categoryLabel: string;
+  url?: string;
+  tags: string[];
+  creatorEmail: string;
+  creatorName: string;
+  createdAt: string;
+  ratingAvg: number;
+  ratingCount: number;
+  userRatings?: { [emailKey: string]: number }; // tracks who gave what rating!
+}
+
+const SHARED_IDEAS_COLLECTION = 'shared_ideas';
+
+const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
+  {
+    id: 'idea-seed-1',
+    title: 'Canva Magic Studio สำหรับครูยุค AI',
+    description: 'เทคนิคการใช้ AI ใน Canva เจนเนอเรทสไลด์สอน สรุปเนื้อหา และสร้างภาพประกอบบทเรียนอย่างรวดเร็ว',
+    category: 'canva_ai',
+    categoryLabel: 'Canva AI',
+    url: 'https://www.canva.com/education/',
+    tags: ['Canva', 'AI', 'การสร้างสื่อ'],
+    creatorEmail: ADMIN_TARGET_EMAIL,
+    creatorName: 'ม.วีระพงศ์ คำสอน',
+    createdAt: '2026-03-01T08:00:00.000Z',
+    ratingAvg: 5.0,
+    ratingCount: 12,
+    userRatings: { 'weerapong1625_acu_ac_th': 5 },
+  },
+  {
+    id: 'idea-seed-2',
+    title: 'คลังข้อสอบและแนวทาง O-NET / NT สพฐ.',
+    description: 'รวมแบบทดสอบวัดผลสัมฤทธิ์ทางการศึกษา และคลังข้อสอบมาตรฐานพร้อมเฉลยละเอียด',
+    category: 'exams',
+    categoryLabel: 'คลังข้อสอบ',
+    url: 'https://www.niets.or.th',
+    tags: ['ข้อสอบ', 'O-NET', 'วัดผล'],
+    creatorEmail: ADMIN_TARGET_EMAIL,
+    creatorName: 'ม.วีระพงศ์ คำสอน',
+    createdAt: '2026-03-02T09:00:00.000Z',
+    ratingAvg: 4.8,
+    ratingCount: 9,
+    userRatings: { 'weerapong1625_acu_ac_th': 5 },
+  },
+  {
+    id: 'idea-seed-3',
+    title: 'ฐานข้อมูลงานวิจัยในชั้นเรียน TCI & ThaiLIS',
+    description: 'สืบค้นงานวิจัยทางการศึกษา นวัตกรรมการจัดการเรียนรู้ และบทความทางวิชาการ',
+    category: 'research',
+    categoryLabel: 'วิจัยในชั้นเรียน',
+    url: 'https://tdc.thailis.or.th',
+    tags: ['งานวิจัย', 'R&D', 'วิชาการ'],
+    creatorEmail: ADMIN_TARGET_EMAIL,
+    creatorName: 'ม.วีระพงศ์ คำสอน',
+    createdAt: '2026-03-03T10:00:00.000Z',
+    ratingAvg: 4.9,
+    ratingCount: 15,
+    userRatings: { 'weerapong1625_acu_ac_th': 5 },
+  },
+  {
+    id: 'idea-seed-4',
+    title: 'เพจครูแชร์สื่อ & ชุมชนการเรียนรู้วิชาชีพ (PLC)',
+    description: 'รวมกลุ่มและเพจยอดนิยมที่แบ่งปันใบงาน สื่อการสอน PowerPoint และแผนการจัดการเรียนรู้',
+    category: 'facebook',
+    categoryLabel: 'เพจเฟซบุ๊กเพื่อการศึกษา',
+    url: 'https://www.facebook.com',
+    tags: ['PLC', 'ชุมชนครู', 'แชร์สื่อ'],
+    creatorEmail: ADMIN_TARGET_EMAIL,
+    creatorName: 'ม.วีระพงศ์ คำสอน',
+    createdAt: '2026-03-04T11:00:00.000Z',
+    ratingAvg: 4.7,
+    ratingCount: 8,
+    userRatings: { 'weerapong1625_acu_ac_th': 5 },
+  },
+];
+
+/**
+ * Subscribe to Shared Ideas in real time
+ */
+export function subscribeSharedIdeas(
+  callback: (ideas: SharedIdeaItem[]) => void
+): () => void {
+  try {
+    const colRef = collection(db, SHARED_IDEAS_COLLECTION);
+    const unsubscribe = onSnapshot(
+      colRef,
+      (snapshot) => {
+        const liveList: SharedIdeaItem[] = [];
+        snapshot.forEach((docSnap) => {
+          liveList.push(docSnap.data() as SharedIdeaItem);
+        });
+
+        // Merge default seeds if not present
+        const mergedMap = new Map<string, SharedIdeaItem>();
+        DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+        liveList.forEach((i) => mergedMap.set(i.id, i));
+
+        const finalIdeas = Array.from(mergedMap.values());
+        finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+        callback(finalIdeas);
+      },
+      (err) => {
+        console.warn('subscribeSharedIdeas fallback to seed:', err);
+        callback(DEFAULT_SEED_IDEAS);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.error('subscribeSharedIdeas failed:', err);
+    callback(DEFAULT_SEED_IDEAS);
+    return () => {};
+  }
+}
+
+/**
+ * Save a new shared idea from any teacher
+ */
+export async function saveSharedIdea(data: {
+  title: string;
+  description: string;
+  category: string;
+  categoryLabel: string;
+  url?: string;
+  tags?: string[];
+  creatorEmail: string;
+  creatorName: string;
+}): Promise<{ success: boolean; id: string; error?: string }> {
+  try {
+    const id = `idea_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const nowIso = new Date().toISOString();
+
+    const payload: SharedIdeaItem = {
+      id,
+      title: data.title.trim(),
+      description: data.description.trim(),
+      category: data.category,
+      categoryLabel: data.categoryLabel,
+      url: data.url?.trim() || '',
+      tags: data.tags && data.tags.length > 0 ? data.tags : ['ไอเดียใหม่', 'แบ่งปันโดยครู ACU'],
+      creatorEmail: data.creatorEmail.trim(),
+      creatorName: data.creatorName.trim() || data.creatorEmail,
+      createdAt: nowIso,
+      ratingAvg: 5.0,
+      ratingCount: 1,
+      userRatings: {
+        [data.creatorEmail.replace(/[^a-zA-Z0-9]/g, '_')]: 5,
+      },
+    };
+
+    const docRef = doc(db, SHARED_IDEAS_COLLECTION, id);
+    await setDoc(docRef, payload);
+    return { success: true, id };
+  } catch (err: any) {
+    console.error('Error saving shared idea:', err);
+    return { success: false, id: '', error: err.message || 'บันทึกไอเดียไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Rate a shared idea (1-5 stars).
+ * Updates each user's rating in userRatings map and recalculates average.
+ */
+export async function rateSharedIdea(
+  ideaId: string,
+  stars: number,
+  userEmail: string
+): Promise<boolean> {
+  try {
+    const safeEmailKey = (userEmail || 'anonymous').replace(/[^a-zA-Z0-9]/g, '_');
+    const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
+    const snap = await getDoc(docRef);
+
+    if (snap.exists()) {
+      const data = snap.data() as SharedIdeaItem;
+      const userRatings = data.userRatings || {};
+      userRatings[safeEmailKey] = stars;
+
+      const ratingValues = Object.values(userRatings) as number[];
+      const count = ratingValues.length;
+      const sum = ratingValues.reduce((a, b) => a + b, 0);
+      const avg = Number((sum / count).toFixed(1));
+
+      await updateDoc(docRef, {
+        ratingAvg: avg,
+        ratingCount: count,
+        userRatings,
+      });
+      return true;
+    } else {
+      // Seed item being rated for the first time
+      const seed = DEFAULT_SEED_IDEAS.find((s) => s.id === ideaId);
+      const initialRatings: { [key: string]: number } = seed?.userRatings || {};
+      initialRatings[safeEmailKey] = stars;
+
+      const ratingValues = Object.values(initialRatings) as number[];
+      const count = ratingValues.length;
+      const sum = ratingValues.reduce((a, b) => a + b, 0);
+      const avg = Number((sum / count).toFixed(1));
+
+      await setDoc(docRef, {
+        ...(seed || {
+          id: ideaId,
+          title: 'ไอเดียการจัดการเรียนรู้',
+          description: '',
+          category: 'education',
+          categoryLabel: 'การศึกษา',
+          tags: ['ไอเดีย'],
+          creatorEmail: ADMIN_TARGET_EMAIL,
+          creatorName: 'ม.วีระพงศ์ คำสอน',
+          createdAt: new Date().toISOString(),
+        }),
+        ratingAvg: avg,
+        ratingCount: count,
+        userRatings: initialRatings,
+      });
+      return true;
+    }
+  } catch (err) {
+    console.error('Failed to rate shared idea:', err);
+    return false;
+  }
+}
+
+/**
+ * Delete a shared idea.
+ * Admin can delete any idea; teachers can only delete ideas they created.
+ */
+export async function deleteSharedIdea(
+  ideaId: string,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      // Might be a local seed, check if admin
+      if (currentUserEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
+        return { success: true };
+      }
+      return { success: false, error: 'ไม่พบรายการไอเดียที่ต้องการลบ' };
+    }
+    const currentData = snap.data() as SharedIdeaItem;
+
+    if (!canUserModify(currentData.creatorEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์ลบไอเดียของผู้อื่น (เฉพาะผู้สร้างไอเดีย หรือ Admin)' };
+    }
+
+    await deleteDoc(docRef);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error deleting shared idea:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Update a shared idea.
+ * Admin can update any; creator can update their own.
+ */
+export async function updateSharedIdea(
+  ideaId: string,
+  updates: Partial<SharedIdeaItem>,
+  currentUserEmail: string
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
+    const snap = await getDoc(docRef);
+    if (!snap.exists()) {
+      return { success: false, error: 'ไม่พบรายการไอเดียที่ต้องการแก้ไข' };
+    }
+    const currentData = snap.data() as SharedIdeaItem;
+
+    if (!canUserModify(currentData.creatorEmail, currentUserEmail)) {
+      return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขไอเดียของผู้อื่น (เฉพาะผู้สร้างไอเดีย หรือ Admin)' };
+    }
+
+    await updateDoc(docRef, updates);
+    return { success: true };
+  } catch (err: any) {
+    console.error('Error updating shared idea:', err);
+    return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
   }
 }
 

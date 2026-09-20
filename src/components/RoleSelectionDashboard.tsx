@@ -50,7 +50,9 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [selectedRole, setSelectedRole] = useState<'teacher' | 'student' | 'admin' | null>(null);
   const [dbStatus, setDbStatus] = useState<'saving' | 'saved' | 'idle'>('idle');
   const [showSystemTestModal, setShowSystemTestModal] = useState(false);
-  const [showAdminAccessDeniedModal, setShowAdminAccessDeniedModal] = useState(false);
+  const [showAdminPasswordModal, setShowAdminPasswordModal] = useState(false);
+  const [adminPasswordInput, setAdminPasswordInput] = useState('');
+  const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
   const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'content'>('overview');
@@ -174,10 +176,20 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   };
 
   const handleOpenAdminPortal = () => {
-    if (userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()) {
+    setAdminPasswordInput('');
+    setAdminPasswordError(null);
+    setShowAdminPasswordModal(true);
+  };
+
+  const handleVerifyAdminPassword = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (adminPasswordInput.trim() === '7825') {
+      setShowAdminPasswordModal(false);
+      setAdminPasswordInput('');
+      setAdminPasswordError(null);
       setSelectedRole('admin');
     } else {
-      setShowAdminAccessDeniedModal(true);
+      setAdminPasswordError('รหัสผ่านความปลอดภัยไม่ถูกต้อง ไม่อนุญาตให้เข้าถึงระบบ Admin');
     }
   };
 
@@ -185,7 +197,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   if (selectedRole === 'admin') {
     return (
       <AdminDashboard
-        userEmail={userEmail}
+        userEmail={SUPER_ADMIN_EMAIL}
         onBack={() => setSelectedRole(null)}
       />
     );
@@ -395,22 +407,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
 
             <button
               type="button"
-              id="btn-open-system-test"
-              onClick={handleOpenSystemTest}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/35 border border-blue-400/30 text-blue-200 text-xs font-medium transition-all shadow-xs hover:border-blue-300"
-              title="ดูฐานข้อมูล Firebase (System Test)"
-            >
-              <Database className="w-3.5 h-3.5 text-blue-300" />
-              <span>System Test</span>
-              {dbStatus === 'saving' ? (
-                <RefreshCw className="w-3 h-3 animate-spin text-amber-300" />
-              ) : (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-              )}
-            </button>
-
-            <button
-              type="button"
               id="btn-page2-logout"
               onClick={onLogout}
               className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 border border-red-500/30 text-red-300 text-xs font-medium transition-all"
@@ -544,35 +540,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
             </div>
           </button>
         </div>
-
-        {/* Selected Confirmation Banner when clicked */}
-        {selectedRole && (
-          <div
-            id="role-selected-confirmation"
-            className="mt-8 p-4 max-w-xl w-full bg-emerald-950/60 border border-emerald-500/40 rounded-2xl flex items-center justify-between gap-4 backdrop-blur-md animate-in fade-in zoom-in-95"
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center flex-shrink-0">
-                <CheckCircle2 className="w-6 h-6" />
-              </div>
-              <div>
-                <h5 className="text-sm font-bold text-white">
-                  กำลังเตรียมห้องเรียนสำหรับ {selectedRole === 'student' ? 'นักเรียน' : 'ผู้ใช้งาน'}
-                </h5>
-                <p className="text-xs text-emerald-200/80">
-                  บันทึกสถานะลงฐานข้อมูล Firebase Firestore (System Test) สำเร็จเรียบร้อย
-                </p>
-              </div>
-            </div>
-            <button
-              type="button"
-              onClick={handleOpenSystemTest}
-              className="px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-500 transition-colors whitespace-nowrap shadow-sm"
-            >
-              ตรวจสอบ Log
-            </button>
-          </div>
-        )}
       </main>
 
       {/* =========================================================================
@@ -750,13 +717,13 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       />
 
       {/* =========================================================================
-          ADMIN ACCESS RESTRICTION MODAL
-          - Shown when non-admin clicks "เฉพาะ Admin"
+          ADMIN PASSWORD VERIFICATION MODAL
+          - Requires secret security password (7825) without any hints
          ========================================================================= */}
-      {showAdminAccessDeniedModal && (
+      {showAdminPasswordModal && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200"
-          onClick={() => setShowAdminAccessDeniedModal(false)}
+          onClick={() => setShowAdminPasswordModal(false)}
         >
           <div
             className="relative w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-3xl p-6 sm:p-7 shadow-2xl text-slate-100"
@@ -768,46 +735,57 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
 
             <div className="text-center mb-5">
               <h3 className="text-lg font-bold text-white mb-1">
-                พื้นที่สงวนสิทธิ์เฉพาะ Admin
+                ยืนยันรหัสผ่านความปลอดภัย (เฉพาะ Admin)
               </h3>
               <p className="text-xs text-slate-300 leading-relaxed">
-                หน้านี้เปิดให้เข้าถึงได้เฉพาะบัญชีผู้ดูแลระบบสูงสุด (<span className="text-amber-300 font-mono font-semibold">{SUPER_ADMIN_EMAIL}</span>) เท่านั้น
+                กรุณาระบุรหัสผ่านความปลอดภัยสำหรับผู้ดูแลระบบเพื่อเข้าสู่แดชบอร์ด
               </p>
-              <div className="mt-3 p-3 rounded-xl bg-slate-800/80 border border-slate-700/80 text-left text-xs">
-                <div className="text-slate-400 text-[11px]">บัญชีปัจจุบันของคุณ:</div>
-                <div className="font-mono text-slate-200 font-semibold truncate">{userEmail}</div>
-                <div className="text-[10px] text-red-400 mt-1 flex items-center gap-1">
-                  <ShieldAlert className="w-3 h-3 flex-shrink-0" />
-                  <span>ไม่มีสิทธิ์เข้าถึงแดชบอร์ดผู้ดูแลระบบ</span>
-                </div>
+            </div>
+
+            <form onSubmit={handleVerifyAdminPassword} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                  รหัสผ่านความปลอดภัย
+                </label>
+                <input
+                  type="password"
+                  required
+                  autoFocus
+                  value={adminPasswordInput}
+                  onChange={(e) => {
+                    setAdminPasswordInput(e.target.value);
+                    setAdminPasswordError(null);
+                  }}
+                  placeholder="กรอกรหัสผ่านความปลอดภัย..."
+                  className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-white text-sm focus:outline-hidden focus:border-amber-400 tracking-wider"
+                />
               </div>
-            </div>
 
-            <div className="space-y-2.5">
-              <button
-                type="button"
-                onClick={() => {
-                  try {
-                    localStorage.setItem('acu_current_user_email', SUPER_ADMIN_EMAIL);
-                  } catch {
-                    // ignore
-                  }
-                  window.location.reload();
-                }}
-                className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs shadow-lg transition-all cursor-pointer flex items-center justify-center gap-1.5"
-              >
-                <ShieldCheck className="w-4 h-4 text-slate-950" />
-                <span>สลับเข้าใช้งานด้วย {SUPER_ADMIN_EMAIL}</span>
-              </button>
+              {adminPasswordError && (
+                <div className="p-3 rounded-xl bg-rose-950/80 border border-rose-500/50 text-rose-300 text-xs flex items-center gap-2 animate-in fade-in">
+                  <ShieldAlert className="w-4 h-4 flex-shrink-0 text-rose-400" />
+                  <span>{adminPasswordError}</span>
+                </div>
+              )}
 
-              <button
-                type="button"
-                onClick={() => setShowAdminAccessDeniedModal(false)}
-                className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
-              >
-                ปิดหน้าต่าง
-              </button>
-            </div>
+              <div className="space-y-2 pt-1">
+                <button
+                  type="submit"
+                  className="w-full py-2.5 px-4 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 hover:from-amber-400 hover:to-orange-500 text-slate-950 font-bold text-xs sm:text-sm shadow-lg shadow-amber-950/40 transition-all cursor-pointer flex items-center justify-center gap-2"
+                >
+                  <ShieldCheck className="w-4 h-4 text-slate-950" />
+                  <span>เข้าสู่ระบบ Admin</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowAdminPasswordModal(false)}
+                  className="w-full py-2 px-4 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold transition-colors cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

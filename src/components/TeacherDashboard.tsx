@@ -43,8 +43,10 @@ import {
   Layers, 
   Info, 
   Send,
-  Camera 
+  Camera,
+  Trash2
 } from 'lucide-react';
+import { ADMIN_TARGET_EMAIL } from '../services/submissionService';
 
 interface TeacherDashboardProps {
   userEmail: string;
@@ -661,9 +663,25 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                       <p className="text-xs text-slate-300 mt-1">ที่ตั้ง: {loc.location}</p>
                       <p className="text-xs text-amber-300/90 mt-0.5">สาระ: {loc.relevance}</p>
                     </div>
-                    <span className="text-xs text-slate-400 flex-shrink-0">
-                      ติดต่อ: {loc.contact}
-                    </span>
+                    <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
+                      <span className="text-xs text-slate-400">
+                        ติดต่อ: {loc.contact}
+                      </span>
+                      {userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase() && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (window.confirm(`Admin: ต้องการลบแหล่งเรียนรู้ "${loc.name}" ใช่หรือไม่?`)) {
+                              setExternalLocationsList(prev => prev.filter(item => item.id !== loc.id));
+                            }
+                          }}
+                          className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-colors"
+                          title="Admin: ลบแหล่งเรียนรู้นี้"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -684,7 +702,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
       {/* Modal 6: คลังไอเดีย (IDEA) (รวมเว็บการศึกษา วิจัย คลังข้อสอบ เพจเฟซบุ๊ก Canva AI อัปเดตทุกวัน) */}
       {activeModalId === 'btn-6' && (
-        <IdeaBankModal onClose={() => setActiveModalId(null)} />
+        <IdeaBankModal 
+          userEmail={userEmail}
+          onClose={() => setActiveModalId(null)} 
+        />
       )}
 
       {/* Modal 7: ส่งสื่อเข้าประกวด (ปุ่มนี้ไม่ต้องใส่หมายเลข และด้านในให้ว่างไว้ตามสั่ง) */}

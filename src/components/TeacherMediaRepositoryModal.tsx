@@ -12,12 +12,18 @@ import {
   BookOpen, 
   Filter,
   Layers,
-  GraduationCap
+  GraduationCap,
+  Edit3,
+  Trash2,
+  CheckCircle2
 } from 'lucide-react';
 import { 
   TeacherMediaWork, 
   subscribeTeacherMedia, 
   rateTeacherMedia, 
+  updateTeacherMedia,
+  deleteTeacherMedia,
+  canUserModify,
   SUBJECT_GROUPS 
 } from '../services/submissionService';
 
@@ -38,15 +44,63 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [userVotedStars, setUserVotedStars] = useState<{ [id: string]: number }>({});
   const [voteSuccessMsg, setVoteSuccessMsg] = useState<string | null>(null);
 
-  // Subscribe to randomized teacher media works
+  // Edit item state
+  const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
+  const [editForm, setEditForm] = useState({
+    title: '',
+    description: '',
+    onlineUrl: '',
+    thumbnailUrl: '',
+  });
+
+  // Subscribe to randomized teacher media works (5 items)
   useEffect(() => {
     const unsub = subscribeTeacherMedia((items) => {
-      // Randomize initial view order
-      const randomized = [...items].sort(() => Math.random() - 0.5);
-      setMediaList(randomized);
+      setMediaList(items);
     });
     return () => unsub();
   }, []);
+
+  const handleStartEdit = (item: TeacherMediaWork) => {
+    setEditingItem(item);
+    setEditForm({
+      title: item.title,
+      description: item.description,
+      onlineUrl: item.onlineUrl || '',
+      thumbnailUrl: item.thumbnailUrl,
+    });
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingItem) return;
+    const res = await updateTeacherMedia(editingItem.id, {
+      title: editForm.title.trim(),
+      description: editForm.description.trim(),
+      onlineUrl: editForm.onlineUrl.trim(),
+      thumbnailUrl: editForm.thumbnailUrl.trim() || editingItem.thumbnailUrl,
+    }, userEmail);
+
+    if (res.success) {
+      setVoteSuccessMsg(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
+      setEditingItem(null);
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
+    } else {
+      alert(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
+    }
+  };
+
+  const handleDelete = async (item: TeacherMediaWork) => {
+    if (!window.confirm(`คุณต้องการลบสื่อ "${item.title}" ออกจากคลังสื่อใช่หรือไม่?`)) {
+      return;
+    }
+    const res = await deleteTeacherMedia(item.id, userEmail);
+    if (res.success) {
+      setVoteSuccessMsg(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
+    } else {
+      alert(res.error || 'ลบข้อมูลไม่สำเร็จ');
+    }
+  };
 
   // Filter items
   const filteredList = mediaList.filter((item) => {
@@ -288,21 +342,44 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                       </span>
                     </div>
 
-                    {/* View Media Button */}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (item.onlineUrl) {
-                          window.open(item.onlineUrl, '_blank');
-                        } else {
-                          setActiveViewItem(item);
-                        }
-                      }}
-                      className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>กดชม</span>
-                    </button>
+                    {/* View Media & Management Buttons */}
+                    <div className="flex items-center gap-1.5 flex-wrap justify-end">
+                      {canUserModify(item.submittedByEmail, userEmail) && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(item)}
+                            className="p-1.5 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 transition-colors"
+                            title="แก้ไขข้อมูลสื่อ"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(item)}
+                            className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-colors"
+                            title="ลบสื่อนี้"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (item.onlineUrl) {
+                            window.open(item.onlineUrl, '_blank');
+                          } else {
+                            setActiveViewItem(item);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>กดชม</span>
+                      </button>
+                    </div>
                   </div>
                 </div>
               );
@@ -319,10 +396,98 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
 
         {/* Footer */}
         <div className="p-3 bg-slate-950 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 px-6">
-          <span>รวมสื่อในคลัง: {mediaList.length} ผลงาน</span>
-          <span>ระบบสุ่มสื่อคุณครูเพื่อการแลกเปลี่ยนเรียนรู้</span>
+          <span>แสดงสื่อแนะนำในคลัง: {filteredList.length} รายการ (จำกัด 5 รายการตามมาตรฐาน)</span>
+          <span>เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้นที่แก้ไข/ลบได้</span>
         </div>
       </div>
+
+      {/* Edit Media Modal */}
+      {editingItem && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setEditingItem(null)}
+        >
+          <div
+            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-3xl shadow-2xl p-6 text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Edit3 className="w-5 h-5 text-amber-400" />
+                <h4 className="text-base font-bold text-white">แก้ไขข้อมูลสื่อในคลัง</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingItem(null)}
+                className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">ชื่อสื่อ / นวัตกรรมการสอน</label>
+                <input
+                  type="text"
+                  value={editForm.title}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, title: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">รายละเอียด / การนำไปใช้</label>
+                <textarea
+                  rows={3}
+                  value={editForm.description}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, description: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">ลิงก์เปิดดูสื่อออนไลน์ (URL)</label>
+                <input
+                  type="url"
+                  value={editForm.onlineUrl}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, onlineUrl: e.target.value }))}
+                  placeholder="https://..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 mb-1 font-semibold">URL รูปภาพตัวอย่างสื่อ</label>
+                <input
+                  type="text"
+                  value={editForm.thumbnailUrl}
+                  onChange={(e) => setEditForm(prev => ({ ...prev, thumbnailUrl: e.target.value }))}
+                  placeholder="https://..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setEditingItem(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleSaveEdit}
+                className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-500/20"
+              >
+                บันทึกการแก้ไข
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Preview Detail Modal */}
       {activeViewItem && (
