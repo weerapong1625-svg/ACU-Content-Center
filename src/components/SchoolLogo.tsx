@@ -68,10 +68,10 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   }, []);
 
   const sizeClasses = {
-    sm: 'w-11 h-11',
-    md: 'w-14 h-14 sm:w-16 sm:h-16',
-    lg: 'w-20 h-20 sm:w-24 sm:h-24',
-    xl: 'w-28 h-28 sm:w-32 sm:h-32',
+    sm: 'w-12 h-12 sm:w-14 sm:h-14',
+    md: 'w-16 h-16 sm:w-20 sm:h-20',
+    lg: 'w-24 h-24 sm:w-28 sm:h-28',
+    xl: 'w-32 h-32 sm:w-36 sm:h-36',
   };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -161,14 +161,13 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
     <>
       <div
         id="school-logo-container"
-        className={`relative inline-flex items-center justify-center flex-shrink-0 group cursor-pointer ${className}`}
-        onClick={() => setIsAdminModalOpen(true)}
-        title={canEdit ? 'คลิกเพื่อเปลี่ยนภาพโลโก้โรงเรียน (Admin: weerapong1625@acu.ac.th)' : 'คลิกเพื่อดูรายละเอียดโลโก้โรงเรียนอัสสัมชัญอุบลราชธานี'}
+        className={`relative inline-flex items-center justify-center flex-shrink-0 select-none ${className}`}
+        title="ตราสัญลักษณ์โรงเรียนอัสสัมชัญอุบลราชธานี"
       >
         {/* Symmetrical white circular background sized perfectly around the complete seal */}
         <div
           id="school-logo-graphic"
-          className={`${sizeClasses[size]} relative flex items-center justify-center rounded-full bg-white shadow-md border-2 border-white/90 p-1 sm:p-1.5 transition-transform duration-300 group-hover:scale-105 select-none overflow-hidden aspect-square`}
+          className={`${sizeClasses[size]} relative flex items-center justify-center rounded-full bg-white shadow-md border-2 border-white/90 p-1 sm:p-1.5 transition-transform duration-300 select-none overflow-hidden aspect-square`}
         >
           {!imgFailed ? (
             <img
@@ -181,31 +180,10 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
           ) : (
             <ACUEmblemVector className="w-full h-full object-contain" />
           )}
-
-          {/* Quick edit indicator overlay for Admin on hover */}
-          {canEdit && (
-            <div
-              className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex flex-col items-center justify-center text-white rounded-full transition-opacity z-10"
-            >
-              <Camera className="w-4 h-4 text-white drop-shadow" />
-              <span className="text-[8px] font-bold mt-0.5">Admin</span>
-            </div>
-          )}
         </div>
-
-        {/* Small badge permanently visible for admin */}
-        {canEdit && (
-          <div
-            className="absolute -bottom-1 -right-1 px-1.5 py-0.5 rounded-full bg-blue-600 border border-white text-white flex items-center gap-0.5 shadow-sm"
-            title="สิทธิ์ Admin: weerapong1625@acu.ac.th"
-          >
-            <Camera className="w-2.5 h-2.5" />
-            <span className="text-[8px] font-bold leading-none">Admin</span>
-          </div>
-        )}
       </div>
 
-      {/* Admin Logo Upload Modal */}
+      {/* Admin Logo Upload Modal (Triggered exclusively from Admin Dashboard) */}
       {isAdminModalOpen && (
         <div
           className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"

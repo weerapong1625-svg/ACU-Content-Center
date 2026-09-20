@@ -1,19 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { 
   X, 
-  Settings, 
   Sparkles, 
   Maximize2, 
   ChevronRight, 
-  ShieldCheck 
+  ShieldCheck,
+  ZoomIn
 } from 'lucide-react';
 import { 
   DEFAULT_BANNER_IMAGE, 
+  DEFAULT_BANNER_IMAGE_2,
   fetchPopupBannerConfig, 
   getInitialBannerUrl,
+  getInitialBannerUrl2,
   subscribePopupBanner 
 } from '../services/bannerService';
-import { AdminBannerManagerModal } from './AdminBannerManagerModal';
 
 interface AnnouncementPopupModalProps {
   isOpen: boolean;
@@ -26,15 +27,27 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
   onClose,
 }) => {
   // Synchronously initialize state from local storage cache so there is ZERO delay or flash of old image
-  const [bannerUrl, setBannerUrl] = useState<string>(() => getInitialBannerUrl());
-  const [showAdminModal, setShowAdminModal] = useState<boolean>(false);
+  const [bannerUrl1, setBannerUrl1] = useState<string>(() => getInitialBannerUrl());
+  const [bannerUrl2, setBannerUrl2] = useState<string>(() => getInitialBannerUrl2());
+  const [bannerTitle1, setBannerTitle1] = useState<string>('คลังสื่อและนวัตกรรมการเรียนรู้ ACU');
+  const [bannerTitle2, setBannerTitle2] = useState<string>('พระราชดำรัสฯ เกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
   const [dontShowToday, setDontShowToday] = useState<boolean>(false);
+  const [zoomedImage, setZoomedImage] = useState<{ url: string; title: string } | null>(null);
 
   // Subscribe to real-time banner updates from Cloud Firestore so mobile and desktop sync immediately without hanging
   useEffect(() => {
     const unsubscribe = subscribePopupBanner((config) => {
       if (config?.bannerImageUrl) {
-        setBannerUrl(config.bannerImageUrl);
+        setBannerUrl1(config.bannerImageUrl);
+      }
+      if (config?.bannerImageUrl2) {
+        setBannerUrl2(config.bannerImageUrl2);
+      }
+      if (config?.title) {
+        setBannerTitle1(config.title);
+      }
+      if (config?.title2) {
+        setBannerTitle2(config.title2);
       }
     });
     return () => {
@@ -45,13 +58,17 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
   // Listen for ESC key
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isOpen && !showAdminModal) {
-        handleClose();
+      if (e.key === 'Escape') {
+        if (zoomedImage) {
+          setZoomedImage(null);
+        } else if (isOpen) {
+          handleClose();
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, showAdminModal, dontShowToday]);
+  }, [isOpen, zoomedImage, dontShowToday]);
 
   const handleClose = () => {
     if (dontShowToday) {
@@ -65,10 +82,6 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
     onClose();
   };
 
-  const handleBannerUpdated = (newUrl: string) => {
-    setBannerUrl(newUrl);
-  };
-
   if (!isOpen) return null;
 
   return (
@@ -76,7 +89,7 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
       {/* Modern Translucent Gray Popup Overlay */}
       <div
         id="announcement-popup-backdrop"
-        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 md:p-6 bg-black/70 backdrop-blur-md animate-in fade-in zoom-in-95 duration-200"
+        className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-5 md:p-6 bg-black/75 backdrop-blur-md animate-in fade-in zoom-in-95 duration-200 overflow-y-auto"
         onClick={(e) => {
           if (e.target === e.currentTarget) handleClose();
         }}
@@ -84,87 +97,151 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
         {/* Modern Gray Translucent Glass Container with Symmetrical Sizing */}
         <div
           id="announcement-popup-card"
-          className="relative max-w-3xl lg:max-w-4xl w-full bg-slate-900/85 backdrop-blur-2xl border border-slate-700/70 rounded-3xl shadow-[0_25px_60px_-15px_rgba(0,0,0,0.85)] overflow-hidden p-3 sm:p-4 text-slate-100 flex flex-col my-auto"
+          className="relative max-w-5xl w-full bg-slate-900/90 backdrop-blur-2xl border border-slate-700/70 rounded-3xl shadow-[0_25px_60px_-15px_rgba(0,0,0,0.85)] overflow-hidden p-3.5 sm:p-5 text-slate-100 flex flex-col my-auto max-h-[92vh]"
         >
           {/* Small Gray 'X' Close Button as explicitly requested */}
           <button
             type="button"
             id="btn-close-announcement-popup"
             onClick={handleClose}
-            className="absolute top-2.5 right-2.5 sm:top-3 sm:right-3 z-30 w-7 h-7 sm:w-8 sm:h-8 rounded-full bg-slate-800/85 hover:bg-slate-700/90 text-slate-400 hover:text-white border border-slate-600/60 backdrop-blur-md flex items-center justify-center transition-all duration-200 shadow-md cursor-pointer group"
+            className="absolute top-3 right-3 z-30 w-8 h-8 rounded-full bg-slate-800/90 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-600/70 backdrop-blur-md flex items-center justify-center transition-all duration-200 shadow-md cursor-pointer group"
             title="ปิดหน้าต่าง (Close)"
             aria-label="Close Announcement"
           >
-            <X className="w-3.5 h-3.5 sm:w-4 h-4 transition-transform group-hover:scale-110" />
+            <X className="w-4 h-4 transition-transform group-hover:scale-110" />
           </button>
 
-          {/* Symmetrical Aspect-Ratio Banner Image Display */}
-          <div className="relative w-full aspect-[2.35/1] sm:aspect-[2.4/1] rounded-2xl overflow-hidden border border-slate-700/60 bg-slate-950/80 shadow-inner flex items-center justify-center">
-            <img
-              key={bannerUrl}
-              src={bannerUrl}
-              alt="ระบบคลังสื่อ และนวัตกรรมการเรียนรู้ โรงเรียนอัสสัมชัญอุบลราชธานี"
-              loading="eager"
-              decoding="async"
-              className="w-full h-full object-cover object-center select-none"
-              onError={(e) => {
-                // Fallback to default original royal banner if image fails
-                (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE;
-              }}
-            />
-
-            {/* Subtle Inner Glow Border */}
-            <div className="absolute inset-0 pointer-events-none rounded-2xl border border-white/5" />
+          {/* Header Title Badge */}
+          <div className="flex items-center gap-2 mb-3 pr-10">
+            <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
+            <h3 className="text-xs sm:text-sm font-bold tracking-wide text-slate-200 uppercase">
+              ประชาสัมพันธ์และประกาศสำคัญ • โรงเรียนอัสสัมชัญอุบลราชธานี
+            </h3>
           </div>
 
-          {/* Bottom Symmetrical Controls Bar */}
-          <div className="mt-2.5 sm:mt-3 px-3 py-2 sm:py-2.5 rounded-xl bg-slate-950/40 border border-slate-800/60 flex flex-col sm:flex-row items-center justify-between gap-2.5 text-xs text-slate-400">
+          {/* Symmetrical Dual Image Display: Two Connected Promotional Images */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 overflow-y-auto pr-1">
+            {/* Image 1: Main Announcement */}
+            <div className="flex flex-col space-y-1.5 group">
+              <div 
+                onClick={() => setZoomedImage({ url: bannerUrl1, title: bannerTitle1 })}
+                className="relative w-full aspect-[4/3] rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950 shadow-md cursor-pointer hover:border-blue-500/60 transition-all duration-300"
+                title="คลิกเพื่อดูภาพขยายเต็มจอ"
+              >
+                <img
+                  key={bannerUrl1}
+                  src={bannerUrl1}
+                  alt={bannerTitle1}
+                  loading="eager"
+                  decoding="async"
+                  className="w-full h-full object-cover object-center select-none group-hover:scale-[1.02] transition-transform duration-300"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE;
+                  }}
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3 text-white">
+                  <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/50 px-2 py-1 rounded-lg backdrop-blur-sm">
+                    <ZoomIn className="w-3.5 h-3.5 text-sky-400" />
+                    <span>ขยายภาพ</span>
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] sm:text-xs text-slate-300 font-medium line-clamp-1 text-center">
+                {bannerTitle1}
+              </p>
+            </div>
+
+            {/* Image 2: Promotional Image 2 (798077767_1372050918343560_1643452051179615768_n) */}
+            <div className="flex flex-col space-y-1.5 group">
+              <div 
+                onClick={() => setZoomedImage({ url: bannerUrl2, title: bannerTitle2 })}
+                className="relative w-full aspect-[4/3] rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950 shadow-md cursor-pointer hover:border-amber-500/60 transition-all duration-300"
+                title="คลิกเพื่อดูภาพขยายเต็มจอ"
+              >
+                <img
+                  key={bannerUrl2}
+                  src={bannerUrl2}
+                  alt={bannerTitle2}
+                  loading="eager"
+                  decoding="async"
+                  className="w-full h-full object-contain bg-slate-950 object-center select-none group-hover:scale-[1.02] transition-transform duration-300"
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE_2;
+                  }}
+                />
+                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3 text-white">
+                  <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/50 px-2 py-1 rounded-lg backdrop-blur-sm">
+                    <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
+                    <span>ขยายภาพ</span>
+                  </span>
+                </div>
+              </div>
+              <p className="text-[11px] sm:text-xs text-slate-300 font-medium line-clamp-1 text-center">
+                {bannerTitle2}
+              </p>
+            </div>
+          </div>
+
+          {/* Bottom Controls Bar (Admin button removed as requested) */}
+          <div className="mt-3 px-3 py-2.5 rounded-xl bg-slate-950/50 border border-slate-800/80 flex flex-col sm:flex-row items-center justify-between gap-2.5 text-xs text-slate-400">
             {/* Left: Dismiss option */}
             <label className="inline-flex items-center gap-2 cursor-pointer select-none text-slate-300 hover:text-white transition-colors">
               <input
                 type="checkbox"
                 checked={dontShowToday}
                 onChange={(e) => setDontShowToday(e.target.checked)}
-                className="w-3.5 h-3.5 rounded bg-slate-800 border-slate-600 text-blue-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
+                className="w-4 h-4 rounded bg-slate-800 border-slate-600 text-blue-600 focus:ring-0 focus:ring-offset-0 cursor-pointer"
               />
               <span className="text-[11px] sm:text-xs text-slate-300">
                 ไม่ต้องแสดงป๊อปอัปนี้อีกในวันนี้
               </span>
             </label>
 
-            {/* Right: Admin Action Button & Enter Portal Button */}
+            {/* Right: Enter Portal Button */}
             <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-              {/* Admin Button to change image anytime */}
               <button
                 type="button"
-                id="btn-admin-open-banner-manager"
-                onClick={() => setShowAdminModal(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 border border-slate-700 text-slate-300 hover:text-white text-[11px] sm:text-xs font-medium transition-all shadow-xs"
-                title="สำหรับผู้ดูแลระบบ: เปลี่ยนหรืออัปเดตรูปภาพป๊อปอัป"
-              >
-                <Settings className="w-3.5 h-3.5 text-amber-400" />
-                <span>เปลี่ยนรูปภาพ (Admin)</span>
-              </button>
-
-              <button
-                type="button"
+                id="btn-enter-website"
                 onClick={handleClose}
-                className="px-3.5 py-1.5 rounded-xl bg-blue-600/85 hover:bg-blue-600 text-white text-[11px] sm:text-xs font-medium transition-colors shadow-xs"
+                className="w-full sm:w-auto px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold transition-all shadow-md hover:shadow-blue-500/25 flex items-center justify-center gap-1.5"
               >
-                เข้าสู่หน้าเว็บ
+                <span>เข้าสู่หน้าเว็บ</span>
+                <ChevronRight className="w-4 h-4" />
               </button>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Admin Banner Manager Modal */}
-      <AdminBannerManagerModal
-        isOpen={showAdminModal}
-        onClose={() => setShowAdminModal(false)}
-        currentBannerUrl={bannerUrl}
-        onBannerUpdated={handleBannerUpdated}
-      />
+      {/* Lightbox / Zoom Modal for clicked image */}
+      {zoomedImage && (
+        <div
+          className="fixed inset-0 z-60 flex items-center justify-center p-3 sm:p-6 bg-black/90 backdrop-blur-xl animate-in fade-in duration-150"
+          onClick={() => setZoomedImage(null)}
+        >
+          <button
+            type="button"
+            onClick={() => setZoomedImage(null)}
+            className="absolute top-4 right-4 z-70 w-9 h-9 rounded-full bg-slate-800 hover:bg-slate-700 text-white flex items-center justify-center border border-slate-600 transition-colors"
+            title="ปิดภาพขยาย"
+          >
+            <X className="w-5 h-5" />
+          </button>
+          <div 
+            className="relative max-w-4xl max-h-[88vh] flex flex-col items-center"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <img
+              src={zoomedImage.url}
+              alt={zoomedImage.title}
+              className="max-h-[80vh] w-auto object-contain rounded-2xl border border-slate-700 shadow-2xl"
+            />
+            <p className="mt-3 text-sm text-slate-200 font-medium text-center">
+              {zoomedImage.title}
+            </p>
+          </div>
+        </div>
+      )}
     </>
   );
 };
