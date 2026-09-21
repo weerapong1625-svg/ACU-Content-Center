@@ -111,74 +111,56 @@ export const AnnouncementPopupModal: React.FC<AnnouncementPopupModalProps> = ({
             <X className="w-4 h-4 transition-transform group-hover:scale-110" />
           </button>
 
-          {/* Header Title Badge */}
-          <div className="flex items-center gap-2 mb-3 pr-10">
-            <span className="w-2 h-2 rounded-full bg-blue-400 animate-pulse" />
-            <h3 className="text-xs sm:text-sm font-bold tracking-wide text-slate-200 uppercase">
-              ประชาสัมพันธ์และประกาศสำคัญ • โรงเรียนอัสสัมชัญอุบลราชธานี
-            </h3>
-          </div>
-
-          {/* Symmetrical Dual Image Display: Two Connected Promotional Images */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 sm:gap-4 overflow-y-auto pr-1">
-            {/* Image 1: Main Announcement */}
-            <div className="flex flex-col space-y-1.5 group">
-              <div 
-                onClick={() => setZoomedImage({ url: bannerUrl1, title: bannerTitle1 })}
-                className="relative w-full aspect-[4/3] rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950 shadow-md cursor-pointer hover:border-blue-500/60 transition-all duration-300"
-                title="คลิกเพื่อดูภาพขยายเต็มจอ"
-              >
-                <img
-                  key={bannerUrl1}
-                  src={bannerUrl1}
-                  alt={bannerTitle1}
-                  loading="eager"
-                  decoding="async"
-                  className="w-full h-full object-cover object-center select-none group-hover:scale-[1.02] transition-transform duration-300"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE;
-                  }}
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3 text-white">
-                  <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/50 px-2 py-1 rounded-lg backdrop-blur-sm">
-                    <ZoomIn className="w-3.5 h-3.5 text-sky-400" />
-                    <span>ขยายภาพ</span>
-                  </span>
-                </div>
+          {/* Dual Promotional Images: Image 1 on top, Image 2 below as requested */}
+          <div className="flex flex-col items-center gap-3.5 overflow-y-auto pr-1 py-1 max-h-[76vh]">
+            {/* Image 1: On top */}
+            <div 
+              onClick={() => setZoomedImage({ url: bannerUrl1, title: 'ภาพประชาสัมพันธ์ 1' })}
+              className="relative w-full flex items-center justify-center rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950/60 shadow-lg cursor-pointer hover:border-blue-500/60 transition-all duration-200 group"
+              title="คลิกเพื่อดูภาพขยายเต็มจอ"
+            >
+              <img
+                key={bannerUrl1}
+                src={bannerUrl1}
+                alt="ภาพประชาสัมพันธ์ 1"
+                loading="eager"
+                decoding="async"
+                className="max-h-[36vh] w-auto max-w-full object-contain rounded-xl select-none group-hover:scale-[1.01] transition-transform duration-200"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE;
+                }}
+              />
+              <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-end p-2.5">
+                <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/60 px-2.5 py-1 rounded-lg backdrop-blur-sm text-white shadow">
+                  <ZoomIn className="w-3.5 h-3.5 text-sky-300" />
+                  <span>ขยายภาพ</span>
+                </span>
               </div>
-              <p className="text-[11px] sm:text-xs text-slate-300 font-medium line-clamp-1 text-center">
-                {bannerTitle1}
-              </p>
             </div>
 
-            {/* Image 2: Promotional Image 2 (798077767_1372050918343560_1643452051179615768_n) */}
-            <div className="flex flex-col space-y-1.5 group">
-              <div 
-                onClick={() => setZoomedImage({ url: bannerUrl2, title: bannerTitle2 })}
-                className="relative w-full aspect-[4/3] rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950 shadow-md cursor-pointer hover:border-amber-500/60 transition-all duration-300"
-                title="คลิกเพื่อดูภาพขยายเต็มจอ"
-              >
-                <img
-                  key={bannerUrl2}
-                  src={bannerUrl2}
-                  alt={bannerTitle2}
-                  loading="eager"
-                  decoding="async"
-                  className="w-full h-full object-contain bg-slate-950 object-center select-none group-hover:scale-[1.02] transition-transform duration-300"
-                  onError={(e) => {
-                    (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE_2;
-                  }}
-                />
-                <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3 text-white">
-                  <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/50 px-2 py-1 rounded-lg backdrop-blur-sm">
-                    <ZoomIn className="w-3.5 h-3.5 text-amber-400" />
-                    <span>ขยายภาพ</span>
-                  </span>
-                </div>
+            {/* Image 2: Below */}
+            <div 
+              onClick={() => setZoomedImage({ url: bannerUrl2, title: 'ภาพประชาสัมพันธ์ 2' })}
+              className="relative w-full flex items-center justify-center rounded-2xl overflow-hidden border border-slate-700/80 bg-slate-950/60 shadow-lg cursor-pointer hover:border-amber-500/60 transition-all duration-200 group"
+              title="คลิกเพื่อดูภาพขยายเต็มจอ"
+            >
+              <img
+                key={bannerUrl2}
+                src={bannerUrl2}
+                alt="ภาพประชาสัมพันธ์ 2"
+                loading="eager"
+                decoding="async"
+                className="max-h-[36vh] w-auto max-w-full object-contain rounded-xl select-none group-hover:scale-[1.01] transition-transform duration-200"
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = DEFAULT_BANNER_IMAGE_2;
+                }}
+              />
+              <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-end p-2.5">
+                <span className="text-xs font-medium inline-flex items-center gap-1 bg-black/60 px-2.5 py-1 rounded-lg backdrop-blur-sm text-white shadow">
+                  <ZoomIn className="w-3.5 h-3.5 text-amber-300" />
+                  <span>ขยายภาพ</span>
+                </span>
               </div>
-              <p className="text-[11px] sm:text-xs text-slate-300 font-medium line-clamp-1 text-center">
-                {bannerTitle2}
-              </p>
             </div>
           </div>
 

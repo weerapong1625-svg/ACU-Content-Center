@@ -36,6 +36,7 @@ import {
   DEFAULT_INNOVATION_ITEMS
 } from '../services/userProfileService';
 import { subscribeUserInnovations } from '../services/submissionService';
+import { subscribeAllLoginLogs, LoginLogEntry } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 
 interface UserProfileModalProps {
@@ -72,13 +73,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       avatarUrl: avatarUrl,
       role: isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
       innovations: DEFAULT_INNOVATION_ITEMS,
-      stats: isMasterWeerapong ? {
-        totalViews: 148,
-        uniqueVisitors: 96,
-        points: 285,
-        averageRating: 5.0,
-        totalRatings: 3,
-      } : {
+      stats: {
         totalViews: 0,
         uniqueVisitors: 0,
         points: 0,
@@ -110,6 +105,19 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [commentInput, setCommentInput] = useState<string>('');
   const [isSubmittingPraise, setIsSubmittingPraise] = useState<boolean>(false);
   const [praiseSuccessNotice, setPraiseSuccessNotice] = useState<string | null>(null);
+
+  // Real-time verified login logs & Year selector
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
+
+  // Subscribe to real-time login logs
+  useEffect(() => {
+    if (!isOpen) return;
+    const unsub = subscribeAllLoginLogs((logs) => {
+      setLoginLogs(logs);
+    });
+    return () => unsub();
+  }, [isOpen]);
 
   // Sync profile data on mount & record visit
   useEffect(() => {
@@ -173,6 +181,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   })
                 : 'ส่งแล้ว',
               linkUrl: match.onlineUrl || '',
+              coverImageUrl: match.imageUrl || '',
               notes: `${match.productionType}${match.usageDetails ? ` • ${match.usageDetails}` : ''}`,
             };
           }
@@ -188,6 +197,70 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
     return () => unsubscribe();
   }, [isOpen, userEmail]);
+
+  // Real-time verified visitor statistics based on authentic login logs
+  const verifiedStats = React.useMemo(() => {
+    const todayStr = new Date().toISOString().split('T')[0];
+    const thisMonthStr = todayStr.slice(0, 7); // YYYY-MM
+    const currentYearStr = selectedYear;
+
+    // Filter by user's email
+    const myLogs = loginLogs.filter(
+      (l) => l.email?.toLowerCase().trim() === userEmail?.toLowerCase().trim()
+    );
+
+    const myTodayVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length;
+    const myMonthVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(thisMonthStr)).length;
+    const myYearVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(currentYearStr)).length;
+
+    // System wide verified logs
+    const allTodayVisits = loginLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length;
+    const allMonthVisits = loginLogs.filter((l) => l.loginTimestamp?.startsWith(thisMonthStr)).length;
+    const allYearLogs = loginLogs.filter((l) => l.loginTimestamp?.startsWith(currentYearStr));
+    const allYearVisits = allYearLogs.length;
+
+    const uniqueVerifiedUsersYear = new Set(
+      allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
+    ).size;
+
+    const uniqueAllUsers = new Set(
+      loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
+    ).size;
+
+    // Monthly breakdown for selected year (1-12)
+    const monthNames = [
+      'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+      'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+    ];
+
+    const monthlyData = monthNames.map((name, idx) => {
+      const monthPrefix = `${currentYearStr}-${String(idx + 1).padStart(2, '0')}`;
+      const myCount = myLogs.filter((l) => l.loginTimestamp?.startsWith(monthPrefix)).length;
+      const allCount = loginLogs.filter((l) => l.loginTimestamp?.startsWith(monthPrefix)).length;
+      return {
+        monthName: name,
+        monthPrefix,
+        myCount,
+        allCount,
+      };
+    });
+
+    return {
+      myTodayVisits,
+      myMonthVisits,
+      myYearVisits,
+      myTotalVisits: myLogs.length,
+      allTodayVisits,
+      allMonthVisits,
+      allYearVisits,
+      uniqueVerifiedUsersYear,
+      allTotalVisits: loginLogs.length,
+      uniqueAllUsers,
+      monthlyData,
+      myRecentLogs: myLogs.slice(0, 8),
+      systemRecentLogs: loginLogs.slice(0, 8),
+    };
+  }, [loginLogs, userEmail, selectedYear]);
 
   if (!isOpen) return null;
 
@@ -646,10 +719,26 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       className="p-3.5 sm:p-4 rounded-2xl bg-slate-800/60 border border-slate-700/70 hover:border-slate-600 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs"
                     >
                       <div className="flex items-start gap-3 flex-1 min-w-0">
-                        {/* Number badge */}
-                        <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
-                          {idx + 1}
-                        </div>
+                        {/* Cover Image Thumbnail or Number badge */}
+                        {item.coverImageUrl ? (
+                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb shadow-sm">
+                            <img
+                              src={item.coverImageUrl}
+                              alt={item.title}
+                              className="w-full h-full object-cover"
+                              onError={(e) => {
+                                (e.target as HTMLImageElement).src = '/ACU N.png';
+                              }}
+                            />
+                            <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 rounded text-[9px] text-white font-bold">
+                              #{idx + 1}
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
+                            {idx + 1}
+                          </div>
+                        )}
 
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -763,31 +852,71 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               TAB 3: เช็คสถิติการเข้าชม (Visitor & Engagement Statistics)
               - ยอดวิว ยอดผู้เข้าชมที่ไม่ซ้ำ แต้มสะสม และสถิติวิเคราะห์
              ========================================================================= */}
+          {/* =========================================================================
+              TAB 3: เช็คสถิติการเข้าชม (Visitor & Engagement Statistics)
+              - รีเซ็ทนับตามความเป็นจริงจากอีเมลที่มีตัวตนจริงเท่านั้น
+              - สรุปสถิติ รายวัน รายเดือน รายปี พร้อมตัวเลือกปี
+             ========================================================================= */}
           {activeTab === 'stats' && (
             <div className="space-y-4 animate-in fade-in duration-200">
               
+              {/* Year Filter & Real Audit Notice */}
+              <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-purple-600/20 text-purple-400 flex items-center justify-center flex-shrink-0">
+                    <BarChart3 className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h4 className="text-xs font-bold text-white">สถิติการเข้าใช้งานจริง (นับจากอีเมลที่ยืนยันตัวตนจริง)</h4>
+                    <p className="text-[11px] text-slate-400">ระบบคำนวณแบบ Real-time ตัดรอบวัน เดือน ปี และรีเซ็ตอัตโนมัติ</p>
+                  </div>
+                </div>
+
+                {/* Year Selector */}
+                <div className="flex items-center gap-2 self-end sm:self-auto">
+                  <span className="text-xs text-slate-300 font-medium">เลือกปีเข้าชม:</span>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs font-semibold text-white focus:outline-none focus:border-purple-500 cursor-pointer"
+                  >
+                    <option value="2026">พ.ศ. 2569 (2026)</option>
+                    <option value="2025">พ.ศ. 2568 (2025)</option>
+                    <option value="2024">พ.ศ. 2567 (2024)</option>
+                  </select>
+                </div>
+              </div>
+
               {/* Stat Metric Grid */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                {/* Metric 1: ยอดเข้าชมทั้งหมด */}
+                {/* Metric 1: ยอดเข้าชมของตนเอง */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center mb-2">
                     <Eye className="w-4 h-4" />
                   </div>
-                  <p className="text-xs text-slate-400">ยอดเข้าชมทั้งหมด</p>
+                  <p className="text-xs text-slate-400">ยอดเข้าชมของตัวเอง ({selectedYear})</p>
                   <p className="text-xl sm:text-2xl font-black text-white mt-0.5">
-                    {profile.stats.totalViews} <span className="text-xs font-normal text-slate-400">ครั้ง</span>
+                    {verifiedStats.myYearVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span>
                   </p>
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
+                    <span>วันนี้: {verifiedStats.myTodayVisits}</span>
+                    <span>เดือนนี้: {verifiedStats.myMonthVisits}</span>
+                  </div>
                 </div>
 
-                {/* Metric 2: ผู้เข้าชมที่ไม่ซ้ำ */}
+                {/* Metric 2: ยอดรวมผู้เข้าชมทั้งระบบที่มีตัวตนจริง */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center mb-2">
                     <User className="w-4 h-4" />
                   </div>
-                  <p className="text-xs text-slate-400">ผู้เข้าชมที่ไม่ซ้ำ</p>
-                  <p className="text-xl sm:text-2xl font-black text-white mt-0.5">
-                    {profile.stats.uniqueVisitors} <span className="text-xs font-normal text-slate-400">คน</span>
+                  <p className="text-xs text-slate-400">ผู้เข้าชมทั้งระบบ ({selectedYear})</p>
+                  <p className="text-xl sm:text-2xl font-black text-indigo-300 mt-0.5">
+                    {verifiedStats.uniqueVerifiedUsersYear} <span className="text-xs font-normal text-slate-400">คนไม่ซ้ำ</span>
                   </p>
+                  <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
+                    <span>ทั้งหมด: {verifiedStats.allYearVisits} ครั้ง</span>
+                    <span>วันนี้: {verifiedStats.allTodayVisits}</span>
+                  </div>
                 </div>
 
                 {/* Metric 3: คะแนนเฉลี่ยดาว */}
@@ -797,47 +926,85 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </div>
                   <p className="text-xs text-slate-400">คะแนนดาวเฉลี่ย</p>
                   <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5 flex items-center gap-1">
-                    <span>{profile.stats.averageRating}</span>
+                    <span>{profile.stats.averageRating || '0.0'}</span>
                     <span className="text-xs font-normal text-slate-400">/ 5.0</span>
                   </p>
+                  <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
+                    <span>จากผู้ประเมิน: {profile.stats.totalRatings || 0} คน</span>
+                  </div>
                 </div>
 
-                {/* Metric 4: แต้มสะสมเกียรติยศ */}
+                {/* Metric 4: แต้มสะสมชื่นชม */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-2">
                     <Sparkles className="w-4 h-4" />
                   </div>
                   <p className="text-xs text-slate-400">แต้มสะสมชื่นชม</p>
                   <p className="text-xl sm:text-2xl font-black text-emerald-400 mt-0.5">
-                    {profile.stats.points} <span className="text-xs font-normal text-slate-400">แต้ม</span>
+                    {profile.stats.points || 0} <span className="text-xs font-normal text-slate-400">แต้ม</span>
                   </p>
+                  <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
+                    <span>คำชื่นชม: {profile.praises.length || 0} รายการ</span>
+                  </div>
                 </div>
               </div>
 
-              {/* Engagement Highlights Card */}
+              {/* Monthly Statistics Breakdown Table for Selected Year */}
+              <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700/70">
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                    <BarChart3 className="w-4 h-4 text-purple-400" />
+                    <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear}</span>
+                  </h4>
+                  <span className="text-[11px] text-slate-400">รวม 12 เดือน</span>
+                </div>
+
+                <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-12 gap-2 text-center">
+                  {verifiedStats.monthlyData.map((m) => (
+                    <div
+                      key={m.monthPrefix}
+                      className="p-2 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between"
+                    >
+                      <span className="text-[11px] font-semibold text-slate-300">{m.monthName}</span>
+                      <span className="text-sm font-bold text-white my-0.5">{m.myCount}</span>
+                      <span className="text-[9px] text-slate-400">รวม: {m.allCount}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Real Activity & Login Audit Log */}
               <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/60 space-y-3">
-                <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                  <BarChart3 className="w-4 h-4 text-sky-400" />
-                  <span>บันทึกความเคลื่อนไหวและการเข้าชมคลังสื่อ</span>
+                <h4 className="text-xs font-bold text-white flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-sky-400" />
+                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ</span>
                 </h4>
                 
-                <div className="space-y-2 text-xs">
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-slate-300">ความถี่การเข้าชมสัปดาห์นี้:</span>
-                    <span className="font-semibold text-emerald-400">+34% เทียบกับสัปดาห์ที่แล้ว</span>
+                {verifiedStats.myRecentLogs.length > 0 ? (
+                  <div className="space-y-1.5">
+                    {verifiedStats.myRecentLogs.map((log) => (
+                      <div
+                        key={log.id}
+                        className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs"
+                      >
+                        <div className="flex items-center gap-2">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+                          <span className="text-slate-200 font-medium truncate max-w-[200px] sm:max-w-xs">{log.email}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 text-[10px]">
+                            {log.loginMethod || 'Google'}
+                          </span>
+                        </div>
+                        <div className="text-right text-[11px] text-slate-400 flex-shrink-0">
+                          {log.loginDate} {log.loginTime}
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-slate-300">สื่อนวัตกรรมที่ได้รับความนิยมสูงสุด:</span>
-                    <span className="font-semibold text-sky-300">ชิ้นที่ 2: สื่อวิดีโอนวัตกรรมและบทเรียนปฏิสัมพันธ์</span>
+                ) : (
+                  <div className="p-3 text-center text-xs text-slate-400 bg-slate-900/40 rounded-xl">
+                    เริ่มนับสถิติการเข้าสู่ระบบตามความเป็นจริงตั้งแต่วันนี้เป็นต้นไป
                   </div>
-                  <div className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-slate-300">สถานะการยืนยันตัวตนคลังสื่อ:</span>
-                    <span className="inline-flex items-center gap-1 font-semibold text-blue-400">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-blue-400" />
-                      <span>ผ่านเกณฑ์ประเมินเบื้องต้น</span>
-                    </span>
-                  </div>
-                </div>
+                )}
               </div>
             </div>
           )}

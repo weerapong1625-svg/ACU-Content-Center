@@ -336,15 +336,15 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           </div>
 
-          {/* มุมขวาบนอย่างสมมาตร: คำว่า "ระบบคลังสื่อ และนวัตกรรมการเรียนรู้" */}
-          <div className="w-full md:w-auto flex flex-col sm:flex-row items-center md:items-end justify-between md:justify-end gap-3">
+          {/* มุมขวาบนอย่างสมมาตร: คำว่า "ระบบคลังสื่อและนวัตกรรมการเรียนรู้" บรรทัดเดียวกัน ไม่ขาดคำหรือตกบรรทัด */}
+          <div className="w-full md:w-auto flex flex-wrap sm:flex-nowrap items-center justify-between md:justify-end gap-3 flex-shrink-0">
             <div
               id="top-right-symmetric-title-box"
-              className="px-4 py-2 sm:px-5 sm:py-2.5 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-purple-950/70 to-slate-900/90 border border-indigo-400/40 shadow-[0_4px_20px_rgba(79,70,229,0.25)] backdrop-blur-md flex items-center gap-2.5"
+              className="px-4 py-2 sm:px-5 sm:py-2.5 rounded-2xl bg-gradient-to-r from-indigo-950/80 via-purple-950/70 to-slate-900/90 border border-indigo-400/40 shadow-[0_4px_20px_rgba(79,70,229,0.25)] backdrop-blur-md flex items-center gap-2.5 flex-shrink-0"
             >
-              <div className="w-2.5 h-2.5 rounded-full bg-indigo-400 animate-ping" />
-              <span className="font-['Prompt',sans-serif] font-bold text-sm sm:text-base md:text-lg text-transparent bg-clip-text bg-gradient-to-r from-indigo-200 via-white to-purple-200 tracking-wide select-none drop-shadow">
-                ระบบคลังสื่อ และนวัตกรรมการเรียนรู้
+              <div className="w-2.5 h-2.5 rounded-full bg-indigo-400 animate-ping flex-shrink-0" />
+              <span className="font-['Prompt',sans-serif] font-bold text-sm sm:text-base md:text-lg text-transparent bg-clip-text bg-gradient-to-r from-indigo-200 via-white to-purple-200 tracking-wide select-none drop-shadow whitespace-nowrap">
+                ระบบคลังสื่อและนวัตกรรมการเรียนรู้
               </span>
             </div>
 

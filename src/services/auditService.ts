@@ -12,6 +12,8 @@ export interface LoginLogEntry {
   source: string;
   avatarUrl?: string;
   createdAt?: any;
+  loginDate?: string;
+  loginTime?: string;
 }
 
 export interface UserProfileData {

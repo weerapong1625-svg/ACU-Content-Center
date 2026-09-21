@@ -281,7 +281,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
               textShadow: '0 0 16px rgba(147, 197, 253, 0.4), 0 1px 3px rgba(0,0,0,0.8)',
             }}
           >
-            ระบบคลังสื่อ และนวัตกรรมการเรียนรู้
+            ระบบคลังสื่อและนวัตกรรมการเรียนรู้
           </h2>
         </div>
       </header>

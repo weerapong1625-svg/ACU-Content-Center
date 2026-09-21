@@ -638,11 +638,24 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                   />
                 </div>
 
-                {/* 9. ไฟล์สื่อรูปภาพ */}
-                <div>
-                  <label className="block text-xs sm:text-sm font-semibold text-slate-200 mb-2">
-                    ไฟล์สื่อรูปภาพ (ภาพตัวอย่างผลงาน / รูปถ่ายสื่อ / หน้าปก)
-                  </label>
+                {/* 9. ภาพปกชิ้นงาน (Cover Image) */}
+                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/80">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div>
+                      <label className="block text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
+                        <ImageIcon className="w-4 h-4 text-blue-400" />
+                        <span>ภาพปกชิ้นงาน (Cover Image)</span>
+                      </label>
+                      <p className="text-[11px] text-slate-400">
+                        ภาพนี้จะนำไปแสดงเป็นภาพปกในหน้า "คลังสื่อคุณครูผลิตเอง" หน้าโปรไฟล์ และหน้าแสดงสื่อทั้งหมด
+                      </p>
+                    </div>
+                    {imagePreview && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        มีภาพปกแล้ว
+                      </span>
+                    )}
+                  </div>
 
                   <input
                     ref={fileInputRef}
@@ -653,29 +666,44 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                   />
 
                   {imagePreview ? (
-                    <div className="relative inline-block rounded-2xl overflow-hidden border-2 border-blue-500/50 shadow-md group">
-                      <img
-                        src={imagePreview}
-                        alt="Media Preview"
-                        className="w-48 h-32 object-cover"
-                      />
-                      <button
-                        type="button"
-                        onClick={() => setImagePreview(null)}
-                        className="absolute top-2 right-2 w-6 h-6 rounded-full bg-black/70 hover:bg-rose-600 text-white flex items-center justify-center transition-colors"
-                        title="ลบรูป"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                      <div className="relative rounded-2xl overflow-hidden border-2 border-blue-500/60 shadow-lg group w-44 h-28 bg-slate-900 flex-shrink-0">
+                        <img
+                          src={imagePreview}
+                          alt="Cover Preview"
+                          className="w-full h-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setImagePreview(null)}
+                          className="absolute top-2 right-2 w-6 h-6 rounded-full bg-rose-600/90 hover:bg-rose-500 text-white flex items-center justify-center transition-colors shadow-md"
+                          title="ลบภาพปก"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700"
+                        >
+                          <Upload className="w-3.5 h-3.5 text-blue-400" />
+                          <span>เปลี่ยนรูปภาพปกใหม่</span>
+                        </button>
+                        <p className="text-[10px] text-slate-400">
+                          ระบบจะปรับสเกลขนาดและจัดเก็บเป็นภาพปกผลงานใน Firestore อัตโนมัติ
+                        </p>
+                      </div>
                     </div>
                   ) : (
                     <button
                       type="button"
                       onClick={() => fileInputRef.current?.click()}
-                      className="w-full sm:w-auto px-5 py-3 rounded-xl border border-dashed border-slate-600 hover:border-blue-400 bg-slate-800/50 hover:bg-slate-800 text-xs sm:text-sm text-slate-300 flex items-center justify-center gap-2 transition-colors"
+                      className="w-full px-5 py-4 rounded-xl border border-dashed border-slate-600 hover:border-blue-400 bg-slate-900/40 hover:bg-slate-800/60 text-xs sm:text-sm text-slate-300 flex flex-col sm:flex-row items-center justify-center gap-2 transition-all cursor-pointer"
                     >
-                      <Upload className="w-4 h-4 text-blue-400" />
-                      <span>คลิกเพื่อแนบไฟล์รูปภาพสื่อ...</span>
+                      <Upload className="w-5 h-5 text-blue-400 flex-shrink-0" />
+                      <span>คลิกเพื่ออัปโหลดภาพปกชิ้นงาน (JPG, PNG)...</span>
                     </button>
                   )}
                 </div>

@@ -168,7 +168,7 @@ export default function App() {
                 `,
               }}
             >
-              ระบบคลังสื่อ และนวัตกรรมการเรียนรู้
+              ระบบคลังสื่อและนวัตกรรมการเรียนรู้
             </h2>
             <div className="mt-3 flex items-center justify-center gap-2">
               <span className="h-0.5 w-8 sm:w-16 bg-gradient-to-r from-transparent to-blue-400 rounded-full" />

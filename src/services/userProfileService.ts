@@ -9,6 +9,7 @@ export interface InnovationItem {
   submittedDate: string;
   linkUrl?: string;
   notes?: string;
+  coverImageUrl?: string;
 }
 
 export interface VisitorPraise {
@@ -27,6 +28,9 @@ export interface UserStats {
   points: number;
   averageRating: number;
   totalRatings: number;
+  dailyStats?: Record<string, number>;
+  monthlyStats?: Record<string, number>;
+  yearlyStats?: Record<string, number>;
 }
 
 export interface FullUserProfile {
@@ -52,6 +56,7 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
     submittedDate: '-',
     linkUrl: '',
     notes: '',
+    coverImageUrl: '',
   },
   {
     id: 2,
@@ -61,6 +66,7 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
     submittedDate: '-',
     linkUrl: '',
     notes: '',
+    coverImageUrl: '',
   },
   {
     id: 3,
@@ -70,6 +76,7 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
     submittedDate: '-',
     linkUrl: '',
     notes: '',
+    coverImageUrl: '',
   },
   {
     id: 4,
@@ -79,6 +86,7 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
     submittedDate: '-',
     linkUrl: '',
     notes: '',
+    coverImageUrl: '',
   },
   {
     id: 5,
@@ -88,6 +96,7 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
     submittedDate: '-',
     linkUrl: '',
     notes: '',
+    coverImageUrl: '',
   },
 ];
 

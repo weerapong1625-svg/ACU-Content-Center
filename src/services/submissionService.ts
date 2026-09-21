@@ -60,6 +60,7 @@ export interface InnovationSubmission {
   usageDetails: string; // 1)วิชา 2)หน่วยการเรียนรู้
   onlineUrl?: string; // URL สื่อ
   imageUrl?: string; // ไฟล์สื่อรูปภาพ
+  coverImageUrl?: string; // ภาพปกชิ้นงาน
   userEmail: string;
   status: 'ส่งเรียบร้อย' | 'อนุมัติแล้ว' | 'รอตรวจสอบ';
   submittedAt: string;
@@ -744,99 +745,13 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 // =========================================================================
 // FIREBASE OPERATIONS: 3. คลังสื่อคุณครูผลิตเอง (Teacher Media Repository)
+// ไม่มีสื่อตัวอย่าง - แสดงเฉพาะสื่อที่มีการส่งจริงจากคุณครูเท่านั้นตามคำสั่ง
 // =========================================================================
 
-// Initial curated media items
-export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [
-  {
-    id: 'seed-1',
-    title: 'ชุดการเรียนรู้เรื่อง พันธุศาสตร์และ DNA ผ่านภาพจำลอง 3D & AR',
-    teacherName: 'ม.วีระพงศ์ คำสอน',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'มัธยมศึกษาปีที่ 4',
-    subjectName: 'ชีววิทยาเพิ่มเติม',
-    thumbnailUrl: 'https://images.unsplash.com/photo-1507413245164-6160d8298b31?w=400&auto=format&fit=crop&q=80',
-    description: 'สื่อจำลองการถอดรหัสพันธุกรรม พร้อมใบกิจกรรมการทดลองเสมือนจริง',
-    mediaType: 'สื่อเทคโนโลยี',
-    itemNumber: 1,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 4.9,
-    ratingCount: 38,
-    views: 342,
-    createdAt: '2026-03-01T08:00:00.000Z',
-  },
-  {
-    id: 'seed-2',
-    title: 'แบบฝึกหัดปฏิสัมพันธ์ STEM Vocabulary Challenge พิชิตศัพท์วิทย์-คณิต',
-    teacherName: 'มิสรัตนาภรณ์ แสนแก้ว',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้ภาษาต่างประเทศ',
-    gradeLevel: 'มัธยมศึกษาปีที่ 2',
-    subjectName: 'ภาษาอังกฤษเพื่อการสื่อสารเชิงวิทยาศาสตร์',
-    thumbnailUrl: 'https://images.unsplash.com/photo-1456513080510-7bf3a84b82f8?w=400&auto=format&fit=crop&q=80',
-    description: 'แอปพลิเคชันควิซทบทวนคำศัพท์ภาษาอังกฤษสะเต็มศึกษา ผ่านระบบ Gamification',
-    mediaType: 'สื่อเทคโนโลยี',
-    itemNumber: 2,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 4.8,
-    ratingCount: 26,
-    views: 280,
-    createdAt: '2026-03-03T09:30:00.000Z',
-  },
-  {
-    id: 'seed-3',
-    title: 'นิทานบูรณาการคณิตศาสตร์หรรษาและคุณธรรมสำหรับปฐมวัย',
-    teacherName: 'มิสกานดา รุ่งเรือง',
-    subjectGroup: 'กลุ่มพัฒนาผู้เรียน',
-    gradeLevel: 'ปฐมวัย',
-    subjectName: 'กิจกรรมเสริมประสบการณ์คณิตศาสตร์',
-    thumbnailUrl: 'https://images.unsplash.com/photo-1512820790803-83ca734da794?w=400&auto=format&fit=crop&q=80',
-    description: 'หนังสือนิทานสีสันสดใส ภาพประกอบวาดเอง สอนการนับจำนวน 1-20',
-    mediaType: 'สื่อสิ่งพิมพ์',
-    itemNumber: 3,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 5.0,
-    ratingCount: 42,
-    views: 215,
-    createdAt: '2026-03-05T10:15:00.000Z',
-  },
-  {
-    id: 'seed-4',
-    title: 'คู่มือปฏิบัติการทดลองเคมีในครัวเรือน (Green Chemistry Lab Guide)',
-    teacherName: 'ม.ประสิทธิ์ โคตรพงษ์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'มัธยมศึกษาปีที่ 5',
-    subjectName: 'เคมีพื้นฐานและนวัตกรรมสีเขียว',
-    thumbnailUrl: 'https://images.unsplash.com/photo-1532094349884-543bc11b234d?w=400&auto=format&fit=crop&q=80',
-    description: 'คู่มือการใช้วัสดุธรรมชาติในท้องถิ่นอุบลราชธานีทำการทดลองทางเคมีอย่างปลอดภัย',
-    mediaType: 'สื่อสิ่งพิมพ์',
-    itemNumber: 4,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 4.7,
-    ratingCount: 19,
-    views: 450,
-    createdAt: '2026-03-08T11:00:00.000Z',
-  },
-  {
-    id: 'seed-5',
-    title: 'บอร์ดเกมจำลองประวัติศาสตร์และภูมิปัญญาอีสานใต้ (Isan Heritage Game)',
-    teacherName: 'ม.ศิริชัย บุญนำ',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้สังคมศึกษา ศาสนา และวัฒนธรรม',
-    gradeLevel: 'มัธยมศึกษาปีที่ 3',
-    subjectName: 'ประวัติศาสตร์ท้องถิ่นอุบลราชธานี',
-    thumbnailUrl: 'https://images.unsplash.com/photo-1610890716171-6b1bb98ffd09?w=400&auto=format&fit=crop&q=80',
-    description: 'บอร์ดเกมกระดานการเรียนรู้วัฒนธรรม ประเพณีแห่เทียนพรรษา และแหล่งอารยธรรมขอม',
-    mediaType: 'สื่ออื่น ๆ',
-    itemNumber: 5,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 4.9,
-    ratingCount: 31,
-    views: 310,
-    createdAt: '2026-03-10T14:20:00.000Z',
-  },
-];
+export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
 /**
- * Subscribe to Teacher Media Repository with live updates (Displays 5 items as requested)
+ * Subscribe to Teacher Media Repository with live updates (Displays real teacher submissions only)
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
@@ -851,26 +766,24 @@ export function subscribeTeacherMedia(
           liveList.push(docSnap.data() as TeacherMediaWork);
         });
 
-        // Merge initial seeds if not already present
-        const mergedMap = new Map<string, TeacherMediaWork>();
-        INITIAL_TEACHER_WORKS.forEach((w) => mergedMap.set(w.id, w));
-        liveList.forEach((w) => mergedMap.set(w.id, w));
+        // Filter out any legacy seed items if any exist in collection
+        const realWorks = liveList.filter(
+          (w) => !w.id.startsWith('seed-') && w.title?.trim().length > 0
+        );
 
-        const finalWorks = Array.from(mergedMap.values());
-        // Sort newest first so real teacher submissions appear at the top
-        finalWorks.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        // Show 5 items as strictly requested
-        callback(finalWorks.slice(0, 5));
+        // Sort newest first so real teacher submissions appear at top
+        realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        callback(realWorks);
       },
       (err) => {
-        console.warn('subscribeTeacherMedia fallback to initial:', err);
-        callback(INITIAL_TEACHER_WORKS.slice(0, 5));
+        console.warn('subscribeTeacherMedia fallback:', err);
+        callback([]);
       }
     );
     return unsubscribe;
   } catch (err) {
     console.error('subscribeTeacherMedia failed:', err);
-    callback(INITIAL_TEACHER_WORKS.slice(0, 5));
+    callback([]);
     return () => {};
   }
 }
