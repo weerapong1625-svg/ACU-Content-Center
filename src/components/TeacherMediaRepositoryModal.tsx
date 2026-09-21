@@ -15,7 +15,8 @@ import {
   GraduationCap,
   Edit3,
   Trash2,
-  CheckCircle2
+  CheckCircle2,
+  Calendar
 } from 'lucide-react';
 import { 
   TeacherMediaWork, 
@@ -32,10 +33,56 @@ interface TeacherMediaRepositoryModalProps {
   onClose: () => void;
 }
 
+// Maximum allowed media items displayed in Teacher Media Repository
+const MAX_MEDIA_DISPLAY_LIMIT = 100;
+
+/**
+ * Generate a deterministic seed based on current date (YYYY-MM-DD)
+ * to ensure all users see the same randomized selection for that day,
+ * and it automatically re-randomizes every new day.
+ */
+const getDailyRandomSeed = (date: Date = new Date()): number => {
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  const dateStr = `${y}-${m}-${d}`;
+  let hash = 0;
+  for (let i = 0; i < dateStr.length; i++) {
+    hash = (hash << 5) - hash + dateStr.charCodeAt(i);
+    hash |= 0;
+  }
+  return Math.abs(hash) || 20260921;
+};
+
+/**
+ * Seeded pseudo-random generator
+ */
+const seededRng = (seed: number) => {
+  let s = seed;
+  return () => {
+    s = (s * 9301 + 49297) % 233280;
+    return s / 233280;
+  };
+};
+
+/**
+ * Shuffle an array deterministically using a seed
+ */
+function shuffleWithSeed<T>(array: T[], seed: number): T[] {
+  const rng = seededRng(seed);
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
 export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalProps> = ({
   userEmail,
   onClose,
 }) => {
+  const [rawMediaList, setRawMediaList] = useState<TeacherMediaWork[]>([]);
   const [mediaList, setMediaList] = useState<TeacherMediaWork[]>([]);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('all');
@@ -53,10 +100,21 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     thumbnailUrl: '',
   });
 
-  // Subscribe to randomized teacher media works (5 items)
+  // Current Thai Date string
+  const todayThai = new Date().toLocaleDateString('th-TH', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  // Subscribe to teacher media works, shuffle with daily seed and limit to max 100
   useEffect(() => {
     const unsub = subscribeTeacherMedia((items) => {
-      setMediaList(items);
+      setRawMediaList(items);
+      const seed = getDailyRandomSeed();
+      const dailyShuffled = shuffleWithSeed(items, seed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
+      setMediaList(dailyShuffled);
     });
     return () => unsub();
   }, []);
@@ -73,16 +131,20 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
 
   const handleSaveEdit = async () => {
     if (!editingItem) return;
-    const res = await updateTeacherMedia(editingItem.id, {
+    const updates = {
       title: editForm.title.trim(),
       description: editForm.description.trim(),
       onlineUrl: editForm.onlineUrl.trim(),
       thumbnailUrl: editForm.thumbnailUrl.trim() || editingItem.thumbnailUrl,
-    }, userEmail);
+    };
+
+    const res = await updateTeacherMedia(editingItem.id, updates, userEmail);
 
     if (res.success) {
       setVoteSuccessMsg(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
       setEditingItem(null);
+      setMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
+      setRawMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
       setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
       alert(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
@@ -96,6 +158,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     const res = await deleteTeacherMedia(item.id, userEmail);
     if (res.success) {
       setVoteSuccessMsg(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+      setMediaList(prev => prev.filter(m => m.id !== item.id));
+      setRawMediaList(prev => prev.filter(m => m.id !== item.id));
       setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
       alert(res.error || 'ลบข้อมูลไม่สำเร็จ');
@@ -122,7 +186,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     await rateTeacherMedia(item.id, stars, userEmail);
 
     // Update local state smoothly
-    setMediaList(prev => prev.map(m => {
+    const updateList = (list: TeacherMediaWork[]) => list.map(m => {
       if (m.id === item.id) {
         const currentTotal = m.ratingAvg * m.ratingCount;
         const newCount = m.ratingCount + 1;
@@ -134,17 +198,24 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
         };
       }
       return m;
-    }));
+    });
+
+    setMediaList(prev => updateList(prev));
+    setRawMediaList(prev => updateList(prev));
 
     setTimeout(() => {
       setVoteSuccessMsg(null);
     }, 2500);
   };
 
-  // Re-shuffle / randomize items
+  // Re-shuffle / randomize items on demand (up to 100 items)
   const handleShuffle = () => {
-    const shuffled = [...mediaList].sort(() => Math.random() - 0.5);
+    if (rawMediaList.length === 0) return;
+    const randomSeed = Math.floor(Math.random() * 1000000) + 1;
+    const shuffled = shuffleWithSeed(rawMediaList, randomSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
     setMediaList(shuffled);
+    setVoteSuccessMsg(`สุ่มแสดงผลสื่อชุดใหม่เรียบร้อยแล้ว (${shuffled.length} รายการ จากทั้งหมด ${rawMediaList.length} รายการ)`);
+    setTimeout(() => setVoteSuccessMsg(null), 2500);
   };
 
   return (
@@ -163,15 +234,21 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               <FolderArchive className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2">
-                3. คลังสื่อคุณครูผลิตเอง
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30 flex items-center gap-1">
-                  <Shuffle className="w-3 h-3" />
-                  สุ่มสื่อคุณครู ACU
+              <div className="flex items-center gap-2 flex-wrap">
+                <h3 className="text-base sm:text-lg font-bold text-white">
+                  3. คลังสื่อคุณครูผลิตเอง
+                </h3>
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30 flex items-center gap-1 font-medium">
+                  <Shuffle className="w-3 h-3 text-purple-400" />
+                  สุ่มแสดงผลทุกวัน (สูงสุด 100 สื่อ)
                 </span>
-              </h3>
-              <p className="text-xs text-slate-300">
-                รวบรวมสื่อคุณครูทุกคนที่ส่งเข้ามาจาก 5 ชิ้น พร้อมให้คะแนนดาวและกดเข้าชม
+              </div>
+              <p className="text-xs text-slate-300 flex items-center gap-2 flex-wrap mt-0.5">
+                <span>รวบรวมสื่อคุณครู ACU สุ่มสลับผลงานแสดงไม่เกิน 100 รายการทุกวัน พร้อมให้คะแนนดาวและกดเข้าชม</span>
+                <span className="inline-flex items-center gap-1 text-[11px] text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20 font-medium">
+                  <Calendar className="w-3 h-3" />
+                  {todayThai}
+                </span>
               </p>
             </div>
           </div>
@@ -180,8 +257,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleShuffle}
-              className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
-              title="สุ่มลำดับสื่อชุดใหม่"
+              className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              title="สุ่มลำดับสื่อชุดใหม่ (สูงสุด 100 รายการ)"
             >
               <Shuffle className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">สุ่มสื่อชุดใหม่</span>
@@ -395,8 +472,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
         </div>
 
         {/* Footer */}
-        <div className="p-3 bg-slate-950 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400 px-6">
-          <span>แสดงสื่อแนะนำในคลัง: {filteredList.length} รายการ (จำกัด 5 รายการตามมาตรฐาน)</span>
+        <div className="p-3 bg-slate-950 border-t border-slate-800 flex flex-col sm:flex-row items-center justify-between text-xs text-slate-400 px-6 gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span>แสดงสื่อในคลัง: <strong className="text-purple-300">{filteredList.length}</strong> รายการ</span>
+            <span className="text-slate-600">•</span>
+            <span className="text-slate-400">สุ่มแสดงผลอัตโนมัติประจำวัน (ไม่เกิน {MAX_MEDIA_DISPLAY_LIMIT} สื่อ จากทั้งหมด {rawMediaList.length} รายการ)</span>
+          </div>
           <span>เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้นที่แก้ไข/ลบได้</span>
         </div>
       </div>

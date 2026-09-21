@@ -874,15 +874,20 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
                 {/* Year Selector */}
                 <div className="flex items-center gap-2 self-end sm:self-auto">
-                  <span className="text-xs text-slate-300 font-medium">เลือกปีเข้าชม:</span>
+                  <span className="text-xs text-slate-300 font-medium">เลือกปีที่เข้าชม:</span>
                   <select
                     value={selectedYear}
                     onChange={(e) => setSelectedYear(e.target.value)}
                     className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs font-semibold text-white focus:outline-none focus:border-purple-500 cursor-pointer"
                   >
-                    <option value="2026">พ.ศ. 2569 (2026)</option>
-                    <option value="2025">พ.ศ. 2568 (2025)</option>
-                    <option value="2024">พ.ศ. 2567 (2024)</option>
+                    {Array.from({ length: 13 }, (_, i) => {
+                      const yr = (new Date().getFullYear() || 2026) + 10 - i;
+                      return (
+                        <option key={yr} value={yr.toString()}>
+                          พ.ศ. {yr + 543} ({yr})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               </div>

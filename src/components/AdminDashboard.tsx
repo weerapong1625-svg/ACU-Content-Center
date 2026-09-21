@@ -1066,15 +1066,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <span className="text-xs text-slate-400 font-medium">เลือกปี:</span>
+                  <span className="text-xs text-slate-400 font-medium">เลือกปีที่เข้าชม:</span>
                   <select
                     value={selectedYear}
                     onChange={(e) => setSelectedYear(e.target.value)}
                     className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs font-semibold text-amber-300 focus:outline-none focus:border-amber-500 cursor-pointer"
                   >
-                    <option value="2026">2026 (พ.ศ. 2569)</option>
-                    <option value="2025">2025 (พ.ศ. 2568)</option>
-                    <option value="2024">2024 (พ.ศ. 2567)</option>
+                    {Array.from({ length: 13 }, (_, i) => {
+                      const yr = (new Date().getFullYear() || 2026) + 10 - i;
+                      return (
+                        <option key={yr} value={yr.toString()}>
+                          {yr} (พ.ศ. {yr + 543})
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
               </div>
