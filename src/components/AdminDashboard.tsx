@@ -33,7 +33,8 @@ import {
   TrendingUp,
   UserCheck,
   FileText,
-  Upload
+  Upload,
+  RotateCcw
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -79,7 +80,8 @@ import {
   LoginLogEntry,
   subscribeAllLoginLogs,
   generateLoginLogsTSV,
-  generateLoginLogsCSV
+  generateLoginLogsCSV,
+  resetAllLoginLogs
 } from '../services/auditService';
 import {
   PopupBannerConfig,
@@ -161,6 +163,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Copy & export feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  // Reset visitor logs modal state
+  const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
+  const [isResettingLogs, setIsResettingLogs] = useState(false);
 
   // Image preview modal state
   const [previewModalImg, setPreviewModalImg] = useState<{ url: string; title: string } | null>(null);
@@ -712,6 +718,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
+  // Reset all visitor login logs to 0
+  const handleResetVisitorLogs = async () => {
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAllLoginLogs();
+      if (res.success) {
+        setLoginLogs([]);
+        setShowResetConfirmModal(false);
+        showToast(`รีเซ็ตสถิติผู้เข้าชมเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ เริ่มนับจริงทีละ 1 ตั้งแต่วันนี้)`);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
+
   // If unauthorized, render strict access-denied screen
   if (!isSuperAdmin) {
     return (
@@ -1249,6 +1274,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>ส่งออก CSV</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowResetConfirmModal(true)}
+                  className="px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="รีเซ็ตสถิติผู้เข้าชมทั้งหมดเป็น 0 เพื่อเริ่มนับใหม่ตามจริง"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-red-400" />
+                  <span>รีเซ็ตสถิติเป็น 0</span>
                 </button>
               </div>
             </div>
@@ -2546,6 +2581,62 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               >
                 <Trash2 className="w-4 h-4" />
                 <span>{isDeletingFacility ? 'กำลังลบ...' : 'ยืนยันลบบันทึก'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          Reset All Visitor Logs Confirmation Modal
+         ========================================================================= */}
+      {showResetConfirmModal && (
+        <div
+          className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => !isResettingLogs && setShowResetConfirmModal(false)}
+        >
+          <div
+            className="relative w-full max-w-md bg-slate-900 border border-red-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-red-500/20 text-red-300 border border-red-500/30 flex items-center justify-center flex-shrink-0">
+                <RotateCcw className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">รีเซ็ตสถิติผู้เข้าชมระบบเป็น 0</h3>
+                <p className="text-xs text-slate-400">เริ่มต้นนับสถิติใหม่ตามการ Login จริงเท่านั้น</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
+              <p className="font-semibold text-red-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <span>คำเตือน: การกระทำนี้ไม่สามารถย้อนกลับได้</span>
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
+                <li>ข้อมูลสถิติผู้เข้าชมทั้งของ <strong>Admin</strong> และ <strong>ผู้ใช้งานทั้งหมด</strong> จะถูกรีเซ็ตเป็น 0</li>
+                <li>ระบบจะเริ่มนับสถิติใหม่อย่างแม่นยำ โดยเมื่อมีการ Login สำเร็จจะนับเป็นเข้าชม 1 ครั้ง และนับเพิ่มทีละ 1 ตามจริงเท่านั้น</li>
+              </ul>
+            </div>
+
+            <div className="pt-2 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={isResettingLogs}
+                onClick={() => setShowResetConfirmModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleResetVisitorLogs}
+                disabled={isResettingLogs}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md shadow-red-900/30"
+              >
+                <RotateCcw className={`w-4 h-4 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                <span>{isResettingLogs ? 'กำลังรีเซ็ตสถิติ...' : 'ยืนยันรีเซ็ตเป็น 0'}</span>
               </button>
             </div>
           </div>

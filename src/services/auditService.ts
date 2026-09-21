@@ -1,11 +1,11 @@
-import { collection, addDoc, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot } from 'firebase/firestore';
+import { collection, addDoc, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export interface LoginLogEntry {
   id?: string;
   email: string;
   displayName: string;
-  role: 'teacher' | 'student' | 'guest';
+  role: 'teacher' | 'student' | 'guest' | 'admin';
   loginMethod: string;
   status: 'online' | 'offline';
   loginTimestamp: string;
@@ -24,12 +24,13 @@ export interface UserProfileData {
 }
 
 /**
- * Record a user login event to Firestore (System Test)
+ * Record a user login event to Firestore
+ * Strict 1 login = 1 log entry (visit)
  */
 export async function logUserLogin(data: {
   email: string;
   displayName?: string;
-  role?: 'teacher' | 'student' | 'guest';
+  role?: 'teacher' | 'student' | 'guest' | 'admin';
   loginMethod?: string;
   avatarUrl?: string;
 }): Promise<string | null> {
@@ -37,13 +38,13 @@ export async function logUserLogin(data: {
     const logsRef = collection(db, 'login_logs');
     const nowIso = new Date().toISOString();
     const docRef = await addDoc(logsRef, {
-      email: data.email,
+      email: data.email.toLowerCase().trim(),
       displayName: data.displayName || data.email.split('@')[0],
-      role: data.role || 'guest',
+      role: data.role || 'teacher',
       loginMethod: data.loginMethod || 'Google SSO',
       status: 'online',
       loginTimestamp: nowIso,
-      source: 'System Test - ACU Learning Media & Innovation',
+      source: 'ACU Learning Media & Innovation Portal',
       avatarUrl: data.avatarUrl || '',
       createdAt: serverTimestamp(),
     });
@@ -51,6 +52,31 @@ export async function logUserLogin(data: {
   } catch (err) {
     console.error('Failed to log login event to Firebase Firestore:', err);
     return null;
+  }
+}
+
+/**
+ * Reset all login logs / visitor statistics in Firestore to 0
+ */
+export async function resetAllLoginLogs(): Promise<{ success: boolean; count: number; error?: string }> {
+  try {
+    const logsRef = collection(db, 'login_logs');
+    const snapshot = await getDocs(logsRef);
+    const docs = snapshot.docs;
+    let deletedCount = 0;
+
+    for (let i = 0; i < docs.length; i += 100) {
+      const chunk = docs.slice(i, i + 100);
+      const batch = writeBatch(db);
+      chunk.forEach((d) => batch.delete(d.ref));
+      await batch.commit();
+      deletedCount += chunk.length;
+    }
+
+    return { success: true, count: deletedCount };
+  } catch (err: any) {
+    console.error('Failed to reset login logs in Firestore:', err);
+    return { success: false, count: 0, error: err?.message || 'เกิดข้อผิดพลาดในการรีเซ็ต' };
   }
 }
 

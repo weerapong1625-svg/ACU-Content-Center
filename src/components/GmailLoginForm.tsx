@@ -195,7 +195,8 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
           <button
             type="button"
             id="btn-enter-system"
-            className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-800 text-white font-medium hover:from-blue-800 hover:to-indigo-900 shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2"
+            onClick={() => onLoginSuccess?.(activeUser)}
+            className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-700 to-indigo-800 text-white font-medium hover:from-blue-800 hover:to-indigo-900 shadow-md hover:shadow-lg transition-all flex items-center justify-center gap-2 cursor-pointer"
           >
             <span>เข้าสู่หน้าคลังสื่อการเรียนรู้</span>
             <ArrowRight className="w-4 h-4" />

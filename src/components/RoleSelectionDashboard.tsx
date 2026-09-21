@@ -135,36 +135,12 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       ' วันที่ ' +
       now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })
     );
-
-    // Automatically record initial login to Firestore for System Test
-    const recordInitialAudit = async () => {
-      setDbStatus('saving');
-      const docId = await logUserLogin({
-        email: userEmail,
-        displayName: userName,
-        role: 'guest',
-        loginMethod: 'Gmail / Google SSO',
-      });
-      if (docId) {
-        setDbStatus('saved');
-      } else {
-        setDbStatus('saved'); // fallback
-      }
-    };
-    recordInitialAudit();
+    setDbStatus('saved');
   }, [userEmail, userName]);
 
-  // Handle Role Selection with Firestore Audit Update
-  const handleSelectRole = async (role: 'teacher' | 'student') => {
+  // Handle Role Selection (View selection only - does not duplicate login visit count)
+  const handleSelectRole = (role: 'teacher' | 'student') => {
     setSelectedRole(role);
-    setDbStatus('saving');
-    await logUserLogin({
-      email: userEmail,
-      displayName: userName,
-      role: role,
-      loginMethod: 'Role Selected - ' + (role === 'teacher' ? 'ครู' : 'นักเรียน'),
-    });
-    setDbStatus('saved');
   };
 
   const handleOpenSystemTest = async () => {
@@ -181,13 +157,20 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     setShowAdminPasswordModal(true);
   };
 
-  const handleVerifyAdminPassword = (e: React.FormEvent) => {
+  const handleVerifyAdminPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (adminPasswordInput.trim() === '7825') {
       setShowAdminPasswordModal(false);
       setAdminPasswordInput('');
       setAdminPasswordError(null);
       setSelectedRole('admin');
+      // Count Admin login as 1 visit
+      await logUserLogin({
+        email: SUPER_ADMIN_EMAIL,
+        displayName: 'ม.วีระพงศ์ คำสอน (Admin)',
+        role: 'admin',
+        loginMethod: 'Admin Security Login (7825)',
+      });
     } else {
       setAdminPasswordError('รหัสผ่านความปลอดภัยไม่ถูกต้อง ไม่อนุญาตให้เข้าถึงระบบ Admin');
     }

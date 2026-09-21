@@ -3,7 +3,7 @@ service cloud.firestore {
   match /databases/{database}/documents {
     // login_logs collection for system test and user access auditing
     match /login_logs/{logId} {
-      allow read, create, update: if true;
+      allow read, write: if true;
     }
 
     // user_profiles collection for customized profile, innovation items, and praises
