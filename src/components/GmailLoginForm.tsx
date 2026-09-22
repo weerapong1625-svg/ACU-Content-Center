@@ -1,6 +1,8 @@
 import React, { useState } from 'react';
-import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck } from 'lucide-react';
+import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck, Fingerprint, Camera } from 'lucide-react';
 import { logUserLogin } from '../services/auditService';
+import { validateRealGmailAccount } from '../utils/emailValidation';
+import { BiometricAuthModal } from './BiometricAuthModal';
 
 interface GmailLoginFormProps {
   onLoginSuccess?: (email: string) => void;
@@ -13,8 +15,13 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [rememberMe, setRememberMe] = useState(true);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [suggestedFix, setSuggestedFix] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [activeUser, setActiveUser] = useState<string | null>(null);
+
+  // Biometric Verification Modal State (Face Scan / Fingerprint / Skip)
+  const [isBiometricModalOpen, setIsBiometricModalOpen] = useState(false);
+  const [pendingLoginData, setPendingLoginData] = useState<{ email: string; method: string } | null>(null);
 
   // Google SSO Modal State (Forces fresh Gmail sign-in every time or uses remembered device user)
   const [isGoogleModalOpen, setIsGoogleModalOpen] = useState(false);
@@ -24,52 +31,77 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [rememberGoogleEmail, setRememberGoogleEmail] = useState(true);
   const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
+  const [googleSuggestedFix, setGoogleSuggestedFix] = useState<string | null>(null);
 
-  const validateEmail = (val: string) => {
-    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(val);
+  // Finalizes login after biometric verification or skip
+  const finalizeLogin = async (verifiedEmail: string, method: string) => {
+    setIsLoading(true);
+    setIsBiometricModalOpen(false);
+
+    try {
+      localStorage.setItem('acu_current_user_email', verifiedEmail);
+      if (rememberMe && verifiedEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
+        localStorage.setItem('acu_remembered_gmail', verifiedEmail);
+      }
+    } catch {
+      // ignore
+    }
+
+    // Record audit log - Single accurate login record
+    const isAdmin = verifiedEmail.toLowerCase() === 'weerapong1625@acu.ac.th';
+    await logUserLogin({
+      email: verifiedEmail,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : verifiedEmail.split('@')[0],
+      loginMethod: method,
+      role: isAdmin ? 'admin' : 'teacher',
+    });
+
+    setIsLoading(false);
+    setIsSuccess(true);
+    setActiveUser(verifiedEmail);
+    onLoginSuccess?.(verifiedEmail);
   };
 
   const handleEmailLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
+    setSuggestedFix(null);
 
     const trimmed = email.trim();
     if (!trimmed) {
-      setError('กรุณากรอกอีเมล Gmail หรือบัญชีโรงเรียน');
+      setError('กรุณากรอกอีเมล Gmail หรือบัญชีโรงเรียน @acu.ac.th');
       return;
     }
 
-    if (!validateEmail(trimmed)) {
-      setError('รูปแบบอีเมลไม่ถูกต้อง (เช่น example@gmail.com หรือ user@acu.ac.th)');
+    // Strict validation against real Gmail & ACU account standards
+    const validation = validateRealGmailAccount(trimmed);
+    if (!validation.isValid) {
+      setError(validation.errorMessage);
+      setSuggestedFix(validation.suggestedFix || null);
+      // Require user to re-enter if wrong ("หากผู้ใช้งานพิมพ์ผิดให้กรอกใหม่เท่านั้น")
+      setEmail('');
       return;
     }
 
-    setIsLoading(true);
-    setTimeout(async () => {
-      setIsLoading(false);
-      setIsSuccess(true);
-      setActiveUser(trimmed);
-      try {
-        localStorage.setItem('acu_current_user_email', trimmed);
-        if (rememberMe && trimmed.toLowerCase() !== 'weerapong1625@acu.ac.th') {
-          localStorage.setItem('acu_remembered_gmail', trimmed);
-        }
-      } catch {
-        // ignore
-      }
-      // Record audit log
-      await logUserLogin({
-        email: trimmed,
-        loginMethod: 'Email & Password Login',
-        role: trimmed === 'weerapong1625@acu.ac.th' ? 'teacher' : 'teacher',
-      });
-      onLoginSuccess?.(trimmed);
-    }, 600);
+    if (!password) {
+      setError('กรุณากรอกรหัสผ่าน');
+      return;
+    }
+
+    const validEmail = validation.normalizedEmail || trimmed;
+
+    // Proceed to Biometric Verification (Face Scan / Fingerprint or Skip)
+    setPendingLoginData({
+      email: validEmail,
+      method: 'Email & Password Login',
+    });
+    setIsBiometricModalOpen(true);
   };
 
   // Open Google SSO Modal - Guaranteed fresh state every time, or loads remembered Gmail (NEVER Admin's)
   const handleOpenGoogleSso = () => {
     setError(null);
+    setSuggestedFix(null);
     let remembered = '';
     try {
       remembered = localStorage.getItem('acu_remembered_gmail') || '';
@@ -85,14 +117,16 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setGoogleEmail(remembered);
     setGooglePassword('');
     setGoogleError(null);
+    setGoogleSuggestedFix(null);
     setShowGooglePassword(false);
     setIsGoogleModalOpen(true);
   };
 
-  // Submit Google SSO - Validates and processes the fresh Gmail entry
+  // Submit Google SSO - Validates against real Gmail accounts and prompts biometric verification
   const handleGoogleSsoSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setGoogleError(null);
+    setGoogleSuggestedFix(null);
 
     const trimmedEmail = googleEmail.trim();
     if (!trimmedEmail) {
@@ -100,15 +134,22 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    if (!validateEmail(trimmedEmail)) {
-      setGoogleError('รูปแบบอีเมลไม่ถูกต้อง (เช่น yourname@gmail.com หรือ user@acu.ac.th)');
+    // Strict validation against real Gmail & ACU account standards
+    const validation = validateRealGmailAccount(trimmedEmail);
+    if (!validation.isValid) {
+      setGoogleError(validation.errorMessage);
+      setGoogleSuggestedFix(validation.suggestedFix || null);
+      // Require user to re-enter if wrong
+      setGoogleEmail('');
       return;
     }
 
+    const validEmail = validation.normalizedEmail || trimmedEmail;
+
     // Never save Admin email to remembered list
-    if (rememberGoogleEmail && trimmedEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
+    if (rememberGoogleEmail && validEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
       try {
-        localStorage.setItem('acu_remembered_gmail', trimmedEmail);
+        localStorage.setItem('acu_remembered_gmail', validEmail);
       } catch {
         // ignore
       }
@@ -120,28 +161,14 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       }
     }
 
-    setIsGoogleSubmitting(true);
-    setTimeout(async () => {
-      setIsGoogleSubmitting(false);
-      setIsGoogleModalOpen(false);
-      setIsSuccess(true);
-      setActiveUser(trimmedEmail);
+    setIsGoogleModalOpen(false);
 
-      try {
-        localStorage.setItem('acu_current_user_email', trimmedEmail);
-      } catch {
-        // ignore
-      }
-
-      // Record audit log
-      await logUserLogin({
-        email: trimmedEmail,
-        loginMethod: 'Google Account SSO (เข้าสู่ระบบ Gmail)',
-        role: trimmedEmail === 'weerapong1625@acu.ac.th' ? 'teacher' : 'teacher',
-      });
-
-      onLoginSuccess?.(trimmedEmail);
-    }, 600);
+    // Proceed to Biometric Verification (Face Scan / Fingerprint or Skip)
+    setPendingLoginData({
+      email: validEmail,
+      method: 'Google Account SSO (เข้าสู่ระบบ Gmail)',
+    });
+    setIsBiometricModalOpen(true);
   };
 
   const handleQuickFill = (presetEmail: string) => {
@@ -237,12 +264,36 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       {error && (
         <div
           id="login-error-alert"
-          className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2 animate-in fade-in"
+          className="mb-4 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex flex-col gap-1.5 animate-in fade-in"
         >
-          <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" />
-          <span>{error}</span>
+          <div className="flex items-center gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" />
+            <span>{error}</span>
+          </div>
+          {suggestedFix && (
+            <div className="pl-6 flex items-center gap-2">
+              <span className="text-[11px] text-slate-600">แนะนำ:</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setEmail(suggestedFix);
+                  setError(null);
+                  setSuggestedFix(null);
+                }}
+                className="text-[11px] font-mono font-bold text-blue-600 underline hover:text-blue-800 cursor-pointer"
+              >
+                {suggestedFix} (คลิกเพื่อนำไปใช้)
+              </button>
+            </div>
+          )}
         </div>
       )}
+
+      {/* Security validation badge */}
+      <div className="mb-4 p-2.5 rounded-xl bg-blue-50/70 border border-blue-100 text-[11px] text-slate-600 flex items-center gap-2">
+        <ShieldCheck className="w-4 h-4 text-blue-600 flex-shrink-0" />
+        <span>ระบบตรวจสอบอีเมลจริง (@acu.ac.th / @gmail.com) และระบบสแกนชีวมิติ (ใบหน้า/ลายนิ้วมือ)</span>
+      </div>
 
       {/* One-click Google SSO Button */}
       <button
@@ -462,9 +513,27 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
             {/* Error banner */}
             {googleError && (
-              <div className="mb-4 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-2 animate-in fade-in">
-                <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" />
-                <span>{googleError}</span>
+              <div className="mb-4 p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs flex flex-col gap-1.5 animate-in fade-in">
+                <div className="flex items-center gap-2 font-medium">
+                  <AlertCircle className="w-4 h-4 flex-shrink-0 text-red-500" />
+                  <span>{googleError}</span>
+                </div>
+                {googleSuggestedFix && (
+                  <div className="pl-6 flex items-center gap-2">
+                    <span className="text-[11px] text-slate-600">แนะนำ:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setGoogleEmail(googleSuggestedFix);
+                        setGoogleError(null);
+                        setGoogleSuggestedFix(null);
+                      }}
+                      className="text-[11px] font-mono font-bold text-blue-600 underline hover:text-blue-800 cursor-pointer"
+                    >
+                      {googleSuggestedFix} (คลิกเพื่อนำไปใช้)
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 
@@ -582,6 +651,26 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
           </div>
         </div>
       )}
+
+      {/* Biometric Security Verification Modal (Face Scan / Fingerprint / Skip) */}
+      <BiometricAuthModal
+        isOpen={isBiometricModalOpen}
+        userEmail={pendingLoginData?.email || ''}
+        onSuccess={() => {
+          if (pendingLoginData) {
+            finalizeLogin(pendingLoginData.email, pendingLoginData.method);
+          }
+        }}
+        onSkip={() => {
+          if (pendingLoginData) {
+            finalizeLogin(pendingLoginData.email, pendingLoginData.method);
+          }
+        }}
+        onClose={() => {
+          setIsBiometricModalOpen(false);
+          setIsLoading(false);
+        }}
+      />
     </div>
   );
 };

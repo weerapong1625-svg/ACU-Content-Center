@@ -454,7 +454,7 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                   required
                   value={teacherName}
                   onChange={(e) => setTeacherName(e.target.value)}
-                  placeholder="เช่น ม.วีระพงศ์ คำสอน / มิสกานดา รุ่งเรือง"
+                  placeholder="เช่น ม.วีระพงษ์ มีทรัพย์ / มิสกานดา รุ่งเรือง"
                   className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/90 border border-slate-700 text-white text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
                 />
               </div>

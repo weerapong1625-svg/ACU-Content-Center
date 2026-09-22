@@ -16,7 +16,8 @@ import {
   Edit3,
   Trash2,
   CheckCircle2,
-  Calendar
+  Calendar,
+  Plus
 } from 'lucide-react';
 import { 
   TeacherMediaWork, 
@@ -24,6 +25,7 @@ import {
   rateTeacherMedia, 
   updateTeacherMedia,
   deleteTeacherMedia,
+  addTeacherMediaDirectly,
   canUserModify,
   SUBJECT_GROUPS 
 } from '../services/submissionService';
@@ -100,6 +102,29 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     thumbnailUrl: '',
   });
 
+  // Add new item state (Accessible to Admin and Teachers)
+  const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isSubmittingNew, setIsSubmittingNew] = useState(false);
+  const [addForm, setAddForm] = useState<{
+    title: string;
+    teacherName: string;
+    subjectGroup: string;
+    subjectName: string;
+    mediaType: string;
+    description: string;
+    onlineUrl: string;
+    thumbnailUrl: string;
+  }>({
+    title: '',
+    teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
+    subjectGroup: String(SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี'),
+    subjectName: '',
+    mediaType: 'สื่อเทคโนโลยี',
+    description: '',
+    onlineUrl: '',
+    thumbnailUrl: '',
+  });
+
   // Current Thai Date string
   const todayThai = new Date().toLocaleDateString('th-TH', {
     weekday: 'long',
@@ -163,6 +188,50 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
       alert(res.error || 'ลบข้อมูลไม่สำเร็จ');
+    }
+  };
+
+  const handleSaveNewMedia = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addForm.title.trim()) {
+      alert('กรุณากรอกชื่อสื่อ/นวัตกรรม');
+      return;
+    }
+    if (!addForm.teacherName.trim()) {
+      alert('กรุณากรอกชื่อครูผู้จัดทำ');
+      return;
+    }
+
+    setIsSubmittingNew(true);
+    const res = await addTeacherMediaDirectly({
+      title: addForm.title.trim(),
+      teacherName: addForm.teacherName.trim(),
+      subjectGroup: addForm.subjectGroup,
+      subjectName: addForm.subjectName.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+      mediaType: addForm.mediaType,
+      description: addForm.description.trim() || `สื่อการสอนวิชา ${addForm.subjectGroup}`,
+      thumbnailUrl: addForm.thumbnailUrl.trim() || '/ACU N.png',
+      onlineUrl: addForm.onlineUrl.trim(),
+      submittedByEmail: userEmail,
+    });
+    setIsSubmittingNew(false);
+
+    if (res.success) {
+      setVoteSuccessMsg(`เพิ่มสื่อ "${addForm.title}" เข้าสู่คลังเรียบร้อยแล้ว`);
+      setIsAddModalOpen(false);
+      setAddForm({
+        title: '',
+        teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
+        subjectGroup: SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+        subjectName: '',
+        mediaType: 'สื่อเทคโนโลยี',
+        description: '',
+        onlineUrl: '',
+        thumbnailUrl: '',
+      });
+      setTimeout(() => setVoteSuccessMsg(null), 3500);
+    } else {
+      alert(res.error || 'เพิ่มข้อมูลสื่อไม่สำเร็จ');
     }
   };
 
@@ -254,6 +323,16 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           </div>
 
           <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setIsAddModalOpen(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-md cursor-pointer"
+              title="เพิ่มสื่อการสอนเข้าสู่คลังสื่อ"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>เพิ่มสื่อเข้าคลัง</span>
+            </button>
+
             <button
               type="button"
               onClick={handleShuffle}
@@ -649,6 +728,147 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Add New Media Modal */}
+      {isAddModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in">
+          <div className="w-full max-w-lg bg-slate-900 border border-emerald-500/50 rounded-3xl shadow-2xl p-6 text-white max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-4">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-xl bg-emerald-600/30 border border-emerald-500/40 flex items-center justify-center text-emerald-400">
+                  <Plus className="w-4 h-4" />
+                </div>
+                <h4 className="text-base font-bold text-white">เพิ่มสื่อ/นวัตกรรมใหม่เข้าสู่คลัง</h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddModalOpen(false)}
+                className="w-7 h-7 rounded-full bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveNewMedia} className="space-y-3.5 text-xs">
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  ชื่อผลงานสื่อ / นวัตกรรม <span className="text-rose-400">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={addForm.title}
+                  onChange={(e) => setAddForm({ ...addForm, title: e.target.value })}
+                  placeholder="เช่น สื่อมัลติมีเดียการจำลองระบบสุริยะ..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    ชื่อครูผู้จัดทำ <span className="text-rose-400">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={addForm.teacherName}
+                    onChange={(e) => setAddForm({ ...addForm, teacherName: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-300 font-semibold mb-1">
+                    ประเภทสื่อ
+                  </label>
+                  <select
+                    value={addForm.mediaType}
+                    onChange={(e) => setAddForm({ ...addForm, mediaType: e.target.value })}
+                    className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                  >
+                    <option value="สื่อเทคโนโลยี">สื่อเทคโนโลยี (Digital / Video / App)</option>
+                    <option value="สื่อสิ่งพิมพ์">สื่อสิ่งพิมพ์ (ใบงาน / แบบฝึก / บอร์ด)</option>
+                    <option value="สื่ออื่น ๆ">สื่ออื่น ๆ / นวัตกรรมบูรณาการ</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  กลุ่มสาระการเรียนรู้
+                </label>
+                <select
+                  value={addForm.subjectGroup}
+                  onChange={(e) => setAddForm({ ...addForm, subjectGroup: e.target.value })}
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                >
+                  {SUBJECT_GROUPS.map((g) => (
+                    <option key={g} value={g}>{g}</option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  วิชา / หน่วยการเรียนรู้
+                </label>
+                <input
+                  type="text"
+                  value={addForm.subjectName}
+                  onChange={(e) => setAddForm({ ...addForm, subjectName: e.target.value })}
+                  placeholder="เช่น วิทยาศาสตร์ ว21101 หน่วยที่ 2"
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  รายละเอียด / คำอธิบายการนำไปใช้
+                </label>
+                <textarea
+                  rows={2}
+                  value={addForm.description}
+                  onChange={(e) => setAddForm({ ...addForm, description: e.target.value })}
+                  placeholder="อธิบายการนำสื่อไปประยุกต์ใช้ในการจัดการเรียนรู้..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500 resize-none"
+                />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">
+                  ลิงก์ไฟล์งานออนไลน์ / Google Drive / Canva / YouTube
+                </label>
+                <input
+                  type="url"
+                  value={addForm.onlineUrl}
+                  onChange={(e) => setAddForm({ ...addForm, onlineUrl: e.target.value })}
+                  placeholder="https://..."
+                  className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-hidden focus:border-emerald-500"
+                />
+              </div>
+
+              <div className="pt-3 border-t border-slate-800 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAddModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
+                >
+                  ยกเลิก
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingNew}
+                  className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-bold flex items-center gap-1.5 shadow-md cursor-pointer"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  <span>{isSubmittingNew ? 'กำลังบันทึก...' : 'บันทึกเข้าสู่คลังสื่อ'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -23,9 +23,14 @@ export interface UserProfileData {
   updatedAt?: string;
 }
 
+// In-memory debounce map to prevent rapid duplicate logs for the same user
+let lastLogTime = 0;
+let lastLogEmail = '';
+
 /**
  * Record a user login event to Firestore
  * Strict 1 login = 1 log entry (visit)
+ * Guaranteed: Only counts each real login once
  */
 export async function logUserLogin(data: {
   email: string;
@@ -34,13 +39,40 @@ export async function logUserLogin(data: {
   loginMethod?: string;
   avatarUrl?: string;
 }): Promise<string | null> {
+  const normEmail = data.email.toLowerCase().trim();
+  const now = Date.now();
+
+  // Deduplication check: ignore duplicate calls within 30 seconds for the exact same email
+  if (normEmail === lastLogEmail && now - lastLogTime < 30000) {
+    return null;
+  }
+
+  // Check sessionStorage deduplication if in browser
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      const sessEmail = sessionStorage.getItem('acu_last_login_logged_email');
+      const sessTime = Number(sessionStorage.getItem('acu_last_login_logged_time') || 0);
+      if (sessEmail === normEmail && now - sessTime < 30000) {
+        return null;
+      }
+      sessionStorage.setItem('acu_last_login_logged_email', normEmail);
+      sessionStorage.setItem('acu_last_login_logged_time', String(now));
+    }
+  } catch {
+    // ignore storage restrictions
+  }
+
+  lastLogEmail = normEmail;
+  lastLogTime = now;
+
   try {
     const logsRef = collection(db, 'login_logs');
     const nowIso = new Date().toISOString();
+    const isAdmin = normEmail === 'weerapong1625@acu.ac.th';
     const docRef = await addDoc(logsRef, {
-      email: data.email.toLowerCase().trim(),
-      displayName: data.displayName || data.email.split('@')[0],
-      role: data.role || 'teacher',
+      email: normEmail,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (data.displayName || normEmail.split('@')[0]),
+      role: data.role || (isAdmin ? 'admin' : 'teacher'),
       loginMethod: data.loginMethod || 'Google SSO',
       status: 'online',
       loginTimestamp: nowIso,
@@ -50,7 +82,7 @@ export async function logUserLogin(data: {
     });
     return docRef.id;
   } catch (err) {
-    console.error('Failed to log login event to Firebase Firestore:', err);
+    console.warn('Login log deferred or offline:', err);
     return null;
   }
 }

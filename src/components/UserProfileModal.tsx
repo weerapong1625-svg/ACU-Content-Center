@@ -66,7 +66,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [profile, setProfile] = useState<FullUserProfile>(() => {
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
-      fullName: isMasterWeerapong ? 'มาสเตอร์วีระพงศ์ คำสอน' : (userName || userEmail.split('@')[0]),
+      fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (userName || userEmail.split('@')[0]),
       nickname: isMasterWeerapong ? 'ครูปอย' : '',
       school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
       displayName: userName || userEmail.split('@')[0],
@@ -541,7 +541,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       id="input-profile-fullname"
                       value={fullNameInput}
                       onChange={(e) => setFullNameInput(e.target.value)}
-                      placeholder="เช่น นายวีระพงศ์ คำสอน / มาสเตอร์วีระพงศ์"
+                      placeholder="เช่น ม.วีระพงษ์ มีทรัพย์"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                     />
                   </div>

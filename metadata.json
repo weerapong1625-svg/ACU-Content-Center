@@ -1,6 +1,6 @@
 {
   "name": "ระบบคลังสื่อและนวัตกรรมการเรียนรู้",
   "description": "หน้าเข้าสู่ระบบ ระบบคลังสื่อและนวัตกรรมการเรียนรู้ โรงเรียนอัสสัมชัญอุบลราชธานี (Assumption College Ubonratchathani)",
-  "requestFramePermissions": [],
+  "requestFramePermissions": ["camera"],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

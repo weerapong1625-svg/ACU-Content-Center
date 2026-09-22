@@ -247,7 +247,7 @@ export async function fetchFullUserProfile(
   const isMasterWeerapong = email.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
   const defaultProfile: FullUserProfile = cached || {
     email: email,
-    fullName: isMasterWeerapong ? 'มาสเตอร์วีระพงศ์ คำสอน' : (initialDisplayName || email.split('@')[0]),
+    fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (initialDisplayName || email.split('@')[0]),
     nickname: isMasterWeerapong ? 'ครูปอย' : '',
     school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
     displayName: initialDisplayName || email.split('@')[0],

@@ -845,6 +845,54 @@ export async function deleteTeacherMedia(
   }
 }
 
+/**
+ * Add a new media work directly to Teacher Media Repository
+ * Accessible to Admin and Teachers
+ */
+export async function addTeacherMediaDirectly(data: {
+  title: string;
+  teacherName: string;
+  subjectGroup: string;
+  subjectName?: string;
+  gradeLevel?: string;
+  mediaType: string;
+  description: string;
+  thumbnailUrl?: string;
+  onlineUrl?: string;
+  submittedByEmail: string;
+}): Promise<{ success: boolean; id?: string; error?: string }> {
+  try {
+    const id = `work_direct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const nowIso = new Date().toISOString();
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
+
+    const payload: TeacherMediaWork = {
+      id,
+      title: data.title.trim(),
+      teacherName: data.teacherName.trim(),
+      subjectGroup: data.subjectGroup,
+      gradeLevel: data.gradeLevel || data.subjectGroup,
+      subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+      thumbnailUrl: data.thumbnailUrl?.trim() || '/ACU N.png',
+      description: data.description.trim(),
+      mediaType: data.mediaType,
+      itemNumber: 1,
+      onlineUrl: data.onlineUrl?.trim() || '',
+      ratingAvg: 5.0,
+      ratingCount: 1,
+      views: 1,
+      submittedByEmail: data.submittedByEmail.trim(),
+      createdAt: nowIso,
+    };
+
+    await setDoc(docRef, payload);
+    return { success: true, id };
+  } catch (err: any) {
+    console.error('Error adding teacher media:', err);
+    return { success: false, error: err.message || 'เพิ่มสื่อไม่สำเร็จ' };
+  }
+}
+
 // =========================================================================
 // 3.5 คลังไอเดีย (Shared Idea Bank) - Firestore Sync, User Ratings, Admin Oversight
 // =========================================================================
@@ -877,7 +925,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     url: 'https://www.canva.com/education/',
     tags: ['Canva', 'AI', 'การสร้างสื่อ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
-    creatorName: 'ม.วีระพงศ์ คำสอน',
+    creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
     createdAt: '2026-03-01T08:00:00.000Z',
     ratingAvg: 5.0,
     ratingCount: 12,
@@ -892,7 +940,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     url: 'https://www.niets.or.th',
     tags: ['ข้อสอบ', 'O-NET', 'วัดผล'],
     creatorEmail: ADMIN_TARGET_EMAIL,
-    creatorName: 'ม.วีระพงศ์ คำสอน',
+    creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
     createdAt: '2026-03-02T09:00:00.000Z',
     ratingAvg: 4.8,
     ratingCount: 9,
@@ -907,7 +955,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     url: 'https://tdc.thailis.or.th',
     tags: ['งานวิจัย', 'R&D', 'วิชาการ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
-    creatorName: 'ม.วีระพงศ์ คำสอน',
+    creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
     createdAt: '2026-03-03T10:00:00.000Z',
     ratingAvg: 4.9,
     ratingCount: 15,
@@ -922,7 +970,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     url: 'https://www.facebook.com',
     tags: ['PLC', 'ชุมชนครู', 'แชร์สื่อ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
-    creatorName: 'ม.วีระพงศ์ คำสอน',
+    creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
     createdAt: '2026-03-04T11:00:00.000Z',
     ratingAvg: 4.7,
     ratingCount: 8,
@@ -1062,7 +1110,7 @@ export async function rateSharedIdea(
           categoryLabel: 'การศึกษา',
           tags: ['ไอเดีย'],
           creatorEmail: ADMIN_TARGET_EMAIL,
-          creatorName: 'ม.วีระพงศ์ คำสอน',
+          creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
           createdAt: new Date().toISOString(),
         }),
         ratingAvg: avg,

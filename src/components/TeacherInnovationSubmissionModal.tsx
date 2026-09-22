@@ -482,7 +482,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                     required
                     value={teacherName}
                     onChange={(e) => setTeacherName(e.target.value)}
-                    placeholder="เช่น ม.วีระพงศ์ คำสอน / มิสกานดา รุ่งเรือง"
+                    placeholder="เช่น ม.วีระพงษ์ มีทรัพย์ / มิสกานดา รุ่งเรือง"
                     className="w-full px-4 py-2.5 rounded-xl bg-slate-800/90 border border-slate-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-sm text-white placeholder-slate-500 outline-none"
                   />
                 </div>
