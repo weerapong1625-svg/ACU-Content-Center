@@ -17,12 +17,14 @@ import {
   Trash2,
   CheckCircle2,
   Calendar,
-  Plus
+  Plus,
+  Heart
 } from 'lucide-react';
 import { 
   TeacherMediaWork, 
   subscribeTeacherMedia, 
   rateTeacherMedia, 
+  toggleLikeTeacherMedia,
   updateTeacherMedia,
   deleteTeacherMedia,
   addTeacherMediaDirectly,
@@ -277,6 +279,53 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     }, 2500);
   };
 
+  // Handle like toggle (Appreciation points for teacher)
+  const handleToggleLike = async (item: TeacherMediaWork) => {
+    const res = await toggleLikeTeacherMedia(item.id, userEmail);
+    if (res.success) {
+      const normEmail = userEmail.toLowerCase().trim();
+      const updateLikes = (list: TeacherMediaWork[]) =>
+        list.map((m) => {
+          if (m.id === item.id) {
+            const prevLikedBy = Array.isArray(m.likedBy) ? m.likedBy : [];
+            const newLikedBy = res.isLiked
+              ? [...prevLikedBy.filter((e) => e !== normEmail), normEmail]
+              : prevLikedBy.filter((e) => e !== normEmail);
+            return {
+              ...m,
+              likes: res.likes,
+              likedBy: newLikedBy,
+            };
+          }
+          return m;
+        });
+
+      setMediaList((prev) => updateLikes(prev));
+      setRawMediaList((prev) => updateLikes(prev));
+
+      if (activeViewItem && activeViewItem.id === item.id) {
+        setActiveViewItem((prev) =>
+          prev
+            ? {
+                ...prev,
+                likes: res.likes,
+                likedBy: res.isLiked
+                  ? [...(prev.likedBy || []).filter((e) => e !== normEmail), normEmail]
+                  : (prev.likedBy || []).filter((e) => e !== normEmail),
+              }
+            : null
+        );
+      }
+
+      if (res.isLiked) {
+        setVoteSuccessMsg(`กดถูกใจสื่อ "${item.title}" สะสมแต้มชื่นชม +1 ให้คุณครู ${item.teacherName} สำเร็จ!`);
+      } else {
+        setVoteSuccessMsg(`ยกเลิกการถูกใจสื่อ "${item.title}"`);
+      }
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
+    }
+  };
+
   // Re-shuffle / randomize items on demand (up to 100 items)
   const handleShuffle = () => {
     if (rawMediaList.length === 0) return;
@@ -468,34 +517,61 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                   </div>
 
                   {/* Rating & Actions Bottom */}
-                  <div className="pt-3 border-t border-slate-700/60 flex items-center justify-between gap-2">
-                    {/* 5-Star interactive rating */}
-                    <div className="flex items-center gap-1">
-                      {[1, 2, 3, 4, 5].map((star) => {
-                        const isFilled = (currentHover || item.ratingAvg) >= star;
-                        return (
-                          <button
-                            key={star}
-                            type="button"
-                            onMouseEnter={() => setHoverRating(prev => ({ ...prev, [item.id]: star }))}
-                            onMouseLeave={() => setHoverRating(prev => ({ ...prev, [item.id]: 0 }))}
-                            onClick={() => handleRate(item, star)}
-                            className="text-slate-600 hover:text-amber-400 focus:outline-none transition-colors"
-                            title={`ให้คะแนน ${star} ดาว`}
-                          >
-                            <Star
-                              className={`w-4 h-4 ${
-                                isFilled
-                                  ? 'text-amber-400 fill-amber-400'
-                                  : 'text-slate-600'
-                              }`}
-                            />
-                          </button>
-                        );
-                      })}
-                      <span className="text-[11px] text-amber-400 font-bold ml-1">
-                        {item.ratingAvg.toFixed(1)}
-                      </span>
+                  <div className="pt-3 border-t border-slate-700/60 flex items-center justify-between gap-2 flex-wrap">
+                    {/* 5-Star interactive rating & Like button */}
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-1">
+                        {[1, 2, 3, 4, 5].map((star) => {
+                          const isFilled = (currentHover || item.ratingAvg) >= star;
+                          return (
+                            <button
+                              key={star}
+                              type="button"
+                              onMouseEnter={() => setHoverRating(prev => ({ ...prev, [item.id]: star }))}
+                              onMouseLeave={() => setHoverRating(prev => ({ ...prev, [item.id]: 0 }))}
+                              onClick={() => handleRate(item, star)}
+                              className="text-slate-600 hover:text-amber-400 focus:outline-none transition-colors"
+                              title={`ให้คะแนน ${star} ดาว`}
+                            >
+                              <Star
+                                className={`w-4 h-4 ${
+                                  isFilled
+                                    ? 'text-amber-400 fill-amber-400'
+                                    : 'text-slate-600'
+                                }`}
+                              />
+                            </button>
+                          );
+                        })}
+                        <span className="text-[11px] text-amber-400 font-bold ml-1">
+                          {item.ratingAvg.toFixed(1)}
+                        </span>
+                      </div>
+
+                      {/* Like / ชื่นชม Button (สะสมแต้มให้คุณครูผู้โพสต์) */}
+                      <button
+                        type="button"
+                        onClick={() => handleToggleLike(item)}
+                        className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
+                          item.likedBy?.includes(userEmail.toLowerCase().trim())
+                            ? 'bg-rose-500/25 border border-rose-500/60 text-rose-300 shadow-sm shadow-rose-500/20'
+                            : 'bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 hover:text-rose-400'
+                        }`}
+                        title={
+                          item.likedBy?.includes(userEmail.toLowerCase().trim())
+                            ? 'คุณกดถูกใจแล้ว (คลิกเพื่อยกเลิก)'
+                            : `กดถูกใจสื่อนี้ เพื่อมอบแต้มสะสมชื่นชมให้คุณครู ${item.teacherName} (+1 แต้ม)`
+                        }
+                      >
+                        <Heart
+                          className={`w-3.5 h-3.5 transition-transform ${
+                            item.likedBy?.includes(userEmail.toLowerCase().trim())
+                              ? 'text-rose-400 fill-rose-400 scale-110'
+                              : 'text-slate-400'
+                          }`}
+                        />
+                        <span>{item.likes || 0}</span>
+                      </button>
                     </div>
 
                     {/* View Media & Management Buttons */}
@@ -708,6 +784,26 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                 เข้าสู่ระบบด้วย: {userEmail}
               </span>
               <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleToggleLike(activeViewItem)}
+                  className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
+                    activeViewItem.likedBy?.includes(userEmail.toLowerCase().trim())
+                      ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+                  }`}
+                  title="กดถูกใจเพื่อสะสมแต้มชื่นชมให้คุณครู"
+                >
+                  <Heart
+                    className={`w-4 h-4 ${
+                      activeViewItem.likedBy?.includes(userEmail.toLowerCase().trim())
+                        ? 'fill-white text-white'
+                        : 'text-rose-400'
+                    }`}
+                  />
+                  <span>ถูกใจ ({activeViewItem.likes || 0})</span>
+                </button>
+
                 {activeViewItem.onlineUrl && (
                   <a
                     href={activeViewItem.onlineUrl}

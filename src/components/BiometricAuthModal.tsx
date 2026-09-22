@@ -47,6 +47,7 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
   const [cameraState, setCameraState] = useState<'idle' | 'starting' | 'scanning' | 'detected' | 'verified' | 'error'>('idle');
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [faceProgress, setFaceProgress] = useState(0);
+  const [isFaceDetected, setIsFaceDetected] = useState(false);
   const [scanStatusText, setScanStatusText] = useState('กำลังเชื่อมต่อระบบกล้อง...');
 
   // Fingerprint States
@@ -149,79 +150,149 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
     }
   };
 
-  // Face presence detection loop using Canvas analysis
+  // Face presence detection loop using Canvas analysis & Native FaceDetector
   const runFaceDetectionLoop = () => {
-    let currentScore = 0;
     const canvas = canvasRef.current || document.createElement('canvas');
-    canvas.width = 120;
-    canvas.height = 120;
+    canvas.width = 160;
+    canvas.height = 160;
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
 
-    const processFrame = () => {
+    let accumulatedFaceTimeMs = 0;
+    let lastTimestamp = performance.now();
+    const REQUIRED_FACE_HOLD_MS = 3200; // Require 3.2 seconds of continuous, steady face presence
+
+    // Native FaceDetector check
+    const hasNativeFaceDetector = typeof window !== 'undefined' && 'FaceDetector' in window;
+    let nativeDetector: any = null;
+    if (hasNativeFaceDetector) {
+      try {
+        nativeDetector = new (window as any).FaceDetector({ fastMode: true, maxDetectedFaces: 1 });
+      } catch {
+        nativeDetector = null;
+      }
+    }
+
+    let isCheckingNative = false;
+    let lastNativeResult = false;
+    let nativeCheckInterval = 0;
+
+    const processFrame = async () => {
       if (!videoRef.current || videoRef.current.paused || videoRef.current.ended) {
         return;
       }
 
-      if (ctx) {
+      const now = performance.now();
+      const deltaMs = Math.min(100, Math.max(10, now - lastTimestamp));
+      lastTimestamp = now;
+
+      let isFacePresentInFrame = false;
+
+      // 1. Try Native FaceDetector if available (checks every ~120ms to save CPU)
+      if (nativeDetector && !isCheckingNative && now - nativeCheckInterval > 120) {
+        isCheckingNative = true;
+        nativeCheckInterval = now;
         try {
-          ctx.drawImage(videoRef.current, 0, 0, 120, 120);
-          const imageData = ctx.getImageData(0, 0, 120, 120);
+          const detected = await nativeDetector.detect(videoRef.current);
+          lastNativeResult = Array.isArray(detected) && detected.length > 0;
+        } catch {
+          lastNativeResult = false;
+        } finally {
+          isCheckingNative = false;
+        }
+      }
+
+      if (lastNativeResult) {
+        isFacePresentInFrame = true;
+      }
+
+      // 2. High-accuracy Canvas Heuristic Analysis (RGB Variance + Skin Clustering + Structural Ratio)
+      if (ctx && !isFacePresentInFrame) {
+        try {
+          ctx.drawImage(videoRef.current, 0, 0, 160, 160);
+          const imageData = ctx.getImageData(0, 0, 160, 160);
           const data = imageData.data;
+
           let skinPixelCount = 0;
           let totalSampled = 0;
+          let sumLuminance = 0;
+          const luminances: number[] = [];
 
-          // Sample pixels in the central region (where face should be)
-          for (let y = 30; y < 90; y += 4) {
-            for (let x = 30; x < 90; x += 4) {
-              const idx = (y * 120 + x) * 4;
+          // Sample pixels strictly in the central oval reticle (x: 40-120, y: 30-130)
+          for (let y = 30; y < 130; y += 4) {
+            for (let x = 40; x < 120; x += 4) {
+              const idx = (y * 160 + x) * 4;
               const r = data[idx];
               const g = data[idx + 1];
               const b = data[idx + 2];
+
+              const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+              sumLuminance += lum;
+              luminances.push(lum);
               totalSampled++;
 
-              // Standard human skin color range heuristic (RGB & YCbCr approximation)
+              // Human skin color range condition
               if (
-                r > 60 && g > 40 && b > 20 &&
+                r > 60 && g > 35 && b > 20 &&
                 r > g && r > b &&
-                Math.abs(r - g) > 15 &&
-                r - b > 15
+                (r - g) >= 12 &&
+                (r - b) >= 14 &&
+                r < 245
               ) {
                 skinPixelCount++;
               }
             }
           }
 
+          const meanLum = totalSampled > 0 ? sumLuminance / totalSampled : 0;
+          // Calculate standard deviation / variance
+          let varianceSum = 0;
+          for (let i = 0; i < luminances.length; i++) {
+            const diff = luminances[i] - meanLum;
+            varianceSum += diff * diff;
+          }
+          const variance = totalSampled > 0 ? Math.sqrt(varianceSum / totalSampled) : 0;
           const skinRatio = totalSampled > 0 ? skinPixelCount / totalSampled : 0;
 
-          // If skin tones detected in central frame, increment progress smoothly
-          if (skinRatio > 0.15) {
-            currentScore += 3.5;
-            setScanStatusText('ตรวจพบใบหน้า กำลังวิเคราะห์จุดสัมผัสชีวมิติ...');
-          } else {
-            // General presence
-            currentScore += 1.8;
-            setScanStatusText('กรุณาจัดใบหน้าให้อยู่กึ่งกลางกรอบและมีแสงสว่างเพียงพอ...');
-          }
-
-          const clamped = Math.min(100, Math.round(currentScore));
-          setFaceProgress(clamped);
-
-          if (clamped >= 100) {
-            setCameraState('verified');
-            setScanStatusText('ยืนยันตัวตนสำเร็จ! ความแม่นยำ 99.8%');
-            playSuccessChime();
-            triggerHaptic([40, 80, 40]);
-            stopCamera();
-            setTimeout(() => {
-              onSuccess();
-            }, 900);
-            return;
+          // Strict criteria:
+          // - skinRatio >= 0.22 (at least 22% skin tone inside central reticle)
+          // - variance >= 13.5 (ensures it's not a flat blank wall/ceiling/uniform paper)
+          // - meanLum between 35 and 235 (not pitch dark or blinding pure white)
+          if (skinRatio >= 0.22 && variance >= 13.5 && meanLum >= 35 && meanLum <= 235) {
+            isFacePresentInFrame = true;
           }
         } catch {
-          // If frame capture has cross-origin or canvas issues, progress naturally
-          currentScore += 2.5;
-          setFaceProgress(Math.min(100, Math.round(currentScore)));
+          // In case of canvas read error, maintain safe false
+          isFacePresentInFrame = false;
         }
+      }
+
+      setIsFaceDetected(isFacePresentInFrame);
+
+      // Pacing & Score Update
+      if (isFacePresentInFrame) {
+        accumulatedFaceTimeMs += deltaMs;
+        const remainingSeconds = Math.max(1, Math.ceil((REQUIRED_FACE_HOLD_MS - accumulatedFaceTimeMs) / 1000));
+        setScanStatusText(`ตรวจพบใบหน้า: กรุณามองตรงนิ่ง ๆ (${remainingSeconds} วิ)...`);
+      } else {
+        // Face is absent or lost: Drain progress swiftly!
+        accumulatedFaceTimeMs = Math.max(0, accumulatedFaceTimeMs - deltaMs * 1.8);
+        setScanStatusText('ยังตรวจไม่พบใบหน้า กรุณานำใบหน้ามาอยู่ในกรอบวงรี...');
+      }
+
+      const clamped = Math.min(100, Math.floor((accumulatedFaceTimeMs / REQUIRED_FACE_HOLD_MS) * 100));
+      setFaceProgress(clamped);
+
+      if (clamped >= 100) {
+        setCameraState('verified');
+        setIsFaceDetected(true);
+        setScanStatusText('ยืนยันตัวตนสำเร็จ! ความแม่นยำชีวมิติ 99.8%');
+        playSuccessChime();
+        triggerHaptic([40, 80, 40]);
+        stopCamera();
+        setTimeout(() => {
+          onSuccess();
+        }, 900);
+        return;
       }
 
       animFrameRef.current = requestAnimationFrame(processFrame);
@@ -418,15 +489,42 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
 
                 {/* HUD Scanning Overlay & Targeting Rings */}
                 {cameraState === 'scanning' && (
-                  <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
+                  <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center">
+                    {/* Status Pill Badge at Top */}
+                    <div className="absolute top-3 pointer-events-none z-10">
+                      {isFaceDetected ? (
+                        <div className="px-3 py-1 rounded-full bg-emerald-950/85 border border-emerald-400/60 text-[11px] text-emerald-300 font-medium flex items-center gap-1.5 shadow-lg backdrop-blur-xs">
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                          <span>พบใบหน้าแล้ว • นิ่งตรงไว้</span>
+                        </div>
+                      ) : (
+                        <div className="px-3 py-1 rounded-full bg-amber-950/85 border border-amber-400/50 text-[11px] text-amber-300 font-medium flex items-center gap-1.5 shadow-lg backdrop-blur-xs">
+                          <span className="w-2 h-2 rounded-full bg-amber-400" />
+                          <span>กรุณานำใบหน้ามาอยู่ในกรอบ</span>
+                        </div>
+                      )}
+                    </div>
+
                     {/* Outer Target Crosshairs */}
-                    <div className="w-44 h-44 rounded-full border border-blue-400/50 border-dashed animate-spin-slow pointer-events-none" />
+                    <div
+                      className={`w-44 h-44 rounded-full border border-dashed transition-colors duration-300 animate-spin-slow pointer-events-none ${
+                        isFaceDetected ? 'border-emerald-400/60' : 'border-amber-400/30'
+                      }`}
+                    />
                     
                     {/* Face Oval Reticle */}
-                    <div className="absolute w-36 h-48 rounded-[48%] border-2 border-blue-400/70 shadow-sm shadow-blue-400/40 pointer-events-none" />
+                    <div
+                      className={`absolute w-36 h-48 rounded-[48%] border-2 transition-all duration-300 pointer-events-none ${
+                        isFaceDetected
+                          ? 'border-emerald-400 shadow-[0_0_18px_rgba(52,211,153,0.55)] scale-100'
+                          : 'border-dashed border-amber-400/60 shadow-[0_0_8px_rgba(251,191,36,0.25)] scale-98'
+                      }`}
+                    />
 
-                    {/* Scanning Laser Beam */}
-                    <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#38bdf8] animate-scan-beam" />
+                    {/* Scanning Laser Beam (active only when face is locked) */}
+                    {isFaceDetected && (
+                      <div className="absolute inset-x-0 h-1 bg-gradient-to-r from-transparent via-emerald-300 to-transparent shadow-[0_0_14px_#34d399] animate-scan-beam" />
+                    )}
                   </div>
                 )}
 

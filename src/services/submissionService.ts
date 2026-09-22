@@ -168,6 +168,8 @@ export interface TeacherMediaWork {
   ratingAvg: number;
   ratingCount: number;
   views: number;
+  likes?: number;
+  likedBy?: string[];
   userRatings?: { [emailKey: string]: number };
   submittedByEmail?: string;
   createdAt: string;
@@ -263,6 +265,8 @@ export async function saveInnovationSubmission(data: {
         ratingAvg: 5.0,
         ratingCount: 1,
         views: 1,
+        likes: 0,
+        likedBy: [],
         submittedByEmail: data.userEmail.trim(),
         createdAt: nowIso,
       };
@@ -881,6 +885,8 @@ export async function addTeacherMediaDirectly(data: {
       ratingAvg: 5.0,
       ratingCount: 1,
       views: 1,
+      likes: 0,
+      likedBy: [],
       submittedByEmail: data.submittedByEmail.trim(),
       createdAt: nowIso,
     };
@@ -1244,6 +1250,79 @@ export async function rateTeacherMedia(
   } catch (err) {
     console.error('Failed to rate media:', err);
     return false;
+  }
+}
+
+/**
+ * Toggle like for a teacher media item.
+ * Increments or decrements like count and tracks user email in likedBy array.
+ * When users like a teacher's media, it accumulates points on the teacher's profile!
+ */
+export async function toggleLikeTeacherMedia(
+  mediaId: string,
+  userEmail: string
+): Promise<{ success: boolean; likes: number; isLiked: boolean; error?: string }> {
+  try {
+    const normEmail = (userEmail || 'anonymous').toLowerCase().trim();
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaId);
+    const snap = await getDoc(docRef);
+
+    let currentLikes = 0;
+    let likedBy: string[] = [];
+    let authorEmail: string | undefined;
+
+    if (snap.exists()) {
+      const data = snap.data() as TeacherMediaWork;
+      currentLikes = typeof data.likes === 'number' ? data.likes : 0;
+      likedBy = Array.isArray(data.likedBy) ? data.likedBy : [];
+      authorEmail = data.submittedByEmail;
+    }
+
+    const isAlreadyLiked = likedBy.includes(normEmail);
+    let newLikes: number;
+    let isLiked: boolean;
+
+    if (isAlreadyLiked) {
+      likedBy = likedBy.filter((e) => e !== normEmail);
+      newLikes = Math.max(0, currentLikes - 1);
+      isLiked = false;
+    } else {
+      likedBy.push(normEmail);
+      newLikes = currentLikes + 1;
+      isLiked = true;
+    }
+
+    await setDoc(
+      docRef,
+      {
+        likes: newLikes,
+        likedBy,
+      },
+      { merge: true }
+    );
+
+    // If media has an author email, sync stats.points on their user profile in Firestore
+    if (authorEmail && authorEmail.trim()) {
+      try {
+        const safeDocId = encodeURIComponent(authorEmail.toLowerCase().trim());
+        const profileRef = doc(db, 'user_profiles', safeDocId);
+        const profileSnap = await getDoc(profileRef);
+        if (profileSnap.exists()) {
+          const currentPoints = profileSnap.data()?.stats?.points ?? 0;
+          const updatedPoints = isLiked ? currentPoints + 1 : Math.max(0, currentPoints - 1);
+          await updateDoc(profileRef, {
+            'stats.points': updatedPoints,
+          });
+        }
+      } catch (err) {
+        console.warn('Could not sync points to author user_profiles:', err);
+      }
+    }
+
+    return { success: true, likes: newLikes, isLiked };
+  } catch (err: any) {
+    console.error('Failed to toggle like on teacher media:', err);
+    return { success: false, likes: 0, isLiked: false, error: err?.message || 'ไม่สามารถกดถูกใจได้' };
   }
 }
 

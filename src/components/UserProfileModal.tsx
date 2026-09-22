@@ -23,7 +23,9 @@ import {
   BookmarkCheck,
   Edit3,
   RefreshCw,
-  Share2
+  Share2,
+  Heart,
+  RotateCcw
 } from 'lucide-react';
 import { 
   FullUserProfile, 
@@ -35,8 +37,16 @@ import {
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS
 } from '../services/userProfileService';
-import { subscribeUserInnovations } from '../services/submissionService';
-import { subscribeAllLoginLogs, LoginLogEntry } from '../services/auditService';
+import { 
+  subscribeUserInnovations, 
+  subscribeTeacherMedia, 
+  TeacherMediaWork 
+} from '../services/submissionService';
+import { 
+  subscribeAllLoginLogs, 
+  LoginLogEntry, 
+  resetAllLoginLogs 
+} from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 
 interface UserProfileModalProps {
@@ -109,6 +119,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   // Real-time verified login logs & Year selector
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
+  const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
+  const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
+  const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
 
   // Subscribe to real-time login logs
   useEffect(() => {
@@ -118,6 +131,37 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
     return () => unsub();
   }, [isOpen]);
+
+  // Subscribe to real-time teacher media repository for kudos/likes counting
+  useEffect(() => {
+    if (!isOpen) return;
+    const unsub = subscribeTeacherMedia((works) => {
+      setTeacherMediaList(works);
+    });
+    return () => unsub();
+  }, [isOpen]);
+
+  // Handle Admin visitor logs reset to 0
+  const handleResetAllVisitorLogs = async () => {
+    if (!window.confirm('คุณแน่ใจหรือไม่ว่าต้องการรีเซ็ตสถิติผู้เข้าชมและประวัติการเข้าใช้งานทั้งระบบเป็น 0 เพื่อเริ่มนับตามจำนวนครั้งจริงตั้งแต่วันนี้?')) {
+      return;
+    }
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAllLoginLogs();
+      if (res.success) {
+        setLoginLogs([]);
+        setResetLogsSuccess(`รีเซ็ตสถิติผู้เข้าชมเป็น 0 สำเร็จแล้ว (ลบประวัติเดิม ${res.count} รายการ เริ่มนับจริงทีละ 1)`);
+        setTimeout(() => setResetLogsSuccess(null), 4000);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
 
   // Sync profile data on mount & record visit
   useEffect(() => {
@@ -198,26 +242,86 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return () => unsubscribe();
   }, [isOpen, userEmail]);
 
+  // Media posted by this teacher and total likes (Kudos points)
+  const myMediaWorks = React.useMemo(() => {
+    const norm = userEmail.toLowerCase().trim();
+    return teacherMediaList.filter(
+      (m) => m.submittedByEmail?.toLowerCase().trim() === norm
+    );
+  }, [teacherMediaList, userEmail]);
+
+  // Real-time points accumulated from praise/likes given to teacher's media at repository (starts at 0)
+  const teacherKudosPoints = React.useMemo(() => {
+    return myMediaWorks.reduce((sum, item) => sum + (item.likes || 0), 0);
+  }, [myMediaWorks]);
+
   // Real-time verified visitor statistics based on authentic login logs
   const verifiedStats = React.useMemo(() => {
-    const todayStr = new Date().toISOString().split('T')[0];
-    const thisMonthStr = todayStr.slice(0, 7); // YYYY-MM
-    const currentYearStr = selectedYear;
+    const targetYearNum = parseInt(selectedYear) || 2026;
+    const now = new Date();
+    const isCurrentYear = now.getFullYear() === targetYearNum;
+    const currentMonthIdx = now.getMonth();
+    const todayStr = now.toISOString().split('T')[0];
 
     // Filter by user's email
     const myLogs = loginLogs.filter(
       (l) => l.email?.toLowerCase().trim() === userEmail?.toLowerCase().trim()
     );
 
-    const myTodayVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length;
-    const myMonthVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(thisMonthStr)).length;
-    const myYearVisits = myLogs.filter((l) => l.loginTimestamp?.startsWith(currentYearStr)).length;
-
-    // System wide verified logs
-    const allTodayVisits = loginLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length;
-    const allMonthVisits = loginLogs.filter((l) => l.loginTimestamp?.startsWith(thisMonthStr)).length;
-    const allYearLogs = loginLogs.filter((l) => l.loginTimestamp?.startsWith(currentYearStr));
+    // All logs that fall in selected target year
+    const allYearLogs = loginLogs.filter((l) => {
+      if (!l.loginTimestamp) return false;
+      const d = new Date(l.loginTimestamp);
+      return !isNaN(d.getTime()) && d.getFullYear() === targetYearNum;
+    });
     const allYearVisits = allYearLogs.length;
+
+    // User's logs in selected target year
+    const myYearLogs = myLogs.filter((l) => {
+      if (!l.loginTimestamp) return false;
+      const d = new Date(l.loginTimestamp);
+      return !isNaN(d.getTime()) && d.getFullYear() === targetYearNum;
+    });
+    const myYearVisits = myYearLogs.length;
+
+    // Monthly breakdown for selected year (1-12)
+    // Guarantee: Each log in allYearLogs falls into EXACTLY ONE month (d.getMonth() === idx).
+    // Therefore, the sum of allCount over 12 months is STRICTLY EQUAL to allYearVisits!
+    const monthNames = [
+      'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
+      'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
+    ];
+
+    const monthlyData = monthNames.map((name, idx) => {
+      const myCount = myYearLogs.filter((l) => {
+        const d = new Date(l.loginTimestamp);
+        return d.getMonth() === idx;
+      }).length;
+      const allCount = allYearLogs.filter((l) => {
+        const d = new Date(l.loginTimestamp);
+        return d.getMonth() === idx;
+      }).length;
+      return {
+        monthName: name,
+        monthIndex: idx + 1,
+        myCount,
+        allCount,
+      };
+    });
+
+    const allTodayVisits = isCurrentYear
+      ? allYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length
+      : 0;
+    const allMonthVisits = isCurrentYear
+      ? (monthlyData[currentMonthIdx]?.allCount || 0)
+      : 0;
+
+    const myTodayVisits = isCurrentYear
+      ? myYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length
+      : 0;
+    const myMonthVisits = isCurrentYear
+      ? (monthlyData[currentMonthIdx]?.myCount || 0)
+      : 0;
 
     const uniqueVerifiedUsersYear = new Set(
       allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
@@ -227,32 +331,14 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
     ).size;
 
-    // Monthly breakdown for selected year (1-12)
-    const monthNames = [
-      'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
-      'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
-    ];
-
-    const monthlyData = monthNames.map((name, idx) => {
-      const monthPrefix = `${currentYearStr}-${String(idx + 1).padStart(2, '0')}`;
-      const myCount = myLogs.filter((l) => l.loginTimestamp?.startsWith(monthPrefix)).length;
-      const allCount = loginLogs.filter((l) => l.loginTimestamp?.startsWith(monthPrefix)).length;
-      return {
-        monthName: name,
-        monthPrefix,
-        myCount,
-        allCount,
-      };
-    });
-
     return {
       myTodayVisits,
       myMonthVisits,
       myYearVisits,
-      myTotalVisits: myLogs.length,
+      myTotalVisits: myLogs.length, // 1 visit = 1 star point
       allTodayVisits,
       allMonthVisits,
-      allYearVisits,
+      allYearVisits, // strictly equals sum of 12 monthly allCount
       uniqueVerifiedUsersYear,
       allTotalVisits: loginLogs.length,
       uniqueAllUsers,
@@ -489,21 +575,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             <span>สถิติการเข้าชม</span>
           </button>
 
-          {/* Tab 4: ให้คะแนนดาวสะสมแต้มและชื่นชม */}
+          {/* Tab 4: คะแนนดาว & แต้มสะสมชื่นชม */}
           <button
             type="button"
             id="tab-btn-praise-ratings"
             onClick={() => setActiveTab('praise')}
             className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl font-medium transition-all whitespace-nowrap ${
               activeTab === 'praise'
-                ? 'bg-gradient-to-r from-amber-500 to-orange-500 text-white shadow-md shadow-amber-500/30'
+                ? 'bg-gradient-to-r from-amber-500 to-rose-500 text-white shadow-md shadow-amber-500/30'
                 : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
             }`}
           >
             <Star className="w-4 h-4 text-amber-300 fill-amber-300" />
-            <span>ให้คะแนนดาว & ชื่นชม</span>
-            <span className="ml-1 px-1.5 py-0.2 rounded-full bg-amber-400/30 text-amber-200 text-[10px] font-bold">
-              {profile.stats.points} แต้ม
+            <span>คะแนนดาว & แต้มสะสมชื่นชม</span>
+            <span className="ml-1 px-1.5 py-0.2 rounded-full bg-white/20 text-white text-[10px] font-bold">
+              {teacherKudosPoints} แต้ม
             </span>
           </button>
         </div>
@@ -854,12 +940,45 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
              ========================================================================= */}
           {/* =========================================================================
               TAB 3: เช็คสถิติการเข้าชม (Visitor & Engagement Statistics)
-              - รีเซ็ทนับตามความเป็นจริงจากอีเมลที่มีตัวตนจริงเท่านั้น
-              - สรุปสถิติ รายวัน รายเดือน รายปี พร้อมตัวเลือกปี
+              - คิดตามจำนวนคนที่เข้าต่อครั้งจริงเท่านั้น ไม่บวกเพิ่ม
+              - ยอดรวมทั้งระบบและยอดรวมแต่ละเดือนตรงกัน 100%
+              - ผู้ดูแลระบบสามารถรีเซ็ตสถิติเพื่อเริ่มนับจริงได้
              ========================================================================= */}
           {activeTab === 'stats' && (
             <div className="space-y-4 animate-in fade-in duration-200">
               
+              {/* Admin Reset Banner (Only for Admin weerapong1625@acu.ac.th) */}
+              {isMasterWeerapong && (
+                <div className="p-3.5 rounded-2xl bg-gradient-to-r from-red-950/60 to-slate-900 border border-red-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-red-500/20 text-red-400 flex items-center justify-center flex-shrink-0">
+                      <RotateCcw className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-red-200">เครื่องมือแอดมิน: รีเซ็ตสถิติผู้เข้าชมทั้งระบบเป็น 0</p>
+                      <p className="text-[11px] text-slate-400">ล้างประวัติการเข้าใช้งานเดิมทั้งหมด เพื่อเริ่มนับตามจำนวนครั้งจริง 1 ครั้ง = 1 ยอดเข้าชม</p>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleResetAllVisitorLogs}
+                    disabled={isResettingLogs}
+                    className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md shadow-red-600/30 cursor-pointer disabled:opacity-50 self-end sm:self-auto"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                    <span>{isResettingLogs ? 'กำลังรีเซ็ต...' : 'รีเซ็ตสถิติเป็น 0'}</span>
+                  </button>
+                </div>
+              )}
+
+              {/* Reset Success Notice */}
+              {resetLogsSuccess && (
+                <div className="p-3 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 text-xs flex items-center gap-2 animate-in fade-in">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                  <span>{resetLogsSuccess}</span>
+                </div>
+              )}
+
               {/* Year Filter & Real Audit Notice */}
               <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
                 <div className="flex items-center gap-2.5">
@@ -867,8 +986,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     <BarChart3 className="w-4 h-4" />
                   </div>
                   <div>
-                    <h4 className="text-xs font-bold text-white">สถิติการเข้าใช้งานจริง (นับจากอีเมลที่ยืนยันตัวตนจริง)</h4>
-                    <p className="text-[11px] text-slate-400">ระบบคำนวณแบบ Real-time ตัดรอบวัน เดือน ปี และรีเซ็ตอัตโนมัติ</p>
+                    <h4 className="text-xs font-bold text-white">สถิติการเข้าใช้งานจริง (คิดตามจริงต่อครั้ง ไม่บวกเพิ่ม)</h4>
+                    <p className="text-[11px] text-slate-400">คำนวณตามประวัติการเข้าสู่ระบบจริง ยอดสรุปรวมตรงกับรายเดือน 100%</p>
                   </div>
                 </div>
 
@@ -909,47 +1028,46 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </div>
                 </div>
 
-                {/* Metric 2: ยอดรวมผู้เข้าชมทั้งระบบที่มีตัวตนจริง */}
+                {/* Metric 2: ยอดรวมผู้เข้าชมทั้งระบบคิดตามจริง */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-indigo-500/20 text-indigo-400 flex items-center justify-center mb-2">
                     <User className="w-4 h-4" />
                   </div>
-                  <p className="text-xs text-slate-400">ผู้เข้าชมทั้งระบบ ({selectedYear})</p>
+                  <p className="text-xs text-slate-400">ยอดเข้าชมทั้งระบบ ({selectedYear})</p>
                   <p className="text-xl sm:text-2xl font-black text-indigo-300 mt-0.5">
-                    {verifiedStats.uniqueVerifiedUsersYear} <span className="text-xs font-normal text-slate-400">คนไม่ซ้ำ</span>
+                    {verifiedStats.allYearVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span>
                   </p>
                   <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>ทั้งหมด: {verifiedStats.allYearVisits} ครั้ง</span>
-                    <span>วันนี้: {verifiedStats.allTodayVisits}</span>
+                    <span>ผู้ใช้จริง: {verifiedStats.uniqueVerifiedUsersYear} บัญชี</span>
+                    <span>วันนี้: {verifiedStats.allTodayVisits} ครั้ง</span>
                   </div>
                 </div>
 
-                {/* Metric 3: คะแนนเฉลี่ยดาว */}
+                {/* Metric 3: คะแนนดาวสะสม (การเข้าชม 1 ครั้ง = 1 ดาว) */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center mb-2">
                     <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
                   </div>
-                  <p className="text-xs text-slate-400">คะแนนดาวเฉลี่ย</p>
-                  <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5 flex items-center gap-1">
-                    <span>{profile.stats.averageRating || '0.0'}</span>
-                    <span className="text-xs font-normal text-slate-400">/ 5.0</span>
+                  <p className="text-xs text-slate-400">คะแนนดาวสะสม (การเข้าชม)</p>
+                  <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5">
+                    {verifiedStats.myTotalVisits} <span className="text-xs font-normal text-slate-400">ดาว</span>
                   </p>
                   <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>จากผู้ประเมิน: {profile.stats.totalRatings || 0} คน</span>
+                    <span>1 ครั้ง = 1 ดาว (เข้าจริง {verifiedStats.myTotalVisits} ครั้ง)</span>
                   </div>
                 </div>
 
-                {/* Metric 4: แต้มสะสมชื่นชม */}
+                {/* Metric 4: แต้มสะสมชื่นชม (จากผลงานสื่อที่โพสต์แล้วมีคนกดถูกใจ) */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
-                  <div className="w-9 h-9 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center mb-2">
-                    <Sparkles className="w-4 h-4" />
+                  <div className="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center mb-2">
+                    <Heart className="w-4 h-4 fill-rose-400 text-rose-400" />
                   </div>
-                  <p className="text-xs text-slate-400">แต้มสะสมชื่นชม</p>
-                  <p className="text-xl sm:text-2xl font-black text-emerald-400 mt-0.5">
-                    {profile.stats.points || 0} <span className="text-xs font-normal text-slate-400">แต้ม</span>
+                  <p className="text-xs text-slate-400">แต้มสะสมชื่นชม (ผลงานสื่อ)</p>
+                  <p className="text-xl sm:text-2xl font-black text-rose-400 mt-0.5">
+                    {teacherKudosPoints} <span className="text-xs font-normal text-slate-400">แต้ม</span>
                   </p>
                   <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>คำชื่นชม: {profile.praises.length || 0} รายการ</span>
+                    <span>สื่อ {myMediaWorks.length} ชิ้น • ถูกใจ {teacherKudosPoints} ครั้ง</span>
                   </div>
                 </div>
               </div>
@@ -959,22 +1077,33 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
                     <BarChart3 className="w-4 h-4 text-purple-400" />
-                    <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear}</span>
+                    <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear} (คิดตามจริง ไม่บวกเพิ่ม)</span>
                   </h4>
-                  <span className="text-[11px] text-slate-400">รวม 12 เดือน</span>
+                  <span className="text-[11px] text-slate-400">12 เดือน ตรงกับยอดรวม</span>
                 </div>
 
                 <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-12 gap-2 text-center">
                   {verifiedStats.monthlyData.map((m) => (
                     <div
-                      key={m.monthPrefix}
+                      key={m.monthIndex}
                       className="p-2 rounded-xl bg-slate-900/60 border border-slate-800 flex flex-col justify-between"
                     >
                       <span className="text-[11px] font-semibold text-slate-300">{m.monthName}</span>
-                      <span className="text-sm font-bold text-white my-0.5">{m.myCount}</span>
-                      <span className="text-[9px] text-slate-400">รวม: {m.allCount}</span>
+                      <span className="text-sm font-bold text-indigo-300 my-0.5">{m.allCount}</span>
+                      <span className="text-[9px] text-slate-400">ตนเอง: {m.myCount}</span>
                     </div>
                   ))}
+                </div>
+
+                {/* Mathematical Alignment Guarantee Summary */}
+                <div className="mt-3 pt-2.5 border-t border-slate-700/60 flex flex-col sm:flex-row sm:items-center justify-between text-xs text-slate-300 gap-1.5">
+                  <span className="font-medium">
+                    ยอดรวมทั้งปี {selectedYear}: เข้าชมทั้งระบบ <strong className="text-indigo-400">{verifiedStats.allYearVisits}</strong> ครั้ง | ของตนเอง <strong className="text-blue-400">{verifiedStats.myYearVisits}</strong> ครั้ง
+                  </span>
+                  <span className="text-[11px] text-emerald-400 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5" />
+                    ยอดรวมแต่ละเดือนตรงกับยอดสรุป 100% คิดตามจริง ไม่บวกเพิ่ม
+                  </span>
                 </div>
               </div>
 
@@ -982,7 +1111,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/60 space-y-3">
                 <h4 className="text-xs font-bold text-white flex items-center gap-2">
                   <Clock className="w-4 h-4 text-sky-400" />
-                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ</span>
+                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ (คิด 1 ครั้ง = 1 ดาว)</span>
                 </h4>
                 
                 {verifiedStats.myRecentLogs.length > 0 ? (
@@ -1015,77 +1144,176 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           )}
 
           {/* =========================================================================
-              TAB 4: การให้คะแนนดาวสำหรับผู้เข้าชมสะสมแต้มและชื่นชม เมื่อเข้าชม
-              - ดาว 1 - 5 ดาวแบบ Interactive
-              - สะสมแต้มเกียรติยศ (+25 แต้ม / 5 ดาว)
-              - กล่องแสดงความชื่นชมและคำนิยม (Wall of Praises)
+              TAB 4: คะแนนดาว & แต้มสะสมชื่นชม
+              - คะแนนดาว: คำนวณจากการเข้าชมเว็บไซต์ ครั้งละ 1 แต้ม อ้างอิงประวัติการเข้าชมตนเอง
+              - แต้มสะสมชื่นชม: เริ่มต้นคงค่า 0 แต้ม นับจากเมื่อคุณครูโพสต์สื่อ และมีคนกดถูกใจที่หน้าคลังสื่อ
+              - สมุดบันทึกข้อความชื่นชมและคำนิยม
              ========================================================================= */}
           {activeTab === 'praise' && (
             <div className="space-y-5 animate-in fade-in duration-200">
               
-              {/* Form to submit stars & praise */}
-              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-slate-800/90 via-slate-850 to-slate-900 border border-amber-500/30 shadow-lg">
+              {/* Section 1: คะแนนดาวสะสมจากการเข้าชมระบบ (Star Points) */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-amber-950/40 via-slate-850 to-slate-900 border border-amber-500/30 shadow-lg">
                 <div className="flex items-center justify-between mb-3">
-                  <div className="flex items-center gap-2">
-                    <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
-                      <Star className="w-4 h-4 fill-amber-400" />
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                      <Star className="w-5 h-5 fill-amber-400 text-amber-400" />
                     </div>
                     <div>
                       <h3 className="text-sm font-bold text-white">
-                        ให้คะแนนดาวและส่งข้อความชื่นชมสะสมแต้ม
+                        คะแนนดาวสะสมจากการเข้าชมเว็บไซต์ (1 ครั้ง = 1 แต้มดาว)
                       </h3>
                       <p className="text-[11px] text-slate-400">
-                        ผู้เข้าชมสามารถมอบคะแนนดาวและสะสมแต้มให้แก่ผู้พัฒนานวัตกรรม
+                        อ้างอิงจากข้อมูลการเข้าชมระบบของตนเองของผู้ใช้งานจริง นับตามจำนวนครั้งจริง
                       </p>
                     </div>
                   </div>
-                  <div className="px-2.5 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-xs font-bold flex items-center gap-1">
-                    <Sparkles className="w-3.5 h-3.5" />
-                    <span>+{ratingInput * 5} แต้ม</span>
+                  <div className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-xs font-black flex items-center gap-1">
+                    <Star className="w-3.5 h-3.5 fill-amber-300" />
+                    <span>{verifiedStats.myTotalVisits} แต้มดาว</span>
                   </div>
                 </div>
 
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 pt-3 border-t border-slate-700/60 text-center">
+                  <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                    <span className="text-[10px] text-slate-400">เข้าชมทั้งหมด</span>
+                    <p className="text-base font-bold text-amber-400 mt-0.5">{verifiedStats.myTotalVisits} ครั้ง</p>
+                    <span className="text-[9px] text-slate-500">={verifiedStats.myTotalVisits} ดาว</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                    <span className="text-[10px] text-slate-400">เข้าชมปี {selectedYear}</span>
+                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myYearVisits} ครั้ง</p>
+                    <span className="text-[9px] text-slate-500">={verifiedStats.myYearVisits} ดาว</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                    <span className="text-[10px] text-slate-400">เข้าชมเดือนนี้</span>
+                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myMonthVisits} ครั้ง</p>
+                    <span className="text-[9px] text-slate-500">={verifiedStats.myMonthVisits} ดาว</span>
+                  </div>
+                  <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
+                    <span className="text-[10px] text-slate-400">เข้าชมวันนี้</span>
+                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myTodayVisits} ครั้ง</p>
+                    <span className="text-[9px] text-slate-500">={verifiedStats.myTodayVisits} ดาว</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: แต้มสะสมชื่นชมจากผลงานสื่อนวัตกรรม (Teacher Media Kudos) */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-rose-950/40 via-slate-850 to-slate-900 border border-rose-500/30 shadow-lg">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center">
+                      <Heart className="w-5 h-5 fill-rose-400 text-rose-400" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white">
+                        คะแนนแต้มสะสมชื่นชมจากผลงานสื่อ (คงค่า 0 แต้มเริ่มต้น)
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        นับแต้มจากเมื่อคุณครูโพสต์สื่อ และสื่อของคุณครูคนนั้นมีคนกดถูกใจที่หน้าคลังสื่อ
+                      </p>
+                    </div>
+                  </div>
+                  <div className="px-3 py-1 rounded-full bg-rose-500/20 text-rose-300 border border-rose-400/30 text-xs font-black flex items-center gap-1">
+                    <Heart className="w-3.5 h-3.5 fill-rose-300" />
+                    <span>{teacherKudosPoints} แต้ม</span>
+                  </div>
+                </div>
+
+                {/* Teacher's media works list and their like counts */}
+                <div className="mt-3 pt-3 border-t border-slate-700/60">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs font-semibold text-slate-300">
+                      ผลงานสื่อของคุณครูในคลัง ({myMediaWorks.length} ชิ้น):
+                    </span>
+                    <span className="text-[11px] text-rose-400 font-medium">
+                      ถูกใจรวม {teacherKudosPoints} ครั้ง
+                    </span>
+                  </div>
+
+                  {myMediaWorks.length > 0 ? (
+                    <div className="space-y-2">
+                      {myMediaWorks.map((work) => (
+                        <div
+                          key={work.id}
+                          className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 text-xs gap-3"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {work.thumbnailUrl ? (
+                              <img
+                                src={work.thumbnailUrl}
+                                alt={work.title}
+                                className="w-9 h-9 rounded-lg object-cover flex-shrink-0 border border-slate-700"
+                              />
+                            ) : (
+                              <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center flex-shrink-0 text-slate-400">
+                                <FileText className="w-4 h-4" />
+                              </div>
+                            )}
+                            <div className="min-w-0">
+                              <p className="font-semibold text-white truncate">{work.title}</p>
+                              <p className="text-[10px] text-slate-400 truncate">{work.subjectGroup || work.subjectName || work.mediaType || 'สื่อนวัตกรรม'}</p>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            <span className="px-2.5 py-1 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/30 font-bold text-xs flex items-center gap-1">
+                              <Heart className="w-3.5 h-3.5 fill-rose-400 text-rose-400" />
+                              <span>{work.likes || 0} ถูกใจ</span>
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 text-center space-y-2">
+                      <p className="text-xs text-slate-400">
+                        คุณครูยังไม่มีผลงานสื่อในคลังสื่อ (แต้มสะสมชื่นชมคงค่า 0 แต้ม)
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        เมื่อส่งผลงานสื่อและมีผู้เข้าชมกดถูกใจที่หน้าคลังสื่อ แต้มจะถูกนำมารวมที่นี่โดยอัตโนมัติ
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setActiveTab('innovations')}
+                        className="mt-1 px-3.5 py-1.5 rounded-xl bg-blue-600/30 hover:bg-blue-600/50 border border-blue-500/40 text-blue-300 text-xs font-medium transition-colors"
+                      >
+                        ไปยังหน้าส่งสื่อนวัตกรรม 5 ชิ้น
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Section 3: แบบฟอร์มส่งข้อความชื่นชมและคำนิยม (Wall of Praises) */}
+              <div className="p-4 sm:p-5 rounded-2xl bg-slate-800/80 border border-slate-700 shadow-md space-y-3.5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-xl bg-sky-500/20 text-sky-400 flex items-center justify-center">
+                      <ThumbsUp className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-white">
+                        สมุดบันทึกข้อความชื่นชมและคำนิยม
+                      </h3>
+                      <p className="text-[11px] text-slate-400">
+                        ร่วมเขียนข้อความชื่นชม ให้กำลังใจ และเสนอแนะแก่ผู้พัฒนานวัตกรรม
+                      </p>
+                    </div>
+                  </div>
+                  <span className="text-xs text-slate-400">
+                    {profile.praises?.length || 0} ข้อความ
+                  </span>
+                </div>
+
                 {praiseSuccessNotice && (
-                  <div className="mb-3 p-3 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 text-xs flex items-center gap-2 animate-in fade-in">
+                  <div className="p-3 rounded-xl bg-emerald-950/80 border border-emerald-500/50 text-emerald-200 text-xs flex items-center gap-2 animate-in fade-in">
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
                     <span>{praiseSuccessNotice}</span>
                   </div>
                 )}
 
-                <form onSubmit={handleSubmitPraise} className="space-y-3.5">
-                  {/* Interactive 5 Star Selector */}
-                  <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                    <span className="text-xs text-slate-300 font-semibold">เลือกระดับคะแนนดาว:</span>
-                    <div className="flex items-center gap-1.5">
-                      {[1, 2, 3, 4, 5].map((starVal) => {
-                        const isFilled = (hoverRating || ratingInput) >= starVal;
-                        return (
-                          <button
-                            key={starVal}
-                            type="button"
-                            onClick={() => setRatingInput(starVal)}
-                            onMouseEnter={() => setHoverRating(starVal)}
-                            onMouseLeave={() => setHoverRating(0)}
-                            className="p-1 text-slate-600 hover:scale-110 transition-transform focus:outline-none"
-                            title={`ให้ ${starVal} ดาว`}
-                          >
-                            <Star
-                              className={`w-6 h-6 transition-colors ${
-                                isFilled
-                                  ? 'text-amber-400 fill-amber-400 drop-shadow-[0_0_8px_rgba(251,191,36,0.5)]'
-                                  : 'text-slate-600'
-                              }`}
-                            />
-                          </button>
-                        );
-                      })}
-                      <span className="ml-2 text-xs font-bold text-amber-400">
-                        {ratingInput} ดาว (ยอดเยี่ยม)
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Visitor Name & School */}
+                <form onSubmit={handleSubmitPraise} className="space-y-3">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     <div>
                       <label className="block text-[11px] font-medium text-slate-400 mb-1">
@@ -1113,7 +1341,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Comment & Quick Chips */}
                   <div>
                     <label className="block text-[11px] font-medium text-slate-400 mb-1">
                       ข้อความชื่นชมและข้อเสนอแนะ:
@@ -1126,7 +1353,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       className="w-full px-3 py-2 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 resize-none"
                     />
 
-                    {/* Quick suggestion chips */}
                     <div className="flex items-center gap-1.5 flex-wrap mt-1.5">
                       <span className="text-[10px] text-slate-500">ข้อความด่วน:</span>
                       {QUICK_PRAISE_TEMPLATES.map((tmpl, idx) => (
@@ -1142,27 +1368,52 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     </div>
                   </div>
 
-                  {/* Submit Button */}
                   <div className="flex items-center justify-end pt-1">
                     <button
                       type="submit"
                       disabled={isSubmittingPraise}
-                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-white font-semibold text-xs shadow-md shadow-amber-500/30 transition-all flex items-center gap-1.5"
+                      className="px-5 py-2 rounded-xl bg-gradient-to-r from-sky-600 to-blue-600 hover:from-sky-500 hover:to-blue-500 text-white font-semibold text-xs shadow-md transition-all flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                     >
                       {isSubmittingPraise ? (
                         <>
                           <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                          <span>กำลังส่งคำชื่นชม...</span>
+                          <span>กำลังส่ง...</span>
                         </>
                       ) : (
                         <>
-                          <ThumbsUp className="w-3.5 h-3.5" />
-                          <span>ส่งคะแนนดาวและสะสมแต้ม (+{ratingInput * 5} แต้ม)</span>
+                          <Send className="w-3.5 h-3.5" />
+                          <span>ส่งข้อความชื่นชม</span>
                         </>
                       )}
                     </button>
                   </div>
                 </form>
+
+                {/* Display list of praises if any */}
+                {profile.praises && profile.praises.length > 0 && (
+                  <div className="space-y-2 pt-3 border-t border-slate-700/60">
+                    <h5 className="text-xs font-semibold text-slate-300">ข้อความชื่นชมล่าสุด:</h5>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {profile.praises.slice(0, 10).map((praise, idx) => (
+                        <div
+                          key={idx}
+                          className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs space-y-1"
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="font-semibold text-slate-200">{praise.visitorName || 'ผู้เข้าชม'}</span>
+                            <span className="text-[10px] text-slate-400">{praise.timestamp || ''}</span>
+                          </div>
+                          {praise.comment && (
+                            <p className="text-slate-300 text-xs">{praise.comment}</p>
+                          )}
+                          {praise.visitorSchool && (
+                            <p className="text-[10px] text-slate-500">{praise.visitorSchool}</p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

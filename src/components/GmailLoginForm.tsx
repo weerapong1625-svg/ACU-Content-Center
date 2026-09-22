@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck, Fingerprint, Camera } from 'lucide-react';
 import { logUserLogin } from '../services/auditService';
 import { validateRealGmailAccount } from '../utils/emailValidation';
+import { verifyEmailPassword } from '../services/authCredentialService';
 import { BiometricAuthModal } from './BiometricAuthModal';
 
 interface GmailLoginFormProps {
@@ -90,6 +91,15 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
     const validEmail = validation.normalizedEmail || trimmed;
 
+    // Strict password verification:
+    // If the password is wrong, reject and require user to re-enter
+    const passCheck = verifyEmailPassword(validEmail, password);
+    if (!passCheck.isValid) {
+      setError(passCheck.errorMessage);
+      setPassword('');
+      return;
+    }
+
     // Proceed to Biometric Verification (Face Scan / Fingerprint or Skip)
     setPendingLoginData({
       email: validEmail,
@@ -144,7 +154,20 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
+    if (!googlePassword.trim()) {
+      setGoogleError('กรุณากรอกรหัสผ่านบัญชี Google ของคุณ');
+      return;
+    }
+
     const validEmail = validation.normalizedEmail || trimmedEmail;
+
+    // Strict password verification for Google SSO
+    const passCheck = verifyEmailPassword(validEmail, googlePassword);
+    if (!passCheck.isValid) {
+      setGoogleError(passCheck.errorMessage);
+      setGooglePassword('');
+      return;
+    }
 
     // Never save Admin email to remembered list
     if (rememberGoogleEmail && validEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
@@ -171,10 +194,17 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setIsBiometricModalOpen(true);
   };
 
-  const handleQuickFill = (presetEmail: string) => {
-    setEmail(presetEmail);
-    setPassword('••••••••••••');
+  const handleAppendDomain = (suffix: string) => {
+    if (email.includes('@')) {
+      const prefix = email.split('@')[0];
+      setEmail(`${prefix}${suffix}`);
+    } else if (email.trim()) {
+      setEmail(`${email.trim()}${suffix}`);
+    } else {
+      setEmail(suffix);
+    }
     setError(null);
+    setSuggestedFix(null);
   };
 
   const handleQuickFillGoogle = (suffix: string) => {
@@ -361,17 +391,17 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
           {/* Quick Domain Suffix Helpers */}
           <div className="flex items-center gap-1.5 mt-2">
-            <span className="text-[11px] text-slate-400">ตัวอย่าง:</span>
+            <span className="text-[11px] text-slate-400">เติมโดเมนด่วน:</span>
             <button
               type="button"
-              onClick={() => handleQuickFill('teacher@acu.ac.th')}
+              onClick={() => handleAppendDomain('@acu.ac.th')}
               className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors"
             >
               @acu.ac.th
             </button>
             <button
               type="button"
-              onClick={() => handleQuickFill('teacher.acu@gmail.com')}
+              onClick={() => handleAppendDomain('@gmail.com')}
               className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors"
             >
               @gmail.com
@@ -383,13 +413,13 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         <div>
           <div className="flex items-center justify-between mb-1.5">
             <label htmlFor="input-password" className="block text-xs font-semibold text-slate-700">
-              รหัสผ่าน
+              รหัสผ่านบัญชีอีเมลตนเอง
             </label>
             <a
               href="#forgot-password"
               onClick={(e) => {
                 e.preventDefault();
-                setError('กรุณาติดต่อผู้ดูแลระบบโรงเรียนอัสสัมชัญอุบลราชธานี เพื่อรีเซ็ตรหัสผ่าน');
+                setError('กรุณาติดต่อผู้ดูแลระบบโรงเรียนอัสสัมชัญอุบลราชธานี เพื่อตรวจสอบสิทธิ์หรือรีเซ็ตรหัสผ่าน');
               }}
               className="text-[11px] text-blue-600 hover:text-blue-800 hover:underline transition-colors"
             >
@@ -405,7 +435,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               type={showPassword ? 'text' : 'password'}
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••••••"
+              placeholder="กรอกรหัสผ่านอีเมลตนเอง..."
               className="block w-full pl-10 pr-10 py-2.5 sm:py-3 bg-slate-50/70 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/40 focus:border-blue-600 focus:bg-white transition-all"
             />
             <button
@@ -416,6 +446,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
             >
               {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
+          </div>
+          <div className="flex items-center justify-between mt-1.5 px-0.5">
+            <span className="text-[11px] text-slate-500">
+              ใช้รหัสผ่านของบัญชีอีเมลตนเองเท่านั้น (อ้างอิงจาก Gmail / Google จริง)
+            </span>
           </div>
         </div>
 
