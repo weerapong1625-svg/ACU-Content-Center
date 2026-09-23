@@ -21,7 +21,8 @@ import {
   ArrowRight,
   User,
   Camera,
-  X
+  X,
+  Trash2
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -33,6 +34,8 @@ import {
 } from '../services/auditService';
 import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
+import { AdminUserManagementModal } from './AdminUserManagementModal';
+import { AdminEmailAuditModal } from './AdminEmailAuditModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
 import { TeacherDashboard } from './TeacherDashboard';
 import { AdminDashboard } from './AdminDashboard';
@@ -51,6 +54,8 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [dbStatus, setDbStatus] = useState<'saving' | 'saved' | 'idle'>('idle');
   const [showSystemTestModal, setShowSystemTestModal] = useState(false);
   const [showAdminPasswordModal, setShowAdminPasswordModal] = useState(false);
+  const [showUserManagementModal, setShowUserManagementModal] = useState(false);
+  const [showEmailAuditModal, setShowEmailAuditModal] = useState(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
   const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
@@ -369,6 +374,31 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
               )}
             </button>
 
+            {/* Quick Admin Actions (ลบบัญชีผู้ใช้ & ตรวจสอบอีเมล) - Available only to Super Admin */}
+            {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowUserManagementModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold transition-all shadow-md shadow-red-950/30 cursor-pointer active:scale-95"
+                  title="ระบบจัดการและลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
+                >
+                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                  <span>ลบบัญชีผู้ใช้</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowEmailAuditModal(true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold transition-all shadow-md shadow-blue-950/30 cursor-pointer active:scale-95"
+                  title="ตรวจสอบและซิงค์บัญชีอีเมลทุกฐานข้อมูลให้ตรงกัน 100%"
+                >
+                  <Database className="w-3.5 h-3.5 text-blue-400" />
+                  <span>ตรวจสอบอีเมล</span>
+                </button>
+              </>
+            )}
+
             {/* Prominent "ข้อมูลส่วนตัว" Button as explicitly requested */}
             <button
               type="button"
@@ -686,12 +716,36 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
         userEmail={userEmail}
         userName={profileName || userName}
         avatarUrl={avatarUrl}
+        currentUserEmail={userEmail}
         onAvatarUpdated={(newUrl) => {
           setAvatarUrl(newUrl);
           handleSaveAvatar(newUrl);
         }}
         onProfileUpdated={handleProfileUpdated}
       />
+
+      {/* =========================================================================
+          ADMIN USER MANAGEMENT & EMAIL AUDIT MODALS
+         ========================================================================= */}
+      {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
+        <>
+          <AdminUserManagementModal
+            isOpen={showUserManagementModal}
+            onClose={() => setShowUserManagementModal(false)}
+            adminEmail={SUPER_ADMIN_EMAIL}
+            onOpenEmailAudit={() => {
+              setShowUserManagementModal(false);
+              setShowEmailAuditModal(true);
+            }}
+          />
+
+          <AdminEmailAuditModal
+            isOpen={showEmailAuditModal}
+            onClose={() => setShowEmailAuditModal(false)}
+            adminEmail={SUPER_ADMIN_EMAIL}
+          />
+        </>
+      )}
 
       {/* =========================================================================
           ADMIN PASSWORD VERIFICATION MODAL

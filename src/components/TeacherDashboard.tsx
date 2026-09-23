@@ -13,6 +13,9 @@ import { TeacherInnovationSubmissionModal } from './TeacherInnovationSubmissionM
 import { MediaTypesPopupModal } from './MediaTypesPopupModal';
 import { TeacherMediaRepositoryModal } from './TeacherMediaRepositoryModal';
 import { IdeaBankModal } from './IdeaBankModal';
+import { AdminUserManagementModal } from './AdminUserManagementModal';
+import { AdminEmailAuditModal } from './AdminEmailAuditModal';
+import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 import { 
   UploadCloud, 
   BookOpenCheck, 
@@ -43,8 +46,9 @@ import {
   Layers, 
   Info, 
   Send,
-  Camera,
-  Trash2
+  Trash2,
+  Database,
+  Camera
 } from 'lucide-react';
 import { ADMIN_TARGET_EMAIL } from '../services/submissionService';
 
@@ -77,6 +81,8 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Real-time synced profile from Cloud Firestore (same across mobile & desktop)
   const [profile, setProfile] = useState<FullUserProfile | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
+  const [showUserManagementModal, setShowUserManagementModal] = useState(false);
+  const [showEmailAuditModal, setShowEmailAuditModal] = useState(false);
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
@@ -376,6 +382,31 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </span>
                 </div>
               </button>
+
+              {/* Quick Admin Actions (เฉพาะ Super Admin) */}
+              {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowUserManagementModal(true)}
+                    className="px-2.5 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+                    title="ลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
+                  >
+                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                    <span className="hidden sm:inline">ลบบัญชีผู้ใช้</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowEmailAuditModal(true)}
+                    className="px-2.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
+                    title="ตรวจสอบและซิงค์อีเมลทุกฐานข้อมูล"
+                  >
+                    <Database className="w-3.5 h-3.5 text-blue-400" />
+                    <span className="hidden sm:inline">ตรวจสอบอีเมล</span>
+                  </button>
+                </>
+              )}
 
               <button
                 type="button"
@@ -765,6 +796,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         userEmail={userEmail}
         userName={profile?.fullName || profile?.displayName || userEmail}
         avatarUrl={avatarSrc}
+        currentUserEmail={userEmail}
         onAvatarUpdated={(newAvatar) => {
           if (profile) {
             setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
@@ -774,6 +806,27 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           setProfile(updated);
         }}
       />
+
+      {/* Admin Quick Action Modals (เฉพาะ Admin: weerapong1625@acu.ac.th) */}
+      {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
+        <>
+          <AdminUserManagementModal
+            isOpen={showUserManagementModal}
+            onClose={() => setShowUserManagementModal(false)}
+            adminEmail={SUPER_ADMIN_EMAIL}
+            onOpenEmailAudit={() => {
+              setShowUserManagementModal(false);
+              setShowEmailAuditModal(true);
+            }}
+          />
+
+          <AdminEmailAuditModal
+            isOpen={showEmailAuditModal}
+            onClose={() => setShowEmailAuditModal(false)}
+            adminEmail={SUPER_ADMIN_EMAIL}
+          />
+        </>
+      )}
     </div>
   );
 };

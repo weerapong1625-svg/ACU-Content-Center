@@ -126,3 +126,19 @@ export function getDefaultPasswordForEmail(email: string): string {
   const vault = getCredentialVault();
   return vault[normEmail] || '';
 }
+
+/**
+ * Remove user credential from vault when account is deleted by Admin
+ */
+export function removeUserCredential(email: string): void {
+  try {
+    const normEmail = email.toLowerCase().trim();
+    const vault = getCredentialVault();
+    if (vault[normEmail]) {
+      delete vault[normEmail];
+      localStorage.setItem(CREDENTIALS_STORAGE_KEY, JSON.stringify(vault));
+    }
+  } catch (err) {
+    console.warn('Could not remove user credential:', err);
+  }
+}

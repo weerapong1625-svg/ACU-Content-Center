@@ -47,6 +47,49 @@
         "updatedBy": { "type": "string" },
         "updatedAt": { "type": "string", "format": "date-time" }
       }
+    },
+    "teacher_innovations_submissions": {
+      "title": "Teacher 5-Item Innovations Submissions",
+      "description": "Stores teacher innovation media submissions, subject usage details, and links",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "gradeLevel": { "type": "string" },
+        "itemNumber": { "type": "number" },
+        "mediaTitle": { "type": "string" },
+        "mediaType": { "type": "string" },
+        "submittedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userEmail", "teacherName", "mediaTitle"]
+    },
+    "system_test_submissions": {
+      "title": "Facility Usage and School Learning Centers Records",
+      "description": "Stores records of teacher using the 33 learning centers across 9 periods",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "learningCenter": { "type": "string" },
+        "subjectGroup": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userEmail", "teacherName", "learningCenter"]
+    },
+    "shared_ideas": {
+      "title": "Shared Pedagogical Ideas and Teacher Recommendations",
+      "description": "Stores educational ideas, active learning strategies, and peer ratings",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "creatorEmail": { "type": "string" },
+        "ratingAvg": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "creatorEmail"]
     }
   }
 }

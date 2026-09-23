@@ -3,35 +3,40 @@ service cloud.firestore {
   match /databases/{database}/documents {
     // login_logs collection for system test and user access auditing
     match /login_logs/{logId} {
-      allow read, write: if true;
+      allow read, create, update, delete, write: if true;
     }
 
     // user_profiles collection for customized profile, innovation items, and praises
     match /user_profiles/{profileId} {
-      allow read, create, update, write: if true;
+      allow read, create, update, delete, write: if true;
     }
     match /user_profiles/{profileId}/{document=**} {
-      allow read, write: if true;
+      allow read, create, update, delete, write: if true;
     }
 
     // system_settings collection for announcement popup banner configuration
     match /system_settings/{settingId} {
-      allow read, create, update, write: if true;
+      allow read, create, update, delete, write: if true;
     }
 
     // system_test_submissions collection for 5 media / learning center records and Google Sheet export
     match /system_test_submissions/{submissionId} {
-      allow read, create, update, delete: if true;
+      allow read, create, update, delete, write: if true;
     }
 
     // teacher_innovations_submissions for 5 media innovations
     match /teacher_innovations_submissions/{submissionId} {
-      allow read, create, update, delete: if true;
+      allow read, create, update, delete, write: if true;
     }
 
     // teacher_media_repository collection for teacher produced media and community star ratings
     match /teacher_media_repository/{mediaId} {
-      allow read, create, update, delete: if true;
+      allow read, create, update, delete, write: if true;
+    }
+
+    // shared_ideas collection for education ideas and star ratings
+    match /shared_ideas/{ideaId} {
+      allow read, create, update, delete, write: if true;
     }
   }
 }

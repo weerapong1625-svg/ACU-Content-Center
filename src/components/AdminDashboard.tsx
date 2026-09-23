@@ -34,9 +34,22 @@ import {
   UserCheck,
   FileText,
   Upload,
-  RotateCcw
+  RotateCcw,
+  Award,
+  Printer,
+  MapPin,
+  Database
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
+import { 
+  FullUserProfile, 
+  subscribeAllUserProfiles, 
+  getCleanRealName,
+  deleteUserAccountCompletely 
+} from '../services/userProfileService';
+import { AdminUserManagementModal } from './AdminUserManagementModal';
+import { AdminEmailAuditModal } from './AdminEmailAuditModal';
+import { OnlineCertificateModal } from './OnlineCertificateModal';
 import { 
   SUPER_ADMIN_EMAIL, 
   saveSchoolLogo, 
@@ -91,6 +104,21 @@ import {
   DEFAULT_BANNER_IMAGE_2
 } from '../services/bannerService';
 
+const CURRENT_CALENDAR_YEAR = new Date().getFullYear() || 2026;
+// ลิสต์ปีการศึกษาล่วงหน้า 10 ปีข้างหน้า และปีย้อนหลัง (พ.ศ. 2579 ลงมาถึง 2567 / 2036 ลงมาถึง 2024)
+export const ADVANCE_YEAR_OPTIONS = Array.from(
+  { length: (CURRENT_CALENDAR_YEAR + 10) - 2024 + 1 },
+  (_, idx) => {
+    const yr = CURRENT_CALENDAR_YEAR + 10 - idx;
+    return {
+      value: yr.toString(),
+      yearNum: yr,
+      buddhistYear: yr + 543,
+      label: `${yr} (พ.ศ. ${yr + 543})`,
+    };
+  }
+);
+
 interface AdminDashboardProps {
   userEmail: string;
   onBack: () => void;
@@ -100,19 +128,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const isSuperAdmin = userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
+  const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'certificates' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
 
   // Real-time Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
 
-  // Yearly Stats Filter
+  // Yearly Stats & Certificate Filter
   const [selectedYear, setSelectedYear] = useState<string>('2026');
 
-  // Visitor logs search filter
+  // 1. Visitor logs filter by year and search
+  const [visitorYear, setVisitorYear] = useState<string>('2026');
   const [visitorSearchTerm, setVisitorSearchTerm] = useState('');
+
+  // 2. Online Certificate Verification Filter & Target state
+  const [certificateFilter, setCertificateFilter] = useState<'all' | 'eligible' | 'in_progress'>('all');
+  const [certificateSearchTerm, setCertificateSearchTerm] = useState<string>('');
+  const [certificateTargetUser, setCertificateTargetUser] = useState<{ name: string; email: string; visits: number; school?: string } | null>(null);
+
+  // 3. Innovation Submissions filter by year
+  const [innovationYear, setInnovationYear] = useState<string>('all');
+
+  // 4. Facility Submissions filter by year and search
+  const [facilityYear, setFacilityYear] = useState<string>('all');
+  const [facilitySearchTerm, setFacilitySearchTerm] = useState('');
 
   // Innovation Editing / Deleting Modal States
   const [editingInnovation, setEditingInnovation] = useState<InnovationSubmission | null>(null);
@@ -164,6 +206,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Copy & export feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
+  // User Management & Email Audit Modals
+  const [showUserManagementModal, setShowUserManagementModal] = useState(false);
+  const [showEmailAuditModal, setShowEmailAuditModal] = useState(false);
+
+  // Direct User Account Deletion Confirmation
+  const [directDeleteTarget, setDirectDeleteTarget] = useState<{ email: string; name: string } | null>(null);
+  const [isDeletingUserDirect, setIsDeletingUserDirect] = useState(false);
+
   // Reset visitor logs modal state
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
   const [isResettingLogs, setIsResettingLogs] = useState(false);
@@ -184,6 +234,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const showToast = (msg: string) => {
     setToastMsg(msg);
     setTimeout(() => setToastMsg(null), 3000);
+  };
+
+  // Direct delete user account handler
+  const handleDirectDeleteUser = async (targetEmail: string, targetName?: string) => {
+    const norm = targetEmail.trim().toLowerCase();
+    if (norm === SUPER_ADMIN_EMAIL.toLowerCase()) {
+      alert('ไม่อนุญาตให้ลบบัญชีผู้ดูแลระบบหลัก (Super Admin)');
+      return;
+    }
+
+    const cleanName = getCleanRealName(targetName, targetEmail);
+    const confirmed = window.confirm(
+      `ยืนยันการลบบัญชีผู้ใช้: ${cleanName} (${norm})\n\nคำเตือน: การลบนี้จะนำข้อมูลโปรไฟล์ ประวัติการเข้าชม สื่อนวัตกรรม และการใช้ห้องเรียนของบัญชีนี้ออกจากฐานข้อมูลระบบทั้งหมดอย่างถาวร!`
+    );
+
+    if (!confirmed) return;
+
+    setIsDeletingUserDirect(true);
+    try {
+      const res = await deleteUserAccountCompletely(norm, SUPER_ADMIN_EMAIL, {
+        deleteLogs: true,
+        deleteSubmissions: true,
+        deleteFacilities: true,
+        deleteMedia: true,
+      });
+
+      if (res.success) {
+        showToast(`ลบบัญชีผู้ใช้ ${norm} สำเร็จเรียบร้อยแล้ว`);
+      } else {
+        alert(res.error || 'ไม่สามารถลบบัญชีผู้ใช้ได้');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'));
+    } finally {
+      setIsDeletingUserDirect(false);
+    }
   };
 
   // 1. Subscribe to real-time collections
@@ -210,6 +296,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setLoginLogs(logs);
     });
 
+    const unsubProfiles = subscribeAllUserProfiles((profiles) => {
+      setUserProfilesMap(profiles);
+    });
+
     const unsubBanner = subscribePopupBanner((cfg) => {
       if (cfg) {
         setBannerConfig(cfg);
@@ -229,6 +319,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubLogo();
       unsubPoster();
       unsubLogs();
+      unsubProfiles();
       unsubBanner();
     };
   }, []);
@@ -241,6 +332,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Filtered innovations list
   const filteredInnovations = useMemo(() => {
     return innovations.filter((item) => {
+      // Filter by Innovation Year
+      if (innovationYear !== 'all') {
+        const d = new Date(item.submittedAt);
+        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        if (yr !== innovationYear) return false;
+      }
+
       const matchSearch = searchTerm === '' || 
         item.teacherName.toLowerCase().includes(searchTerm.toLowerCase()) ||
         item.mediaTitle.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -252,7 +350,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
       return matchSearch && matchGrade && matchType;
     });
-  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter]);
+  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, innovationYear]);
 
   // Statistics calculation
   const stats = useMemo(() => {
@@ -428,9 +526,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
+  // Filtered facilities list
+  const filteredFacilities = useMemo(() => {
+    return facilities.filter((fac) => {
+      // Filter by Facility Year
+      if (facilityYear !== 'all') {
+        const d = new Date(fac.createdAt || fac.usageDateTime);
+        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        if (yr !== facilityYear) return false;
+      }
+      if (facilitySearchTerm.trim()) {
+        const q = facilitySearchTerm.toLowerCase();
+        return (
+          fac.teacherName.toLowerCase().includes(q) ||
+          fac.subjectGroup.toLowerCase().includes(q) ||
+          fac.learningCenter.toLowerCase().includes(q) ||
+          (fac.feedback && fac.feedback.toLowerCase().includes(q)) ||
+          fac.userEmail.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [facilities, facilityYear, facilitySearchTerm]);
+
   // Copy to Google Sheets Actions (TSV format for direct paste)
   const handleCopyInnovationsTSV = async () => {
-    const tsv = generateInnovationsTSV(innovations);
+    const tsv = generateInnovationsTSV(filteredInnovations);
     const success = await copyToClipboard(tsv);
     if (success) {
       showToast('คัดลอกตารางแล้ว! สามารถเปิด Google Sheets แล้วกด Ctrl+V (วาง) ได้ทันที');
@@ -448,21 +569,217 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleCopyFacilitiesTSV = async () => {
-    const tsv = generateFacilitiesTSV(facilities);
+    const tsv = generateFacilitiesTSV(filteredFacilities);
     const success = await copyToClipboard(tsv);
     if (success) {
       showToast('คัดลอกตารางแหล่งเรียนรู้แล้ว! วางลง Google Sheets ได้ทันที');
     }
   };
 
-  // Filtered visitor login logs
+  // Filtered visitor login logs with visitorYear
   const filteredLoginLogs = useMemo(() => {
-    if (!visitorSearchTerm.trim()) return loginLogs;
-    const term = visitorSearchTerm.toLowerCase();
-    return loginLogs.filter(
-      (l) => l.email.toLowerCase().includes(term) || l.displayName.toLowerCase().includes(term)
-    );
-  }, [loginLogs, visitorSearchTerm]);
+    return loginLogs.filter((l) => {
+      if (visitorYear !== 'all') {
+        const d = new Date(l.loginTimestamp);
+        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        if (yr !== visitorYear) return false;
+      }
+      if (visitorSearchTerm.trim()) {
+        const term = visitorSearchTerm.toLowerCase();
+        return (
+          l.email.toLowerCase().includes(term) ||
+          l.displayName.toLowerCase().includes(term)
+        );
+      }
+      return true;
+    });
+  }, [loginLogs, visitorYear, visitorSearchTerm]);
+
+  // 1. สถิติผู้เข้าชม: สรุปสถิติผู้เข้าชมแยกตามปี (พ.ศ. 2567 ถึง พ.ศ. 2579)
+  const visitorYearlyBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {};
+    loginLogs.forEach((log) => {
+      const d = new Date(log.loginTimestamp);
+      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      counts[yr] = (counts[yr] || 0) + 1;
+    });
+    return counts;
+  }, [loginLogs]);
+
+  // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี
+  const certificateYearlyBreakdown = useMemo(() => {
+    const result: Record<string, { total: number; eligible: number }> = {};
+    ADVANCE_YEAR_OPTIONS.forEach((opt) => {
+      const yr = opt.yearNum;
+      const visitsByEmail: Record<string, number> = {};
+      loginLogs.forEach((log) => {
+        if (!log.email) return;
+        const d = new Date(log.loginTimestamp);
+        if (!isNaN(d.getTime()) && d.getFullYear() === yr) {
+          const em = log.email.toLowerCase().trim();
+          visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
+        }
+      });
+      const eligible = Object.values(visitsByEmail).filter((v) => v >= 100).length;
+      result[opt.value] = {
+        total: Object.keys(visitsByEmail).length,
+        eligible,
+      };
+    });
+    return result;
+  }, [loginLogs]);
+
+  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
+  const innovationYearlyBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {};
+    innovations.forEach((item) => {
+      const d = new Date(item.submittedAt);
+      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      counts[yr] = (counts[yr] || 0) + 1;
+    });
+    return counts;
+  }, [innovations]);
+
+  // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี
+  const facilityYearlyBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {};
+    facilities.forEach((fac) => {
+      const d = new Date(fac.createdAt || fac.usageDateTime);
+      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      counts[yr] = (counts[yr] || 0) + 1;
+    });
+    return counts;
+  }, [facilities]);
+
+  // Compute certificate candidate users based on login logs and user profiles for selectedYear
+  const certificateCandidates = useMemo(() => {
+    const yr = parseInt(selectedYear, 10) || 2026;
+    
+    // 1. Group login logs by email for the selectedYear
+    const visitCountsByEmail: Record<string, { count: number; lastLogin: string }> = {};
+    loginLogs.forEach((log) => {
+      if (!log.email) return;
+      const email = log.email.toLowerCase().trim();
+      const logYear = new Date(log.loginTimestamp).getFullYear();
+      if (logYear === yr) {
+        if (!visitCountsByEmail[email]) {
+          visitCountsByEmail[email] = { count: 1, lastLogin: log.loginTimestamp };
+        } else {
+          visitCountsByEmail[email].count++;
+          if (new Date(log.loginTimestamp) > new Date(visitCountsByEmail[email].lastLogin)) {
+            visitCountsByEmail[email].lastLogin = log.loginTimestamp;
+          }
+        }
+      }
+    });
+
+    // 2. Gather all unique emails from logs, profiles, and teacher summaries
+    const allEmails = new Set<string>();
+    Object.keys(visitCountsByEmail).forEach((e) => allEmails.add(e));
+    Object.keys(userProfilesMap).forEach((e) => allEmails.add(e));
+    teacherSummaries.forEach((t) => {
+      if (t.email) allEmails.add(t.email.toLowerCase().trim());
+    });
+
+    // 3. Construct candidate list
+    const candidates = Array.from(allEmails).map((email) => {
+      const profile = userProfilesMap[email];
+      const summary = teacherSummaries.find((t) => t.email?.toLowerCase().trim() === email);
+      const visitData = visitCountsByEmail[email] || { count: 0, lastLogin: '' };
+      
+      // Determine real full name (เฉพาะชื่อ-นามสกุลจริงเท่านั้น)
+      const rawName = profile?.fullName || summary?.teacherName || profile?.displayName || '';
+      const realName = getCleanRealName(rawName, email);
+      
+      const visits = visitData.count;
+      const isEligible = visits >= 100;
+      const progressPercent = Math.min(100, Math.round((visits / 100) * 100));
+
+      return {
+        email,
+        realName,
+        school: profile?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+        role: profile?.role || (email === SUPER_ADMIN_EMAIL.toLowerCase() ? 'ผู้ดูแลระบบ' : 'ครูผู้สอน'),
+        visits,
+        isEligible,
+        progressPercent,
+        lastLogin: visitData.lastLogin,
+      };
+    });
+
+    // Sort: eligible first, then by visit count descending
+    return candidates.sort((a, b) => {
+      if (a.isEligible && !b.isEligible) return -1;
+      if (!a.isEligible && b.isEligible) return 1;
+      return b.visits - a.visits;
+    });
+  }, [loginLogs, userProfilesMap, teacherSummaries, selectedYear]);
+
+  // Filtered certificate candidates based on status and search query
+  const filteredCertificateCandidates = useMemo(() => {
+    return certificateCandidates.filter((cand) => {
+      if (certificateFilter === 'eligible' && !cand.isEligible) return false;
+      if (certificateFilter === 'in_progress' && cand.isEligible) return false;
+
+      if (certificateSearchTerm.trim()) {
+        const q = certificateSearchTerm.toLowerCase().trim();
+        return (
+          cand.realName.toLowerCase().includes(q) ||
+          cand.email.toLowerCase().includes(q) ||
+          cand.school.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [certificateCandidates, certificateFilter, certificateSearchTerm]);
+
+  // Certificate Statistics
+  const certificateStats = useMemo(() => {
+    const total = certificateCandidates.length;
+    const eligible = certificateCandidates.filter((c) => c.isEligible).length;
+    const inProgress = total - eligible;
+    const maxVisits = certificateCandidates.length > 0 ? Math.max(...certificateCandidates.map((c) => c.visits)) : 0;
+    return { total, eligible, inProgress, maxVisits };
+  }, [certificateCandidates]);
+
+  // Handle Export Certificate CSV
+  const handleExportCertificateCSV = () => {
+    const escapeCSV = (val: any) => `"${String(val ?? '').replace(/"/g, '""')}"`;
+    const headers = ['ลำดับ', 'ชื่อ-นามสกุลจริง', 'อีเมลผู้ใช้งาน', 'บทบาท/ตำแหน่ง', 'สถิติเข้าชม (ครั้ง/ดาว)', 'สถานะเกียรติบัตร', 'ปีการศึกษา (พ.ศ.)'];
+    const rows = filteredCertificateCandidates.map((c, i) => [
+      escapeCSV(i + 1),
+      escapeCSV(c.realName),
+      escapeCSV(c.email),
+      escapeCSV(c.role),
+      escapeCSV(c.visits),
+      escapeCSV(c.isEligible ? 'มีสิทธิ์ได้รับเกียรติบัตร (ครบ 100 ครั้ง)' : `สะสม ${c.visits}/100 ครั้ง`),
+      escapeCSV(parseInt(selectedYear) + 543),
+    ].join(','));
+    const csvContent = '\uFEFF' + [headers.join(','), ...rows].join('\r\n');
+    downloadFile(`ACU_รายชื่อผู้มีสิทธิ์รับเกียรติบัตร_${selectedYear}.csv`, csvContent);
+    showToast('ดาวน์โหลดรายชื่อผู้มีสิทธิ์รับเกียรติบัตรเรียบร้อยแล้ว');
+  };
+
+  // Handle Copy Certificate TSV for Google Sheets
+  const handleCopyCertificateTSV = async () => {
+    const headers = ['ลำดับ', 'ชื่อ-นามสกุลจริง', 'อีเมลผู้ใช้งาน', 'บทบาท/ตำแหน่ง', 'สถิติเข้าชม (ครั้ง/ดาว)', 'สถานะเกียรติบัตร', 'ปีการศึกษา (พ.ศ.)'];
+    const rows = filteredCertificateCandidates.map((c, i) => [
+      i + 1,
+      c.realName,
+      c.email,
+      c.role,
+      c.visits,
+      c.isEligible ? 'มีสิทธิ์ได้รับเกียรติบัตร (ครบ 100 ครั้ง)' : `สะสม ${c.visits}/100 ครั้ง`,
+      parseInt(selectedYear) + 543,
+    ].join('\t'));
+    const tsvContent = [headers.join('\t'), ...rows].join('\n');
+    const ok = await copyToClipboard(tsvContent);
+    if (ok) {
+      showToast('คัดลอกรายชื่อสำหรับ Google Sheets เรียบร้อยแล้ว (กด Ctrl+V วางได้ทันที)');
+    } else {
+      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+    }
+  };
 
   // Yearly Stats calculation
   const yearlyStats = useMemo(() => {
@@ -832,8 +1149,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             </div>
           </div>
 
-          {/* Right: Quick Google Sheets Button & Active Sheet Link */}
+          {/* Right: User Management, Database Audit, Google Sheets & Settings */}
           <div className="flex items-center gap-2 w-full md:w-auto justify-between md:justify-end flex-wrap">
+            <button
+              type="button"
+              onClick={() => setShowUserManagementModal(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer group active:scale-95"
+              title="ระบบจัดการและลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-red-400 group-hover:text-white transition-colors" />
+              <span>จัดการ/ลบบัญชีผู้ใช้</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setShowEmailAuditModal(true)}
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer group active:scale-95"
+              title="ตรวจสอบและซิงค์บัญชีอีเมลทุกฐานข้อมูลให้ตรงกัน 100%"
+            >
+              <Database className="w-3.5 h-3.5 text-blue-400 group-hover:text-white transition-colors" />
+              <span>ตรวจสอบอีเมลทุกฐานข้อมูล</span>
+            </button>
+
             <button
               type="button"
               onClick={() => window.open(googleSheetsUrl || DEFAULT_NEW_SHEET_URL, '_blank')}
@@ -841,18 +1178,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               title="เปิด Google Sheets เปรดชีตใหม่"
             >
               <FileSpreadsheet className="w-3.5 h-3.5" />
-              <span>เปิด Google Sheets (เปรดชีต)</span>
+              <span>เปิด Google Sheets</span>
               <ExternalLink className="w-3 h-3 opacity-70" />
             </button>
 
             <button
               type="button"
               onClick={() => setActiveTab('settings')}
-              className="px-3 py-1.5 rounded-xl bg-blue-600/30 hover:bg-blue-600/50 text-blue-300 border border-blue-400/30 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
               title="เปลี่ยนภาพโลโก้และตั้งค่า"
             >
               <Camera className="w-3.5 h-3.5 text-blue-300" />
-              <span>เปลี่ยนภาพโลโก้ / ตั้งค่า</span>
+              <span>ตั้งค่าระบบ</span>
             </button>
           </div>
         </div>
@@ -883,6 +1220,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           >
             <Clock className="w-3.5 h-3.5" />
             <span>สถิติผู้เข้าชม ({loginLogs.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('certificates')}
+            className={`px-3.5 py-2 rounded-xl font-semibold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer ${
+              activeTab === 'certificates'
+                ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 shadow-md shadow-amber-500/20 font-bold'
+                : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10'
+            }`}
+          >
+            <Award className="w-3.5 h-3.5" />
+            <span>ตรวจสอบเกียรติบัตร (ครบ 100 ครั้ง)</span>
+            <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold">
+              {certificateStats.eligible} ท่าน
+            </span>
           </button>
 
           <button
@@ -1097,14 +1450,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     onChange={(e) => setSelectedYear(e.target.value)}
                     className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs font-semibold text-amber-300 focus:outline-none focus:border-amber-500 cursor-pointer"
                   >
-                    {Array.from({ length: 13 }, (_, i) => {
-                      const yr = (new Date().getFullYear() || 2026) + 10 - i;
-                      return (
-                        <option key={yr} value={yr.toString()}>
-                          {yr} (พ.ศ. {yr + 543})
-                        </option>
-                      );
-                    })}
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
               </div>
@@ -1236,16 +1586,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <Clock className="w-4 h-4 text-blue-400" />
                   <span>สถิติผู้เข้าชมระบบ (Visitor Statistics & Logs)</span>
                   <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 text-[10px] font-semibold">
-                    {filteredLoginLogs.length} รายการ
+                    {visitorYear === 'all' ? 'ทุกปี' : `พ.ศ. ${parseInt(visitorYear) + 543}`}: {filteredLoginLogs.length} รายการ
                   </span>
                 </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  บันทึกประวัติการเข้าใช้งานจริงตามอีเมล Google SSO แสดงชื่อ เวลา วันเดือนปีอย่างละเอียด
+                  บันทึกประวัติการเข้าใช้งานจริงตามอีเมล Google SSO สามารถกรองดูแยกตามปีได้ล่วงหน้า 10 ปี
                 </p>
               </div>
 
               <div className="flex items-center gap-2 w-full lg:w-auto justify-end flex-wrap">
-                <div className="relative flex-grow sm:flex-grow-0 sm:w-64">
+                {/* Year Dropdown Filter */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span className="text-xs text-slate-300">ปีที่เข้าชม:</span>
+                  <select
+                    value={visitorYear}
+                    onChange={(e) => setVisitorYear(e.target.value)}
+                    className="bg-transparent text-xs text-blue-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value="all" className="bg-slate-900 text-white">ทุกปีการศึกษา (ทั้งหมด)</option>
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-60">
                   <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
                     type="text"
@@ -1268,7 +1636,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                 <button
                   type="button"
-                  onClick={() => downloadFile('ACU_สถิติผู้เข้าชมระบบ.csv', generateLoginLogsCSV(filteredLoginLogs))}
+                  onClick={() => downloadFile(`ACU_สถิติผู้เข้าชมระบบ_${visitorYear === 'all' ? 'ทุกปี' : visitorYear}.csv`, generateLoginLogsCSV(filteredLoginLogs))}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="ดาวน์โหลดไฟล์สถิติ CSV"
                 >
@@ -1288,6 +1656,74 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
             </div>
 
+            {/* Quick Year Pill Filter Bar */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                <span>แยกข้อมูลตามปี:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setVisitorYear('all')}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  visitorYear === 'all'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                ทุกปี ({loginLogs.length})
+              </button>
+              {ADVANCE_YEAR_OPTIONS.map((opt) => {
+                const count = visitorYearlyBreakdown[opt.value] || 0;
+                const isSelected = visitorYear === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setVisitorYear(opt.value)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : count > 0
+                        ? 'bg-slate-800 text-blue-300 border border-blue-500/30 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>พ.ศ. {opt.buddhistYear}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-white/20 text-white' : count > 0 ? 'bg-blue-500/20 text-blue-300 font-bold' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quick KPI Stat Cards for Visitor Filter */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ยอดเข้าชมทั้งหมด</span>
+                <p className="text-xl font-bold text-blue-400 mt-0.5">{filteredLoginLogs.length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">{visitorYear === 'all' ? 'ทุกปีสะสม' : `ปี พ.ศ. ${parseInt(visitorYear) + 543}`}</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ผู้ใช้งานไม่ซ้ำ (Unique)</span>
+                <p className="text-xl font-bold text-teal-400 mt-0.5">{new Set(filteredLoginLogs.map(l => l.email.trim().toLowerCase())).size} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
+                <span className="text-[10px] text-slate-500">บัญชี Google SSO</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ผู้ดูแลระบบ (Admin)</span>
+                <p className="text-xl font-bold text-indigo-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">Super Admin</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ครูและบุคลากร</span>
+                <p className="text-xl font-bold text-emerald-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">ผู้ใช้งานทั่วไป</span>
+              </div>
+            </div>
+
             {/* Visitors Table */}
             <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl">
               <div className="overflow-x-auto max-h-[600px] scrollbar-thin">
@@ -1302,12 +1738,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                       <th className="py-3 px-3.5 text-center">วันเดือนปี (พ.ศ.)</th>
                       <th className="py-3 px-3.5 text-center">เวลา</th>
                       <th className="py-3 px-3.5 text-center">สถานะ</th>
+                      <th className="py-3 px-3.5 text-center">จัดการบัญชี (เฉพาะ Admin)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
                     {filteredLoginLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="py-12 text-center text-slate-500">
+                        <td colSpan={9} className="py-12 text-center text-slate-500">
                           {visitorSearchTerm ? 'ไม่พบข้อมูลที่ตรงกับคำค้นหา' : 'ยังไม่มีประวัติการเข้าชมระบบที่บันทึกไว้'}
                         </td>
                       </tr>
@@ -1320,6 +1757,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                         const timeStr = isNaN(dateObj.getTime())
                           ? '-'
                           : dateObj.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+                        const isSuper = log.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
                         return (
                           <tr key={log.id || index} className="hover:bg-slate-800/40 transition-colors">
@@ -1340,6 +1779,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                 <span>เข้าสู่ระบบ</span>
                               </span>
                             </td>
+                            <td className="py-3 px-3.5 text-center">
+                              {isSuper ? (
+                                <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDirectDeleteUser(log.email, log.displayName)}
+                                  disabled={isDeletingUserDirect}
+                                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  title={`ลบบัญชี ${log.email} ออกจากระบบถาวร`}
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>ลบบัญชี</span>
+                                </button>
+                              )}
+                            </td>
                           </tr>
                         );
                       })
@@ -1352,6 +1807,401 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         )}
 
         {/* =========================================================================
+            TAB: ตรวจสอบสิทธิ์และพิมพ์เกียรติบัตรออนไลน์ (Online Certificates - 100+ visits)
+           ========================================================================= */}
+        {activeTab === 'certificates' && (
+          <div className="space-y-4">
+            
+            {/* Top Toolbar: Search, Filters, and Export */}
+            <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col lg:flex-row items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Award className="w-4 h-4 text-amber-400" />
+                  <span>ระบบตรวจสอบผู้ได้รับเกียรติบัตรออนไลน์ (เข้าชมครบ 100 ครั้งขึ้นไป)</span>
+                  <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-500/30">
+                    ครบเกณฑ์ {certificateStats.eligible} / {certificateStats.total} ท่าน
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  ตรวจสอบสิทธิ์ผู้เข้าชมเว็บไซต์ครบ ๑๐๐ ครั้งขึ้นไป ประจำปีการศึกษา พ.ศ. {parseInt(selectedYear) + 543} เพื่อออกเกียรติบัตรออนไลน์ พร้อมระบบกดพิมพ์ทันที (ชื่อ-นามสกุลจริงตามระบบ)
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 w-full lg:w-auto justify-end flex-wrap">
+                {/* Year Selector */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-xs text-slate-300">ปีการศึกษา:</span>
+                  <select
+                    value={selectedYear}
+                    onChange={(e) => setSelectedYear(e.target.value)}
+                    className="bg-transparent text-xs text-amber-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Search Box */}
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-60">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={certificateSearchTerm}
+                    onChange={(e) => setCertificateSearchTerm(e.target.value)}
+                    placeholder="ค้นหาชื่อ-สกุลจริง หรืออีเมล..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                {/* Quick Status Filter Tabs */}
+                <div className="flex items-center bg-slate-800 p-1 rounded-xl border border-slate-700 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setCertificateFilter('all')}
+                    className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                      certificateFilter === 'all'
+                        ? 'bg-slate-700 text-white font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    ทั้งหมด ({certificateStats.total})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCertificateFilter('eligible')}
+                    className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1 ${
+                      certificateFilter === 'eligible'
+                        ? 'bg-amber-500/30 text-amber-300 font-bold border border-amber-500/40'
+                        : 'text-amber-400/80 hover:text-amber-300'
+                    }`}
+                  >
+                    <span>🏆 ครบ 100 ครั้ง ({certificateStats.eligible})</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCertificateFilter('in_progress')}
+                    className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer ${
+                      certificateFilter === 'in_progress'
+                        ? 'bg-slate-700 text-white font-semibold'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    กำลังสะสม ({certificateStats.inProgress})
+                  </button>
+                </div>
+
+                {/* Export Buttons */}
+                <button
+                  type="button"
+                  onClick={handleCopyCertificateTSV}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  title="คัดลอกรายชื่อสำหรับ Google Sheets"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>คัดลอกลง Sheets</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportCertificateCSV}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="ดาวน์โหลดไฟล์ CSV"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>ส่งออก CSV</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Year Pill Filter Bar for Certificates */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <Award className="w-3.5 h-3.5 text-amber-400" />
+                <span>แยกข้อมูลตามปี:</span>
+              </span>
+              {ADVANCE_YEAR_OPTIONS.map((opt) => {
+                const yrStat = certificateYearlyBreakdown[opt.value] || { total: 0, eligible: 0 };
+                const isSelected = selectedYear === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setSelectedYear(opt.value)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-gradient-to-r from-amber-500 to-amber-600 text-slate-950 font-bold shadow-md'
+                        : yrStat.eligible > 0
+                        ? 'bg-slate-800 text-amber-300 border border-amber-500/40 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>พ.ศ. {opt.buddhistYear}</span>
+                    {yrStat.eligible > 0 ? (
+                      <span className={`text-[10px] px-1.5 py-0.2 rounded-full font-bold ${
+                        isSelected ? 'bg-black/20 text-slate-950' : 'bg-amber-500/20 text-amber-300'
+                      }`}>
+                        🏆 {yrStat.eligible}
+                      </span>
+                    ) : (
+                      <span className={`text-[10px] px-1 py-0.2 rounded-full ${isSelected ? 'bg-black/15 text-slate-950' : 'text-slate-500'}`}>
+                        {yrStat.total}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Summary KPI Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+              <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-950/40 to-slate-900 border border-amber-500/40 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">ผู้มีสิทธิ์รับเกียรติบัตร (ครบ 100 ครั้ง)</span>
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                    <Award className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <span className="text-2xl sm:text-3xl font-black text-amber-300">{certificateStats.eligible}</span>
+                  <span className="text-xs text-slate-400">ท่าน / บัญชี</span>
+                </div>
+                <p className="text-[11px] text-emerald-400 mt-1 flex items-center gap-1">
+                  <CheckCircle2 className="w-3 h-3" />
+                  <span>พร้อมกดพิมพ์เกียรติบัตรได้ทันที</span>
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">อยู่ระหว่างสะสมการเข้าชม</span>
+                  <div className="w-8 h-8 rounded-xl bg-blue-500/20 text-blue-400 flex items-center justify-center">
+                    <Clock className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <span className="text-2xl sm:text-3xl font-black text-slate-200">{certificateStats.inProgress}</span>
+                  <span className="text-xs text-slate-400">ท่าน (ยังไม่ครบ 100)</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  ระบบนับสถิติจริงอัตโนมัติทุกครั้งที่เข้าสู่ระบบ
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">ยอดการเข้าชมสูงสุดในปี {selectedYear}</span>
+                  <div className="w-8 h-8 rounded-xl bg-purple-500/20 text-purple-400 flex items-center justify-center">
+                    <TrendingUp className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-2">
+                  <span className="text-2xl sm:text-3xl font-black text-purple-300">{certificateStats.maxVisits}</span>
+                  <span className="text-xs text-slate-400">ครั้ง / ดาว</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  ปีการศึกษา พ.ศ. {parseInt(selectedYear) + 543}
+                </p>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 shadow-sm">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs text-slate-400">เกณฑ์การได้รับเกียรติบัตร</span>
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center">
+                    <Check className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="mt-2 flex items-baseline gap-1.5">
+                  <span className="text-xl sm:text-2xl font-black text-emerald-400">๑๐๐ ครั้งขึ้นไป</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  ออกให้เฉพาะชื่อ-นามสกุลจริงจากระบบ
+                </p>
+              </div>
+            </div>
+
+            {/* Candidates & Eligible Recipients Table */}
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl">
+              <div className="overflow-x-auto max-h-[620px] scrollbar-thin">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-800/90 text-slate-400 font-semibold border-b border-slate-700 sticky top-0 z-10 backdrop-blur-sm">
+                    <tr>
+                      <th className="py-3 px-3.5 text-center w-12">ลำดับ</th>
+                      <th className="py-3 px-3.5 min-w-[180px]">ชื่อ - นามสกุลจริง (บนเกียรติบัตร)</th>
+                      <th className="py-3 px-3.5 min-w-[200px]">บัญชีผู้ใช้งาน (Google SSO)</th>
+                      <th className="py-3 px-3.5 text-center min-w-[110px]">บทบาท / ตำแหน่ง</th>
+                      <th className="py-3 px-3.5 min-w-[180px]">
+                        สถิติเข้าชมปี {selectedYear} (ดาวสะสม)
+                      </th>
+                      <th className="py-3 px-3.5 text-center min-w-[170px]">สถานะสิทธิ์เกียรติบัตร</th>
+                      <th className="py-3 px-3.5 text-center min-w-[160px]">การดำเนินการ</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {filteredCertificateCandidates.length === 0 ? (
+                      <tr>
+                        <td colSpan={7} className="py-12 text-center text-slate-500">
+                          {certificateSearchTerm
+                            ? 'ไม่พบข้อมูลครูหรือผู้ใช้ที่ตรงกับคำค้นหา'
+                            : 'ยังไม่มีข้อมูลผู้ใช้งานที่ตรงตามเงื่อนไขในตัวกรองนี้'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredCertificateCandidates.map((cand, index) => {
+                        return (
+                          <tr
+                            key={cand.email}
+                            className={`transition-colors ${
+                              cand.isEligible
+                                ? 'bg-amber-950/15 hover:bg-amber-950/30'
+                                : 'hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <td className="py-3 px-3.5 text-center text-slate-400 font-medium">
+                              {index + 1}
+                            </td>
+
+                            {/* ชื่อ-นามสกุลจริง (เฉพาะชื่อ นามสกุลจริงเท่านั้น) */}
+                            <td className="py-3 px-3.5">
+                              <div className="flex items-center gap-2">
+                                {cand.isEligible && (
+                                  <Award className="w-4 h-4 text-amber-400 flex-shrink-0" />
+                                )}
+                                <div>
+                                  <span className={`font-bold text-sm ${cand.isEligible ? 'text-amber-200' : 'text-white'}`}>
+                                    {cand.realName}
+                                  </span>
+                                  <span className="block text-[10px] text-slate-400">
+                                    {cand.school}
+                                  </span>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* อีเมลผู้ใช้งาน */}
+                            <td className="py-3 px-3.5 font-mono text-sky-300 text-xs">
+                              {cand.email}
+                            </td>
+
+                            {/* บทบาท */}
+                            <td className="py-3 px-3.5 text-center">
+                              <span className={`px-2 py-0.5 rounded-full text-[11px] ${
+                                cand.email === SUPER_ADMIN_EMAIL.toLowerCase()
+                                  ? 'bg-red-500/20 text-red-300 border border-red-500/30 font-semibold'
+                                  : 'bg-slate-800 text-slate-300'
+                              }`}>
+                                {cand.role}
+                              </span>
+                            </td>
+
+                            {/* จำนวนเข้าชมและ Progress Bar */}
+                            <td className="py-3 px-3.5">
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between text-xs font-semibold">
+                                  <span className={cand.isEligible ? 'text-amber-400 font-bold' : 'text-slate-300'}>
+                                    {cand.visits} <span className="text-[10px] font-normal text-slate-400">/ 100 ครั้ง</span>
+                                  </span>
+                                  <span className="text-[10px] text-slate-400">
+                                    {cand.progressPercent}%
+                                  </span>
+                                </div>
+                                <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all ${
+                                      cand.isEligible
+                                        ? 'bg-gradient-to-r from-amber-500 to-amber-300'
+                                        : 'bg-blue-500'
+                                    }`}
+                                    style={{ width: `${cand.progressPercent}%` }}
+                                  ></div>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* สถานะสิทธิ์เกียรติบัตร */}
+                            <td className="py-3 px-3.5 text-center">
+                              {cand.isEligible ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>ครบเกณฑ์ 100 ครั้ง</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-800 text-slate-400 border border-slate-700 text-[11px]">
+                                  <Clock className="w-3 h-3 text-slate-400" />
+                                  <span>ขาดอีก {Math.max(0, 100 - cand.visits)} ครั้ง</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* การดำเนินการ: ปุ่มกดพิมพ์ทันที + ปุ่มลบบัญชี (เฉพาะ Admin) */}
+                            <td className="py-3 px-3.5 text-center">
+                              <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                {cand.isEligible ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setCertificateTargetUser({
+                                        name: cand.realName,
+                                        email: cand.email,
+                                        visits: cand.visits,
+                                        school: cand.school,
+                                      })
+                                    }
+                                    className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs inline-flex items-center gap-1.5 shadow-md shadow-amber-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+                                    title={`กดพิมพ์เกียรติบัตรออนไลน์สำหรับ ${cand.realName}`}
+                                  >
+                                    <Printer className="w-3.5 h-3.5" />
+                                    <span>กดพิมพ์เกียรติบัตร</span>
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setCertificateTargetUser({
+                                        name: cand.realName,
+                                        email: cand.email,
+                                        visits: cand.visits,
+                                        school: cand.school,
+                                      })
+                                    }
+                                    className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white text-[11px] inline-flex items-center gap-1 transition-colors cursor-pointer border border-slate-700/60"
+                                    title="ดูตัวอย่างเกียรติบัตร"
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                    <span>ดูตัวอย่าง</span>
+                                  </button>
+                                )}
+
+                                {cand.email.trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase() && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDirectDeleteUser(cand.email, cand.realName)}
+                                    disabled={isDeletingUserDirect}
+                                    className="px-2 py-1 rounded-lg bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all shadow-xs cursor-pointer disabled:opacity-50"
+                                    title={`ลบบัญชี ${cand.email} ออกจากระบบถาวร`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span className="hidden sm:inline">ลบ</span>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* =========================================================================
             TAB 2: ข้อมูลการส่งสื่อ 5 ชิ้น (Innovation Submissions Table)
            ========================================================================= */}
         {activeTab === 'innovations' && (
@@ -1360,6 +2210,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             {/* Top Toolbar: Search, Filters, and Google Sheets Export */}
             <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col lg:flex-row items-center justify-between gap-3">
               <div className="flex items-center gap-2.5 w-full lg:w-auto flex-wrap">
+                {/* Year Dropdown Filter */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Calendar className="w-3.5 h-3.5 text-indigo-400" />
+                  <span className="text-xs text-slate-300">ปีการศึกษา:</span>
+                  <select
+                    value={innovationYear}
+                    onChange={(e) => setInnovationYear(e.target.value)}
+                    className="bg-transparent text-xs text-indigo-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value="all" className="bg-slate-900 text-white">ทุกปีการศึกษา (ทั้งหมด)</option>
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
                 <div className="relative flex-grow sm:flex-grow-0 sm:w-64">
                   <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                   <input
@@ -1376,7 +2244,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   onChange={(e) => setSelectedGradeFilter(e.target.value)}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-200 focus:outline-none"
                 >
-                  <option value="all">ทุกระดับชั้น ({innovations.length})</option>
+                  <option value="all">ทุกระดับชั้น ({filteredInnovations.length})</option>
                   {GRADE_LEVELS.map(g => (
                     <option key={g} value={g}>{g}</option>
                   ))}
@@ -1408,13 +2276,81 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                 <button
                   type="button"
-                  onClick={() => downloadFile('ACU_สื่อนวัตกรรม_5_ชิ้น.csv', generateInnovationsCSV(innovations))}
+                  onClick={() => downloadFile(`ACU_สื่อนวัตกรรม_5_ชิ้น_${innovationYear === 'all' ? 'ทุกปี' : innovationYear}.csv`, generateInnovationsCSV(filteredInnovations))}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                   title="ดาวน์โหลดไฟล์ CSV"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>ส่งออก CSV</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Quick Year Pill Filter Bar for Innovations */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                <span>แยกข้อมูลตามปี:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setInnovationYear('all')}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  innovationYear === 'all'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                ทุกปี ({innovations.length})
+              </button>
+              {ADVANCE_YEAR_OPTIONS.map((opt) => {
+                const count = innovationYearlyBreakdown[opt.value] || 0;
+                const isSelected = innovationYear === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setInnovationYear(opt.value)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : count > 0
+                        ? 'bg-slate-800 text-indigo-300 border border-indigo-500/30 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>พ.ศ. {opt.buddhistYear}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-white/20 text-white' : count > 0 ? 'bg-indigo-500/20 text-indigo-300 font-bold' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quick KPI Stat Cards for Innovation Filter */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ผลงานสื่อที่ส่ง</span>
+                <p className="text-xl font-bold text-indigo-400 mt-0.5">{filteredInnovations.length} <span className="text-xs font-normal text-slate-400">ชิ้น</span></p>
+                <span className="text-[10px] text-slate-500">{innovationYear === 'all' ? 'ทุกปีสะสม' : `ปีการศึกษา พ.ศ. ${parseInt(innovationYear) + 543}`}</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">สื่อเทคโนโลยี</span>
+                <p className="text-xl font-bold text-blue-400 mt-0.5">{filteredInnovations.filter(i => i.mediaType === 'สื่อเทคโนโลยี').length} <span className="text-xs font-normal text-slate-400">ชิ้น</span></p>
+                <span className="text-[10px] text-slate-500">คลิป/เว็บไซต์/แอป</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">สื่อสิ่งพิมพ์</span>
+                <p className="text-xl font-bold text-emerald-400 mt-0.5">{filteredInnovations.filter(i => i.mediaType === 'สื่อสิ่งพิมพ์').length} <span className="text-xs font-normal text-slate-400">ชิ้น</span></p>
+                <span className="text-[10px] text-slate-500">ใบงาน/เอกสาร/บอร์ด</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">จำนวนครูผู้ส่งสื่อ</span>
+                <p className="text-xl font-bold text-purple-400 mt-0.5">{new Set(filteredInnovations.map(i => i.userEmail.trim().toLowerCase())).size} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
+                <span className="text-[10px] text-slate-500">ครูที่ส่งผลงาน</span>
               </div>
             </div>
 
@@ -1586,17 +2522,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                       <th className="py-3 px-3.5">ชิ้นที่ 3</th>
                       <th className="py-3 px-3.5">ชิ้นที่ 4</th>
                       <th className="py-3 px-3.5">ชิ้นที่ 5</th>
+                      <th className="py-3 px-3.5 text-center">จัดการบัญชี (เฉพาะ Admin)</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
                     {teacherSummaries.length === 0 ? (
                       <tr>
-                        <td colSpan={10} className="py-12 text-center text-slate-500">
+                        <td colSpan={11} className="py-12 text-center text-slate-500">
                           ยังไม่มีข้อมูลการส่งสื่อจากคุณครู
                         </td>
                       </tr>
                     ) : (
-                      teacherSummaries.map((teacher, index) => (
+                      teacherSummaries.map((teacher, index) => {
+                        const isSuper = teacher.email?.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+
+                        return (
                         <tr key={teacher.email || index} className="hover:bg-slate-800/40 transition-colors">
                           <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
                           <td className="py-3 px-3.5 font-bold text-white whitespace-nowrap">{teacher.teacherName}</td>
@@ -1618,7 +2558,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                 ครบ 5 ชิ้นแล้ว
                               </span>
                             ) : (
-                              <span className="px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px]">
+                              <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px]">
                                 ขาดอีก {5 - teacher.submittedCount} ชิ้น
                               </span>
                             )}
@@ -1628,9 +2568,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item3}>{teacher.item3}</td>
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item4}>{teacher.item4}</td>
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item5}>{teacher.item5}</td>
+                          <td className="py-3 px-3.5 text-center whitespace-nowrap">
+                            {isSuper ? (
+                              <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handleDirectDeleteUser(teacher.email, teacher.teacherName)}
+                                disabled={isDeletingUserDirect}
+                                className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                title={`ลบบัญชี ${teacher.email} ออกจากระบบถาวร`}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>ลบบัญชี</span>
+                              </button>
+                            )}
+                          </td>
                         </tr>
-                      ))
-                    )}
+                      );
+                    })
+                  )}
                   </tbody>
                 </table>
               </div>
@@ -1643,13 +2600,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
            ========================================================================= */}
         {activeTab === 'facilities' && (
           <div className="space-y-4">
-            <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+            <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col lg:flex-row items-center justify-between gap-3">
               <div>
-                <h3 className="text-sm font-bold text-white">บันทึกการใช้แหล่งเรียนรู้ภายในโรงเรียน (33 แหล่ง 9 คาบ)</h3>
-                <p className="text-xs text-slate-400">ข้อมูลการจองและใช้ห้องปฏิบัติการ ศูนย์การเรียนรู้ และห้องสมุด</p>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-emerald-400" />
+                  <span>บันทึกการใช้แหล่งเรียนรู้ภายในโรงเรียน (33 แหล่ง 9 คาบ)</span>
+                  <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold">
+                    {facilityYear === 'all' ? 'ทุกปี' : `พ.ศ. ${parseInt(facilityYear) + 543}`}: {filteredFacilities.length} รายการ
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  ข้อมูลการจองและใช้ห้องปฏิบัติการ ศูนย์การเรียนรู้ และห้องสมุด สามารถกรองดูแยกตามปีได้ล่วงหน้า 10 ปี
+                </p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 w-full lg:w-auto justify-end flex-wrap">
+                {/* Year Dropdown Filter */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Calendar className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-xs text-slate-300">ปีการศึกษา:</span>
+                  <select
+                    value={facilityYear}
+                    onChange={(e) => setFacilityYear(e.target.value)}
+                    className="bg-transparent text-xs text-emerald-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value="all" className="bg-slate-900 text-white">ทุกปีการศึกษา (ทั้งหมด)</option>
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-60">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={facilitySearchTerm}
+                    onChange={(e) => setFacilitySearchTerm(e.target.value)}
+                    placeholder="ค้นหาชื่อครู, ห้อง, วิชา..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
                 <button
                   type="button"
                   onClick={handleCopyFacilitiesTSV}
@@ -1662,12 +2656,75 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                 <button
                   type="button"
-                  onClick={() => downloadFile('ACU_บันทึกแหล่งเรียนรู้ภายในโรงเรียน.csv', generateFacilitiesCSV(facilities))}
+                  onClick={() => downloadFile(`ACU_บันทึกแหล่งเรียนรู้ภายในโรงเรียน_${facilityYear === 'all' ? 'ทุกปี' : facilityYear}.csv`, generateFacilitiesCSV(filteredFacilities))}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
                   <span>ส่งออก CSV</span>
                 </button>
+              </div>
+            </div>
+
+            {/* Quick Year Pill Filter Bar for Facilities */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                <span>แยกข้อมูลตามปี:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setFacilityYear('all')}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  facilityYear === 'all'
+                    ? 'bg-emerald-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                ทุกปี ({facilities.length})
+              </button>
+              {ADVANCE_YEAR_OPTIONS.map((opt) => {
+                const count = facilityYearlyBreakdown[opt.value] || 0;
+                const isSelected = facilityYear === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setFacilityYear(opt.value)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-emerald-600 text-white shadow-md'
+                        : count > 0
+                        ? 'bg-slate-800 text-emerald-300 border border-emerald-500/30 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>พ.ศ. {opt.buddhistYear}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-white/20 text-white' : count > 0 ? 'bg-emerald-500/20 text-emerald-300 font-bold' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quick KPI Stat Cards for Facility Filter */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">บันทึกการใช้แหล่งเรียนรู้</span>
+                <p className="text-xl font-bold text-emerald-400 mt-0.5">{filteredFacilities.length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">{facilityYear === 'all' ? 'ทุกปีสะสม' : `ปีการศึกษา พ.ศ. ${parseInt(facilityYear) + 543}`}</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ครูผู้บันทึกการใช้งาน</span>
+                <p className="text-xl font-bold text-teal-400 mt-0.5">{new Set(filteredFacilities.map(f => f.userEmail.trim().toLowerCase())).size} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
+                <span className="text-[10px] text-slate-500">บัญชีครูผู้สอน</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">แหล่งเรียนรู้ที่มีการใช้</span>
+                <p className="text-xl font-bold text-sky-400 mt-0.5">{new Set(filteredFacilities.map(f => f.learningCenter)).size} <span className="text-xs font-normal text-slate-400">แหล่ง / ห้อง</span></p>
+                <span className="text-[10px] text-slate-500">จากทั้งหมด 33 แหล่งเรียนรู้</span>
               </div>
             </div>
 
@@ -1689,14 +2746,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
-                    {facilities.length === 0 ? (
+                    {filteredFacilities.length === 0 ? (
                       <tr>
                         <td colSpan={10} className="py-12 text-center text-slate-500">
-                          ยังไม่มีบันทึกการใช้แหล่งเรียนรู้ในระบบ
+                          {facilitySearchTerm || facilityYear !== 'all' ? 'ไม่พบข้อมูลที่ตรงกับเงื่อนไขการค้นหา' : 'ยังไม่มีบันทึกการใช้แหล่งเรียนรู้ในระบบ'}
                         </td>
                       </tr>
                     ) : (
-                      facilities.map((fac, idx) => {
+                      filteredFacilities.map((fac, idx) => {
                         const submittedDate = fac.createdAt
                           ? new Date(fac.createdAt).toLocaleDateString('th-TH', {
                               day: '2-digit',
@@ -2642,6 +3699,47 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           </div>
         </div>
       )}
+
+      {/* Online Certificate Modal (สำหรับแอดมินตรวจสอบและสั่งพิมพ์เกียรติบัตร) */}
+      {certificateTargetUser && (
+        <OnlineCertificateModal
+          isOpen={Boolean(certificateTargetUser)}
+          onClose={() => setCertificateTargetUser(null)}
+          recipientName={certificateTargetUser.name}
+          recipientEmail={certificateTargetUser.email}
+          academicYear={selectedYear}
+          visitCount={certificateTargetUser.visits}
+          schoolName={certificateTargetUser.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี'}
+        />
+      )}
+
+      {/* Admin User Management Modal: ลบบัญชีผู้ใช้ทุกข้อมูลและคลังสื่อ */}
+      <AdminUserManagementModal
+        isOpen={showUserManagementModal}
+        onClose={() => setShowUserManagementModal(false)}
+        userProfilesMap={userProfilesMap}
+        loginLogs={loginLogs}
+        innovations={innovations}
+        facilities={facilities}
+        adminEmail={SUPER_ADMIN_EMAIL}
+        onUserDeleted={(deletedEmail) => {
+          showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
+        }}
+        onOpenEmailAudit={() => {
+          setShowUserManagementModal(false);
+          setShowEmailAuditModal(true);
+        }}
+      />
+
+      {/* Admin Email Database Audit & Sync Modal: ตรวจสอบอีเมลตรงกันทุกฐานข้อมูล */}
+      <AdminEmailAuditModal
+        isOpen={showEmailAuditModal}
+        onClose={() => setShowEmailAuditModal(false)}
+        adminEmail={SUPER_ADMIN_EMAIL}
+        onUserDeleted={(deletedEmail) => {
+          showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
+        }}
+      />
     </div>
   );
 };

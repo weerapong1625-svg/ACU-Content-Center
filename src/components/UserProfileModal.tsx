@@ -25,7 +25,9 @@ import {
   RefreshCw,
   Share2,
   Heart,
-  RotateCcw
+  RotateCcw,
+  Printer,
+  Trash2
 } from 'lucide-react';
 import { 
   FullUserProfile, 
@@ -35,8 +37,11 @@ import {
   addVisitorPraiseAndRating, 
   recordProfileVisit,
   getCachedUserProfile,
-  DEFAULT_INNOVATION_ITEMS
+  DEFAULT_INNOVATION_ITEMS,
+  getCleanRealName,
+  deleteUserAccountCompletely
 } from '../services/userProfileService';
+import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 import { 
   subscribeUserInnovations, 
   subscribeTeacherMedia, 
@@ -48,6 +53,7 @@ import {
   resetAllLoginLogs 
 } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
+import { OnlineCertificateModal } from './OnlineCertificateModal';
 
 interface UserProfileModalProps {
   isOpen: boolean;
@@ -57,6 +63,8 @@ interface UserProfileModalProps {
   avatarUrl: string;
   onAvatarUpdated: (newUrl: string) => void;
   onProfileUpdated?: (updated: FullUserProfile) => void;
+  currentUserEmail?: string;
+  onUserDeleted?: (deletedEmail: string) => void;
 }
 
 export const UserProfileModal: React.FC<UserProfileModalProps> = ({
@@ -67,9 +75,50 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   avatarUrl,
   onAvatarUpdated,
   onProfileUpdated,
+  currentUserEmail,
+  onUserDeleted,
 }) => {
   // Active Tab: 'info' (ข้อมูลส่วนตัว) | 'innovations' (สถานะส่งสื่อ 5 ชิ้น) | 'stats' (สถิติการเข้าชม) | 'praise' (ให้ดาวและชื่นชม)
   const [activeTab, setActiveTab] = useState<'info' | 'innovations' | 'stats' | 'praise'>('info');
+
+  // Check Admin permission to delete user account
+  const currentViewer = (currentUserEmail || localStorage.getItem('acu_current_user_email') || '').toLowerCase().trim();
+  const isViewerSuperAdmin = currentViewer === SUPER_ADMIN_EMAIL.toLowerCase();
+  const canAdminDeleteThisUser = isViewerSuperAdmin && userEmail.toLowerCase().trim() !== SUPER_ADMIN_EMAIL.toLowerCase();
+  const [isDeletingUser, setIsDeletingUser] = useState(false);
+
+  const handleAdminDeleteUser = async () => {
+    if (!canAdminDeleteThisUser) return;
+    const realName = getCleanRealName(profile.fullName, userEmail);
+    const confirmed = window.confirm(
+      `[เฉพาะ Admin] ยืนยันการลบบัญชีผู้ใช้: ${realName} (${userEmail})\n\nคำเตือน: ข้อมูลโปรไฟล์ สื่อการเรียนรู้ และประวัติการเข้าชมทั้งหมดจะถูกลบออกจากทุกฐานข้อมูลระบบอย่างถาวร!`
+    );
+    if (!confirmed) return;
+
+    setIsDeletingUser(true);
+    try {
+      const res = await deleteUserAccountCompletely(userEmail, SUPER_ADMIN_EMAIL, {
+        deleteLogs: true,
+        deleteSubmissions: true,
+        deleteFacilities: true,
+        deleteMedia: true,
+      });
+
+      if (res.success) {
+        alert(`ลบบัญชีผู้ใช้ ${userEmail} ออกจากทุกฐานข้อมูลเรียบร้อยแล้ว`);
+        if (onUserDeleted) {
+          onUserDeleted(userEmail);
+        }
+        onClose();
+      } else {
+        alert(res.error || 'ไม่สามารถลบบัญชีได้');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'));
+    } finally {
+      setIsDeletingUser(false);
+    }
+  };
 
   // Profile Data State initialized synchronously to prevent delay
   const isMasterWeerapong = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
@@ -122,6 +171,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
+  const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
 
   // Subscribe to real-time login logs
   useEffect(() => {
@@ -242,15 +292,25 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return () => unsubscribe();
   }, [isOpen, userEmail]);
 
-  // Media posted by this teacher and total likes (Kudos points)
+  // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
+  const targetYearNum = parseInt(selectedYear) || new Date().getFullYear();
+
   const myMediaWorks = React.useMemo(() => {
     const norm = userEmail.toLowerCase().trim();
-    return teacherMediaList.filter(
-      (m) => m.submittedByEmail?.toLowerCase().trim() === norm
-    );
-  }, [teacherMediaList, userEmail]);
+    return teacherMediaList.filter((m) => {
+      if (m.submittedByEmail?.toLowerCase().trim() !== norm) return false;
+      // Filter strictly by the selected academic/calendar year
+      if (m.createdAt) {
+        const d = new Date(m.createdAt);
+        if (!isNaN(d.getTime())) {
+          return d.getFullYear() === targetYearNum;
+        }
+      }
+      return true;
+    });
+  }, [teacherMediaList, userEmail, targetYearNum]);
 
-  // Real-time points accumulated from praise/likes given to teacher's media at repository (starts at 0)
+  // Real-time points accumulated from praise/likes given to teacher's media at repository (starts at 0, strictly year-by-year)
   const teacherKudosPoints = React.useMemo(() => {
     return myMediaWorks.reduce((sum, item) => sum + (item.likes || 0), 0);
   }, [myMediaWorks]);
@@ -511,18 +571,33 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             </div>
           </div>
 
-          {/* Quick Exit Button (กดออกหน้านี้) */}
-          <button
-            type="button"
-            id="btn-close-profile-modal"
-            onClick={onClose}
-            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs"
-            title="กดออกหน้านี้ (ปิดหน้าต่าง)"
-          >
-            <LogOut className="w-3.5 h-3.5 rotate-180 text-rose-400" />
-            <span className="hidden sm:inline">กดออกหน้านี้</span>
-            <X className="w-3.5 h-3.5 sm:hidden" />
-          </button>
+          <div className="flex items-center gap-2">
+            {canAdminDeleteThisUser && (
+              <button
+                type="button"
+                onClick={handleAdminDeleteUser}
+                disabled={isDeletingUser}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold transition-all shadow-xs disabled:opacity-50 cursor-pointer"
+                title="ลบบัญชีผู้ใช้นี้ออกจากทุกฐานข้อมูล (เฉพาะ Admin)"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-red-400" />
+                <span>{isDeletingUser ? 'กำลังลบ...' : 'ลบบัญชีนี้ (Admin)'}</span>
+              </button>
+            )}
+
+            {/* Quick Exit Button (กดออกหน้านี้) */}
+            <button
+              type="button"
+              id="btn-close-profile-modal"
+              onClick={onClose}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs cursor-pointer"
+              title="กดออกหน้านี้ (ปิดหน้าต่าง)"
+            >
+              <LogOut className="w-3.5 h-3.5 rotate-180 text-rose-400" />
+              <span className="hidden sm:inline">กดออกหน้านี้</span>
+              <X className="w-3.5 h-3.5 sm:hidden" />
+            </button>
+          </div>
         </div>
 
         {/* 4 Interactive Functional Tabs */}
@@ -986,7 +1061,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     <BarChart3 className="w-4 h-4" />
                   </div>
                   <div>
-                    <h4 className="text-xs font-bold text-white">สถิติการเข้าใช้งานจริง (คิดตามจริงต่อครั้ง ไม่บวกเพิ่ม)</h4>
+                    <h4 className="text-xs font-bold text-white">สถิติการเข้าใช้งาน</h4>
                     <p className="text-[11px] text-slate-400">คำนวณตามประวัติการเข้าสู่ระบบจริง ยอดสรุปรวมตรงกับรายเดือน 100%</p>
                   </div>
                 </div>
@@ -1043,31 +1118,60 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </div>
                 </div>
 
-                {/* Metric 3: คะแนนดาวสะสม (การเข้าชม 1 ครั้ง = 1 ดาว) */}
-                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
-                  <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center mb-2">
-                    <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
+                {/* Metric 3: คะแนนดาวสะสม (การเข้าชม 1 ครั้ง = 1 ดาว ปีต่อปี) */}
+                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="w-9 h-9 rounded-xl bg-amber-500/20 text-amber-400 flex items-center justify-center">
+                        <Star className="w-4 h-4 fill-amber-400 text-amber-400" />
+                      </div>
+                      {verifiedStats.myYearVisits >= 100 ? (
+                        <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold flex items-center gap-1">
+                          <Award className="w-3 h-3 text-amber-400" />
+                          <span>ครบ 100 ครั้ง</span>
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-slate-400">
+                          ขาด {100 - verifiedStats.myYearVisits} ครบ 100
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">คะแนนดาวสะสม ({selectedYear})</p>
+                    <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5">
+                      {verifiedStats.myYearVisits} <span className="text-xs font-normal text-slate-400">ดาว</span>
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-400">คะแนนดาวสะสม (การเข้าชม)</p>
-                  <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5">
-                    {verifiedStats.myTotalVisits} <span className="text-xs font-normal text-slate-400">ดาว</span>
-                  </p>
-                  <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>1 ครั้ง = 1 ดาว (เข้าจริง {verifiedStats.myTotalVisits} ครั้ง)</span>
+
+                  <div className="mt-2 pt-2 border-t border-slate-700/50">
+                    {verifiedStats.myYearVisits >= 100 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowCertificateModal(true)}
+                        className="w-full py-1 px-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 text-amber-300 text-[11px] font-bold flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                      >
+                        <Printer className="w-3 h-3" />
+                        <span>กดพิมพ์เกียรติบัตรออนไลน์</span>
+                      </button>
+                    ) : (
+                      <div className="text-[10px] text-slate-400 flex items-center justify-between">
+                        <span>1 ครั้ง = 1 ดาว (ปีต่อปี)</span>
+                        <span className="text-amber-400/80">เกณฑ์เกียรติบัตร: 100 ครั้ง</span>
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* Metric 4: แต้มสะสมชื่นชม (จากผลงานสื่อที่โพสต์แล้วมีคนกดถูกใจ) */}
+                {/* Metric 4: แต้มสะสมชื่นชม (จากผลงานสื่อที่โพสต์แล้วมีคนกดถูกใจ ปีต่อปี) */}
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="w-9 h-9 rounded-xl bg-rose-500/20 text-rose-400 flex items-center justify-center mb-2">
                     <Heart className="w-4 h-4 fill-rose-400 text-rose-400" />
                   </div>
-                  <p className="text-xs text-slate-400">แต้มสะสมชื่นชม (ผลงานสื่อ)</p>
+                  <p className="text-xs text-slate-400">แต้มสะสมชื่นชม ({selectedYear})</p>
                   <p className="text-xl sm:text-2xl font-black text-rose-400 mt-0.5">
                     {teacherKudosPoints} <span className="text-xs font-normal text-slate-400">แต้ม</span>
                   </p>
                   <div className="mt-1 text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>สื่อ {myMediaWorks.length} ชิ้น • ถูกใจ {teacherKudosPoints} ครั้ง</span>
+                    <span>สื่อปี {selectedYear} ({myMediaWorks.length} ชิ้น) • ถูกใจ {teacherKudosPoints} ครั้ง</span>
                   </div>
                 </div>
               </div>
@@ -1077,7 +1181,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
                     <BarChart3 className="w-4 h-4 text-purple-400" />
-                    <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear} (คิดตามจริง ไม่บวกเพิ่ม)</span>
+                    <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear}</span>
                   </h4>
                   <span className="text-[11px] text-slate-400">12 เดือน ตรงกับยอดรวม</span>
                 </div>
@@ -1102,7 +1206,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   </span>
                   <span className="text-[11px] text-emerald-400 flex items-center gap-1">
                     <CheckCircle2 className="w-3.5 h-3.5" />
-                    ยอดรวมแต่ละเดือนตรงกับยอดสรุป 100% คิดตามจริง ไม่บวกเพิ่ม
+                    ยอดรวมแต่ละเดือนตรงกับยอดสรุป 100%
                   </span>
                 </div>
               </div>
@@ -1111,7 +1215,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/60 space-y-3">
                 <h4 className="text-xs font-bold text-white flex items-center gap-2">
                   <Clock className="w-4 h-4 text-sky-400" />
-                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ (คิด 1 ครั้ง = 1 ดาว)</span>
+                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ (คิด 1 ครั้ง = 1 ดาว ปีต่อปี)</span>
                 </h4>
                 
                 {verifiedStats.myRecentLogs.length > 0 ? (
@@ -1152,7 +1256,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           {activeTab === 'praise' && (
             <div className="space-y-5 animate-in fade-in duration-200">
               
-              {/* Section 1: คะแนนดาวสะสมจากการเข้าชมระบบ (Star Points) */}
+              {/* Section 1: คะแนนดาวสะสมจากการเข้าชมระบบ (Star Points - ปีต่อปีเท่านั้น) */}
               <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-amber-950/40 via-slate-850 to-slate-900 border border-amber-500/30 shadow-lg">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2.5">
@@ -1161,44 +1265,134 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     </div>
                     <div>
                       <h3 className="text-sm font-bold text-white">
-                        คะแนนดาวสะสมจากการเข้าชมเว็บไซต์ (1 ครั้ง = 1 แต้มดาว)
+                        คะแนนดาวสะสมจากการเข้าชมเว็บไซต์ ประจำปี {selectedYear} (1 ครั้ง = 1 แต้มดาว)
                       </h3>
                       <p className="text-[11px] text-slate-400">
-                        อ้างอิงจากข้อมูลการเข้าชมระบบของตนเองของผู้ใช้งานจริง นับตามจำนวนครั้งจริง
+                        คิดคะแนนเป็นปีต่อปีเท่านั้น ไม่ใช้คะแนนนี้กับปีอื่น ๆ (อ้างอิงจากข้อมูลการเข้าชมระบบของตนเอง)
                       </p>
                     </div>
                   </div>
                   <div className="px-3 py-1 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-xs font-black flex items-center gap-1">
                     <Star className="w-3.5 h-3.5 fill-amber-300" />
-                    <span>{verifiedStats.myTotalVisits} แต้มดาว</span>
+                    <span>{verifiedStats.myYearVisits} แต้มดาว</span>
                   </div>
                 </div>
 
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mt-3 pt-3 border-t border-slate-700/60 text-center">
                   <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400">เข้าชมทั้งหมด</span>
-                    <p className="text-base font-bold text-amber-400 mt-0.5">{verifiedStats.myTotalVisits} ครั้ง</p>
-                    <span className="text-[9px] text-slate-500">={verifiedStats.myTotalVisits} ดาว</span>
+                    <span className="text-[10px] text-slate-400">คะแนนดาวปี {selectedYear}</span>
+                    <p className="text-base font-bold text-amber-400 mt-0.5">{verifiedStats.myYearVisits} ดาว</p>
+                    <span className="text-[9px] text-slate-500">เข้าชม {verifiedStats.myYearVisits} ครั้ง</span>
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400">เข้าชมปี {selectedYear}</span>
-                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myYearVisits} ครั้ง</p>
-                    <span className="text-[9px] text-slate-500">={verifiedStats.myYearVisits} ดาว</span>
+                    <span className="text-[10px] text-slate-400">คะแนนดาวเดือนนี้</span>
+                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myMonthVisits} ดาว</p>
+                    <span className="text-[9px] text-slate-500">เข้าชม {verifiedStats.myMonthVisits} ครั้ง</span>
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400">เข้าชมเดือนนี้</span>
-                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myMonthVisits} ครั้ง</p>
-                    <span className="text-[9px] text-slate-500">={verifiedStats.myMonthVisits} ดาว</span>
+                    <span className="text-[10px] text-slate-400">คะแนนดาววันนี้</span>
+                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myTodayVisits} ดาว</p>
+                    <span className="text-[9px] text-slate-500">เข้าชม {verifiedStats.myTodayVisits} ครั้ง</span>
                   </div>
                   <div className="p-2.5 rounded-xl bg-slate-900/60 border border-slate-800">
-                    <span className="text-[10px] text-slate-400">เข้าชมวันนี้</span>
-                    <p className="text-base font-bold text-white mt-0.5">{verifiedStats.myTodayVisits} ครั้ง</p>
-                    <span className="text-[9px] text-slate-500">={verifiedStats.myTodayVisits} ดาว</span>
+                    <span className="text-[10px] text-slate-400">เกณฑ์การคิดคะแนน</span>
+                    <p className="text-xs font-semibold text-emerald-400 mt-1">ปีต่อปีเท่านั้น</p>
+                    <span className="text-[9px] text-slate-500">ไม่สะสมข้ามปี</span>
                   </div>
                 </div>
               </div>
 
-              {/* Section 2: แต้มสะสมชื่นชมจากผลงานสื่อนวัตกรรม (Teacher Media Kudos) */}
+              {/* Online Certificate Card (เงื่อนไข: เข้าชม 100 ครั้งขึ้นไป ได้รับเกียรติบัตรออนไลน์ มีปุ่มกดพิมพ์ทันที) */}
+              <div className={`p-4 sm:p-5 rounded-2xl border transition-all ${
+                verifiedStats.myYearVisits >= 100
+                  ? 'bg-gradient-to-r from-amber-950/60 via-slate-900 to-amber-900/40 border-amber-500/60 shadow-xl shadow-amber-500/10'
+                  : 'bg-slate-850/80 border-slate-750'
+              }`}>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3">
+                    <div className={`w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 ${
+                      verifiedStats.myYearVisits >= 100
+                        ? 'bg-gradient-to-tr from-amber-500 to-amber-300 text-slate-950 shadow-lg shadow-amber-500/30 ring-2 ring-amber-400/50'
+                        : 'bg-slate-800 text-slate-400 border border-slate-700'
+                    }`}>
+                      <Award className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h4 className="text-sm sm:text-base font-bold text-white flex items-center gap-1.5">
+                          <span>เกียรติบัตรออนไลน์ ประจำปี {selectedYear}</span>
+                        </h4>
+                        {verifiedStats.myYearVisits >= 100 ? (
+                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-[11px] font-bold flex items-center gap-1">
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>ได้รับสิทธิ์เกียรติบัตรแล้ว</span>
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] font-medium">
+                            สะสม {verifiedStats.myYearVisits}/100 ครั้ง
+                          </span>
+                        )}
+                      </div>
+
+                      <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                        {verifiedStats.myYearVisits >= 100 ? (
+                          <span>
+                            ยินดีด้วย! คุณมีสถิติการเข้าชมระบบครบถ้วนตามเกณฑ์ <strong className="text-amber-400 font-bold">100 ครั้งขึ้นไป</strong> (เข้าชมจริง {verifiedStats.myYearVisits} ครั้ง) สามารถกดพิมพ์เกียรติบัตรออนไลน์ได้ทันที
+                          </span>
+                        ) : (
+                          <span>
+                            เงื่อนไข: หากเข้าชมเว็บไซต์ครบ <strong className="text-amber-400">100 ครั้งขึ้นไปต่อปี</strong> จะได้รับเกียรติบัตรออนไลน์เชิดชูเกียรติ พร้อมระบบกดพิมพ์ใบประกาศทันที (ขาดอีก <strong className="text-blue-400 font-bold">{Math.max(0, 100 - verifiedStats.myYearVisits)}</strong> ครั้ง)
+                          </span>
+                        )}
+                      </p>
+
+                      <div className="mt-2 text-[11px] text-slate-400 flex items-center gap-2 flex-wrap">
+                        <span>ชื่อ-สกุล บนเกียรติบัตร:</span>
+                        <strong className="text-amber-200 bg-slate-800/90 px-2.5 py-0.5 rounded-md border border-slate-700 text-xs">
+                          {getCleanRealName(fullNameInput || profile.fullName || userName, userEmail)}
+                        </strong>
+                        <span className="text-[10px] text-slate-500">(เฉพาะชื่อ-นามสกุลจริงตามระบบ)</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Action Button & Progress */}
+                  <div className="flex flex-col sm:items-end gap-2 flex-shrink-0">
+                    {verifiedStats.myYearVisits >= 100 ? (
+                      <button
+                        type="button"
+                        onClick={() => setShowCertificateModal(true)}
+                        className="w-full sm:w-auto px-4 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 via-amber-400 to-amber-500 hover:from-amber-400 hover:to-amber-300 text-slate-950 font-black text-xs sm:text-sm flex items-center justify-center gap-2 shadow-lg shadow-amber-500/30 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+                      >
+                        <Printer className="w-4 h-4" />
+                        <span>กดพิมพ์เกียรติบัตร ทันที</span>
+                      </button>
+                    ) : (
+                      <div className="w-full sm:w-48 space-y-1.5">
+                        <div className="flex justify-between text-[11px] text-slate-400 font-medium">
+                          <span>ความคืบหน้า</span>
+                          <span>{Math.min(100, verifiedStats.myYearVisits)}%</span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-800 overflow-hidden border border-slate-700">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-amber-400 rounded-full transition-all duration-500"
+                            style={{ width: `${Math.min(100, (verifiedStats.myYearVisits / 100) * 100)}%` }}
+                          ></div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setShowCertificateModal(true)}
+                          className="w-full text-center text-[11px] text-slate-400 hover:text-amber-300 underline underline-offset-2 transition-colors cursor-pointer pt-1"
+                        >
+                          ดูตัวอย่างเกียรติบัตรล่วงหน้า
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Section 2: แต้มสะสมชื่นชมจากผลงานสื่อนวัตกรรม (Teacher Media Kudos - ปีต่อปีเท่านั้น) */}
               <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-br from-rose-950/40 via-slate-850 to-slate-900 border border-rose-500/30 shadow-lg">
                 <div className="flex items-center justify-between mb-3">
                   <div className="flex items-center gap-2.5">
@@ -1207,10 +1401,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     </div>
                     <div>
                       <h3 className="text-sm font-bold text-white">
-                        คะแนนแต้มสะสมชื่นชมจากผลงานสื่อ (คงค่า 0 แต้มเริ่มต้น)
+                        คะแนนแต้มสะสมชื่นชมจากผลงานสื่อ ประจำปี {selectedYear} (ปีต่อปีเท่านั้น)
                       </h3>
                       <p className="text-[11px] text-slate-400">
-                        นับแต้มจากเมื่อคุณครูโพสต์สื่อ และสื่อของคุณครูคนนั้นมีคนกดถูกใจที่หน้าคลังสื่อ
+                        นับแต้มจากผลงานสื่อประจำปี {selectedYear} ที่มีคนกดถูกใจ (คิดคะแนนปีต่อปี ไม่ใช้คะแนนนี้กับปีอื่น ๆ)
                       </p>
                     </div>
                   </div>
@@ -1224,10 +1418,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 <div className="mt-3 pt-3 border-t border-slate-700/60">
                   <div className="flex items-center justify-between mb-2">
                     <span className="text-xs font-semibold text-slate-300">
-                      ผลงานสื่อของคุณครูในคลัง ({myMediaWorks.length} ชิ้น):
+                      ผลงานสื่อของคุณครูในคลัง ประจำปี {selectedYear} ({myMediaWorks.length} ชิ้น):
                     </span>
                     <span className="text-[11px] text-rose-400 font-medium">
-                      ถูกใจรวม {teacherKudosPoints} ครั้ง
+                      ถูกใจรวม {teacherKudosPoints} ครั้ง (ปีต่อปี)
                     </span>
                   </div>
 
@@ -1268,10 +1462,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                   ) : (
                     <div className="p-4 rounded-xl bg-slate-900/50 border border-slate-800 text-center space-y-2">
                       <p className="text-xs text-slate-400">
-                        คุณครูยังไม่มีผลงานสื่อในคลังสื่อ (แต้มสะสมชื่นชมคงค่า 0 แต้ม)
+                        คุณครูยังไม่มีผลงานสื่อในคลังสื่อสำหรับปี {selectedYear} (แต้มสะสมชื่นชมประจำปีคงค่า 0 แต้ม)
                       </p>
                       <p className="text-[11px] text-slate-500">
-                        เมื่อส่งผลงานสื่อและมีผู้เข้าชมกดถูกใจที่หน้าคลังสื่อ แต้มจะถูกนำมารวมที่นี่โดยอัตโนมัติ
+                        เมื่อส่งผลงานสื่อในปีนี้และมีผู้เข้าชมกดถูกใจที่หน้าคลังสื่อ แต้มจะถูกนำมารวมที่นี่โดยอัตโนมัติ (คิดคะแนนปีต่อปี ไม่สะสมข้ามปี)
                       </p>
                       <button
                         type="button"
@@ -1452,6 +1646,19 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         </div>
 
       </div>
+
+      {/* Online Certificate Modal (สำหรับพิมพ์เกียรติบัตรออนไลน์) */}
+      {showCertificateModal && (
+        <OnlineCertificateModal
+          isOpen={showCertificateModal}
+          onClose={() => setShowCertificateModal(false)}
+          recipientName={getCleanRealName(fullNameInput || profile.fullName || userName, userEmail)}
+          recipientEmail={userEmail}
+          academicYear={selectedYear}
+          visitCount={verifiedStats.myYearVisits}
+          schoolName={profile.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี'}
+        />
+      )}
 
       {/* Embedded Avatar Editor Modal */}
       {showAvatarEditModal && (
