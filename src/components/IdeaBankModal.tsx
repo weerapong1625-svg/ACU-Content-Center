@@ -8,19 +8,21 @@ import {
   Calendar, 
   Globe, 
   Plus, 
-  Bookmark,
-  CheckCircle2,
-  Edit3,
-  Trash2,
-  BookOpen,
-  GraduationCap,
-  FileText,
-  Users,
-  Library,
-  Award,
-  ShieldCheck
+  Bookmark, 
+  CheckCircle2, 
+  Edit3, 
+  Trash2, 
+  BookOpen, 
+  GraduationCap, 
+  FileText, 
+  Users, 
+  Library, 
+  Award, 
+  ShieldCheck,
+  Gift
 } from 'lucide-react';
 import { IDEA_RESOURCES, IDEA_CATEGORIES, IdeaResource } from '../data/ideaResources';
+import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { 
   subscribeSharedIdeas, 
   saveSharedIdea, 
@@ -54,6 +56,7 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [editUrl, setEditUrl] = useState('');
   const [editCategory, setEditCategory] = useState<AvailableCategory>('official_portal');
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
   // Subscribe to real-time shared ideas
   useEffect(() => {
@@ -247,7 +250,7 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
             <button
               type="button"
               onClick={() => setIsAddingIdea(!isAddingIdea)}
-              className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+              className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
             >
               <Plus className="w-3.5 h-3.5" />
               {isAddingIdea ? 'ปิดแบบฟอร์ม' : 'แชร์แหล่งเรียนรู้'}
@@ -256,11 +259,30 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
             <button
               type="button"
               onClick={onClose}
-              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
+        </div>
+
+        {/* Special Privileges Activity Notice Banner */}
+        <div className="mx-4 sm:mx-6 mt-3 p-3 sm:p-3.5 rounded-2xl bg-gradient-to-r from-amber-500/15 via-orange-500/15 to-purple-500/15 border border-amber-400/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2.5 text-xs">
+          <div className="flex items-center gap-2.5 text-slate-200">
+            <span className="text-xl">🎁</span>
+            <div>
+              <span className="font-bold text-amber-300">สิทธิพิเศษสำหรับผู้เข้าใช้งานระบบ:</span>{' '}
+              <span>เพียงแค่คุณครูโพสต์แชร์แหล่งการเรียนรู้ <strong>20 ครั้งขึ้นไป</strong> ลุ้นรับรางวัล 1.ตุ๊กตา 🧸 2.ขนม 🍪 3.ลูกอม 🍬 ติดต่อรับได้ที่ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์)</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowPrivilegesModal(true)}
+            className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-sm self-end sm:self-center flex-shrink-0 cursor-pointer transition-transform hover:scale-105"
+          >
+            <Gift className="w-3.5 h-3.5" />
+            <span>เช็คสถานะสิทธิ์</span>
+          </button>
         </div>
 
         {/* Action notice toast */}
@@ -618,6 +640,13 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
           <span className="text-amber-300/90 text-[11px]">แสดง {filtered.length} แหล่งข้อมูลทางการและเพจแบ่งปัน</span>
         </div>
       </div>
+
+      {/* Special Privileges Modal */}
+      <SpecialPrivilegesModal
+        isOpen={showPrivilegesModal}
+        onClose={() => setShowPrivilegesModal(false)}
+        userEmail={userEmail}
+      />
     </div>
   );
 };

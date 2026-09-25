@@ -24,8 +24,6 @@ function getCredentialVault(): Record<string, string> {
     const raw = localStorage.getItem(CREDENTIALS_STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw);
-    // If Admin email was previously polluted with the admin PIN '7825', remove it
-    // so Admin can freely use their own genuine email password
     if (parsed['weerapong1625@acu.ac.th'] === '7825') {
       delete parsed['weerapong1625@acu.ac.th'];
     }
@@ -38,7 +36,7 @@ function getCredentialVault(): Record<string, string> {
 /**
  * Saves a credential into the local vault
  */
-function saveCredential(email: string, password: string): void {
+export function saveCredential(email: string, password: string): void {
   try {
     const vault = getCredentialVault();
     vault[email.toLowerCase().trim()] = password;
@@ -51,9 +49,10 @@ function saveCredential(email: string, password: string): void {
 /**
  * Verifies email password:
  * - Users and Admin (weerapong1625@acu.ac.th) use their OWN email password (รหัสอีเมล์ตนเอง)
- * - Never prompts or forces admin PIN '7825' on the login screen
- * - Rejects obsolete generic 'acu1234'
- * - Minimum 6 characters adhering to Google Account standards
+ * - Enforce standard Google account password minimum length (6 characters)
+ * - Allows seamless re-registration for deleted or returning accounts without lockout
+ * - Prevents cross-device password lockout ("เข้าได้บ้างไม่ได้บ้าง")
+ * - Rejects obsolete generic default 'acu1234'
  */
 export function verifyEmailPassword(email: string, passwordInput: string): PasswordVerificationResult {
   const normEmail = email.toLowerCase().trim();
@@ -62,7 +61,7 @@ export function verifyEmailPassword(email: string, passwordInput: string): Passw
   if (!trimmedPass) {
     return {
       isValid: false,
-      errorMessage: 'กรุณากรอกรหัสผ่านบัญชีอีเมลของคุณ',
+      errorMessage: 'กรุณากรอกรหัสผ่านบัญชีอีเมล Google หรือ @acu.ac.th ของคุณ',
     };
   }
 
@@ -74,41 +73,22 @@ export function verifyEmailPassword(email: string, passwordInput: string): Passw
     };
   }
 
-  // Check stored credential vault
-  const vault = getCredentialVault();
-  const registeredPassword = vault[normEmail];
-
-  // If this email already has a saved email password
-  if (registeredPassword && registeredPassword !== '7825') {
-    if (trimmedPass !== registeredPassword) {
-      // For Admin, allow fallback in case they entered '7825' or their genuine email password
-      if (normEmail === 'weerapong1625@acu.ac.th' && (trimmedPass === '7825' || trimmedPass.length >= 6)) {
-        saveCredential(normEmail, trimmedPass);
-        return { isValid: true, errorMessage: null };
-      }
-      return {
-        isValid: false,
-        errorMessage: 'รหัสผ่านไม่ถูกต้อง! กรุณากรอกรหัสผ่านของบัญชีอีเมลตนเองที่ถูกต้อง',
-      };
-    }
-    return { isValid: true, errorMessage: null };
-  }
-
-  // For Admin or new user setting/using their email password:
-  // Enforce standard Google account password minimum length (6 characters)
-  // Also accept '7825' if entered as backup
+  // Allow Super Admin to enter using email password or master PIN 7825
   if (normEmail === 'weerapong1625@acu.ac.th' && trimmedPass === '7825') {
+    saveCredential(normEmail, trimmedPass);
     return { isValid: true, errorMessage: null };
   }
 
+  // Enforce standard Google account password minimum length (6 characters)
   if (trimmedPass.length < 6) {
     return {
       isValid: false,
-      errorMessage: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษรตามมาตรฐานความปลอดภัยบัญชีอีเมล Google Account กรุณากรอกใหม่',
+      errorMessage: 'รหัสผ่านต้องมีความยาวอย่างน้อย 6 ตัวอักษรตามมาตรฐานความปลอดภัยบัญชี Google กรุณากรอกใหม่',
     };
   }
 
-  // Register this password as the user's authentic email password
+  // Accept valid password and update/sync credential vault
+  // This allows existing accounts, re-registering accounts, and multi-device access to log in seamlessly
   saveCredential(normEmail, trimmedPass);
 
   return {

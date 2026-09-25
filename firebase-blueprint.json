@@ -90,6 +90,28 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["title", "creatorEmail"]
+    },
+    "reward_privilege_claims": {
+      "title": "Teacher Special Privileges and Reward Claims",
+      "description": "Tracks teachers who share learning resources 20+ times, their eligibility, reward claims, and distribution of prizes (1.Doll, 2.Snack, 3.Candy) at Computer Staff Room 3rd floor by Master Weerapong",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "teacherName": { "type": "string" },
+        "subjectGroup": { "type": "string" },
+        "totalShares": { "type": "number" },
+        "isEligible": { "type": "boolean" },
+        "claimStatus": { "type": "string", "enum": ["eligible", "pending_pickup", "received", "not_eligible"] },
+        "selectedReward": { "type": "string" },
+        "receivedReward": { "type": "string" },
+        "receivedAt": { "type": "string", "format": "date-time" },
+        "pickupLocation": { "type": "string" },
+        "administeredBy": { "type": "string" },
+        "adminNote": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userEmail"]
     }
   }
 }

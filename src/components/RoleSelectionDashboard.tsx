@@ -22,7 +22,8 @@ import {
   User,
   Camera,
   X,
-  Trash2
+  Trash2,
+  Gift
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -34,8 +35,7 @@ import {
 } from '../services/auditService';
 import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
-import { AdminUserManagementModal } from './AdminUserManagementModal';
-import { AdminEmailAuditModal } from './AdminEmailAuditModal';
+import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
 import { TeacherDashboard } from './TeacherDashboard';
 import { AdminDashboard } from './AdminDashboard';
@@ -54,8 +54,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [dbStatus, setDbStatus] = useState<'saving' | 'saved' | 'idle'>('idle');
   const [showSystemTestModal, setShowSystemTestModal] = useState(false);
   const [showAdminPasswordModal, setShowAdminPasswordModal] = useState(false);
-  const [showUserManagementModal, setShowUserManagementModal] = useState(false);
-  const [showEmailAuditModal, setShowEmailAuditModal] = useState(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
   const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
@@ -82,6 +80,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [avatarUrl, setAvatarUrl] = useState<string>(getInitialAvatar);
   const [showEditProfileModal, setShowEditProfileModal] = useState<boolean>(false);
   const [showUserProfileModal, setShowUserProfileModal] = useState<boolean>(false);
+  const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
   // Synchronously fetch cached full profile name & school for zero-lag display
   const cachedProfile = getCachedUserProfile(userEmail);
@@ -357,6 +356,18 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
 
           {/* Action buttons on Status Bar: Admin button, Personal Info button, System Test & Logout */}
           <div className="flex items-center gap-2 ml-auto flex-wrap">
+            {/* สิทธิพิเศษ Button */}
+            <button
+              type="button"
+              id="btn-open-privileges-modal"
+              onClick={() => setShowPrivilegesModal(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-red-500/25 hover:from-amber-500/40 hover:to-orange-500/40 border border-amber-400/50 text-amber-200 hover:text-white text-xs font-semibold shadow-md shadow-amber-950/40 transition-all cursor-pointer group hover:border-amber-300"
+              title="สิทธิพิเศษ: โพสต์แชร์แหล่งการเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม ติดต่อรับที่ห้องพักครู Com ชั้น 3"
+            >
+              <Gift className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform animate-pulse" />
+              <span>สิทธิพิเศษ (แชร์ 20 ครั้ง)</span>
+            </button>
+
             {/* Prominent "เฉพาะ Admin" Button as explicitly requested */}
             <button
               type="button"
@@ -373,31 +384,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                 <Lock className="w-3 h-3 text-amber-400/70" />
               )}
             </button>
-
-            {/* Quick Admin Actions (ลบบัญชีผู้ใช้ & ตรวจสอบอีเมล) - Available only to Super Admin */}
-            {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
-              <>
-                <button
-                  type="button"
-                  onClick={() => setShowUserManagementModal(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold transition-all shadow-md shadow-red-950/30 cursor-pointer active:scale-95"
-                  title="ระบบจัดการและลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
-                >
-                  <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                  <span>ลบบัญชีผู้ใช้</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => setShowEmailAuditModal(true)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold transition-all shadow-md shadow-blue-950/30 cursor-pointer active:scale-95"
-                  title="ตรวจสอบและซิงค์บัญชีอีเมลทุกฐานข้อมูลให้ตรงกัน 100%"
-                >
-                  <Database className="w-3.5 h-3.5 text-blue-400" />
-                  <span>ตรวจสอบอีเมล</span>
-                </button>
-              </>
-            )}
 
             {/* Prominent "ข้อมูลส่วนตัว" Button as explicitly requested */}
             <button
@@ -725,29 +711,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       />
 
       {/* =========================================================================
-          ADMIN USER MANAGEMENT & EMAIL AUDIT MODALS
-         ========================================================================= */}
-      {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
-        <>
-          <AdminUserManagementModal
-            isOpen={showUserManagementModal}
-            onClose={() => setShowUserManagementModal(false)}
-            adminEmail={SUPER_ADMIN_EMAIL}
-            onOpenEmailAudit={() => {
-              setShowUserManagementModal(false);
-              setShowEmailAuditModal(true);
-            }}
-          />
-
-          <AdminEmailAuditModal
-            isOpen={showEmailAuditModal}
-            onClose={() => setShowEmailAuditModal(false)}
-            adminEmail={SUPER_ADMIN_EMAIL}
-          />
-        </>
-      )}
-
-      {/* =========================================================================
           ADMIN PASSWORD VERIFICATION MODAL
           - Requires secret security password (7825) without any hints
          ========================================================================= */}
@@ -820,6 +783,14 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
           </div>
         </div>
       )}
+
+      {/* Special Privileges Modal */}
+      <SpecialPrivilegesModal
+        isOpen={showPrivilegesModal}
+        onClose={() => setShowPrivilegesModal(false)}
+        userEmail={userEmail}
+        teacherName={profileName}
+      />
     </div>
   );
 };

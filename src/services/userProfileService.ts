@@ -533,11 +533,42 @@ export async function deleteUserAccountCompletely(
   try {
     const deletedCounts = { ...emptyCounts };
 
-    // 1. Delete user profile document from Firestore
+    // 1. Delete user profile documents from Firestore (Comprehensive scan + doc ID variants)
     try {
+      const profCol = collection(db, 'user_profiles');
+      const profSnap = await getDocs(profCol);
+      const matchingProfileDocs = profSnap.docs.filter((d) => {
+        const docId = d.id.trim().toLowerCase();
+        const dataEmail = (d.data().email || d.data().userEmail || '').trim().toLowerCase();
+        let decodedId = '';
+        try {
+          decodedId = decodeURIComponent(d.id).trim().toLowerCase();
+        } catch {
+          // ignore
+        }
+        return (
+          docId === normTarget ||
+          decodedId === normTarget ||
+          d.id.toLowerCase() === encodeURIComponent(normTarget).toLowerCase() ||
+          dataEmail === normTarget
+        );
+      });
+
+      for (let i = 0; i < matchingProfileDocs.length; i += 100) {
+        const chunk = matchingProfileDocs.slice(i, i + 100);
+        const batch = writeBatch(db);
+        chunk.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+
+      // Defensively delete known doc ID variants directly as well
       const safeDocId = getSafeDocId(normTarget);
-      const profileRef = doc(db, 'user_profiles', safeDocId);
-      await deleteDoc(profileRef);
+      await Promise.allSettled([
+        deleteDoc(doc(db, 'user_profiles', safeDocId)),
+        deleteDoc(doc(db, 'user_profiles', normTarget)),
+        deleteDoc(doc(db, 'user_profiles', encodeURIComponent(normTarget))),
+      ]);
+
       deletedCounts.profile = true;
     } catch (err) {
       console.warn('Could not delete user_profiles doc:', err);
@@ -548,6 +579,14 @@ export async function deleteUserAccountCompletely(
       if (typeof window !== 'undefined' && window.localStorage) {
         localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}${normTarget}`);
         localStorage.removeItem(`acu_user_avatar_${normTarget}`);
+        const remembered = localStorage.getItem('acu_remembered_gmail');
+        if (remembered && remembered.trim().toLowerCase() === normTarget) {
+          localStorage.removeItem('acu_remembered_gmail');
+        }
+        const currentEmail = localStorage.getItem('acu_current_user_email');
+        if (currentEmail && currentEmail.trim().toLowerCase() === normTarget) {
+          localStorage.removeItem('acu_current_user_email');
+        }
       }
       removeUserCredential(normTarget);
     } catch (err) {
@@ -560,7 +599,7 @@ export async function deleteUserAccountCompletely(
         const logsCol = collection(db, 'login_logs');
         const logsSnap = await getDocs(logsCol);
         const userLogDocs = logsSnap.docs.filter((d) => {
-          const email = (d.data().email || '').trim().toLowerCase();
+          const email = (d.data().email || d.data().userEmail || '').trim().toLowerCase();
           return email === normTarget;
         });
 
@@ -582,7 +621,7 @@ export async function deleteUserAccountCompletely(
         const innovCol = collection(db, 'teacher_innovations_submissions');
         const innovSnap = await getDocs(innovCol);
         const userInnovDocs = innovSnap.docs.filter((d) => {
-          const email = (d.data().userEmail || '').trim().toLowerCase();
+          const email = (d.data().userEmail || d.data().email || d.data().teacherEmail || '').trim().toLowerCase();
           return email === normTarget;
         });
 
@@ -604,7 +643,7 @@ export async function deleteUserAccountCompletely(
         const sysCol = collection(db, 'system_test_submissions');
         const sysSnap = await getDocs(sysCol);
         const userSysDocs = sysSnap.docs.filter((d) => {
-          const email = (d.data().userEmail || '').trim().toLowerCase();
+          const email = (d.data().userEmail || d.data().email || '').trim().toLowerCase();
           return email === normTarget;
         });
 
@@ -626,7 +665,7 @@ export async function deleteUserAccountCompletely(
         const mediaCol = collection(db, 'teacher_media_repository');
         const mediaSnap = await getDocs(mediaCol);
         const userMediaDocs = mediaSnap.docs.filter((d) => {
-          const email = (d.data().submittedByEmail || '').trim().toLowerCase();
+          const email = (d.data().submittedByEmail || d.data().userEmail || d.data().email || '').trim().toLowerCase();
           return email === normTarget;
         });
 
@@ -640,6 +679,25 @@ export async function deleteUserAccountCompletely(
       } catch (err) {
         console.warn('Could not delete user teacher media:', err);
       }
+    }
+
+    // 7. Delete shared teaching ideas if present
+    try {
+      const sharedCol = collection(db, 'shared_teaching_ideas');
+      const sharedSnap = await getDocs(sharedCol);
+      const userSharedDocs = sharedSnap.docs.filter((d) => {
+        const email = (d.data().authorEmail || d.data().email || d.data().userEmail || '').trim().toLowerCase();
+        return email === normTarget;
+      });
+
+      for (let i = 0; i < userSharedDocs.length; i += 100) {
+        const chunk = userSharedDocs.slice(i, i + 100);
+        const batch = writeBatch(db);
+        chunk.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+    } catch (err) {
+      console.warn('Could not clean shared teaching ideas:', err);
     }
 
     return {

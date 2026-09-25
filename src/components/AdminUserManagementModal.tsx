@@ -267,6 +267,16 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
     setIsDeleting(false);
     if (result.success) {
       setDeleteResult(result);
+      const targetNorm = deletingUser.email.toLowerCase().trim();
+      setInternalProfiles(prev => {
+        const next = { ...prev };
+        delete next[targetNorm];
+        return next;
+      });
+      setInternalLogs(prev => prev.filter(l => (l.email || '').trim().toLowerCase() !== targetNorm));
+      setInternalInnovations(prev => prev.filter(inv => (inv.userEmail || '').trim().toLowerCase() !== targetNorm));
+      setInternalFacilities(prev => prev.filter(fac => (fac.userEmail || '').trim().toLowerCase() !== targetNorm));
+
       if (onUserDeleted) {
         onUserDeleted(deletingUser.email);
       }

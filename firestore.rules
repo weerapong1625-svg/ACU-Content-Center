@@ -38,5 +38,10 @@ service cloud.firestore {
     match /shared_ideas/{ideaId} {
       allow read, create, update, delete, write: if true;
     }
+
+    // reward_privilege_claims collection for teacher 20-share special privileges and reward distribution
+    match /reward_privilege_claims/{claimId} {
+      allow read, create, update, delete, write: if true;
+    }
   }
 }

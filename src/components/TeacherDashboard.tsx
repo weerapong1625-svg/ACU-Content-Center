@@ -13,8 +13,7 @@ import { TeacherInnovationSubmissionModal } from './TeacherInnovationSubmissionM
 import { MediaTypesPopupModal } from './MediaTypesPopupModal';
 import { TeacherMediaRepositoryModal } from './TeacherMediaRepositoryModal';
 import { IdeaBankModal } from './IdeaBankModal';
-import { AdminUserManagementModal } from './AdminUserManagementModal';
-import { AdminEmailAuditModal } from './AdminEmailAuditModal';
+import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 import { 
   UploadCloud, 
@@ -48,7 +47,8 @@ import {
   Send,
   Trash2,
   Database,
-  Camera
+  Camera,
+  Gift
 } from 'lucide-react';
 import { ADMIN_TARGET_EMAIL } from '../services/submissionService';
 
@@ -81,8 +81,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Real-time synced profile from Cloud Firestore (same across mobile & desktop)
   const [profile, setProfile] = useState<FullUserProfile | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
-  const [showUserManagementModal, setShowUserManagementModal] = useState(false);
-  const [showEmailAuditModal, setShowEmailAuditModal] = useState(false);
+  const [isPrivilegesModalOpen, setIsPrivilegesModalOpen] = useState(false);
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
@@ -356,6 +355,21 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
             {/* User Profile Chip & Action Buttons */}
             <div className="flex items-center gap-2">
+              {/* สิทธิพิเศษ สำหรับผู้เข้าใช้งานระบบคลังสื่อนวัตกรรม Button */}
+              <button
+                type="button"
+                id="btn-teacher-privileges"
+                onClick={() => setIsPrivilegesModalOpen(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/20 to-red-500/25 hover:from-amber-500/40 hover:to-orange-500/35 border border-amber-400/50 text-amber-200 hover:text-white text-xs font-bold shadow-md shadow-amber-950/40 transition-all hover:scale-105 active:scale-95 cursor-pointer group"
+                title="สิทธิพิเศษ: โพสต์แชร์แหล่งการเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม ติดต่อรับที่ห้องพักครู Com ชั้น 3"
+              >
+                <Gift className="w-3.5 h-3.5 text-amber-400 group-hover:rotate-12 transition-transform animate-pulse" />
+                <span>สิทธิพิเศษ</span>
+                <span className="hidden sm:inline-block px-1.5 py-0.2 rounded-full bg-amber-400/20 text-amber-300 text-[10px] font-extrabold border border-amber-400/30">
+                  แชร์ 20 ครั้ง
+                </span>
+              </button>
+
               <button
                 type="button"
                 id="btn-teacher-profile-chip"
@@ -382,31 +396,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </span>
                 </div>
               </button>
-
-              {/* Quick Admin Actions (เฉพาะ Super Admin) */}
-              {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setShowUserManagementModal(true)}
-                    className="px-2.5 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
-                    title="ลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
-                  >
-                    <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                    <span className="hidden sm:inline">ลบบัญชีผู้ใช้</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setShowEmailAuditModal(true)}
-                    className="px-2.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-xs cursor-pointer active:scale-95"
-                    title="ตรวจสอบและซิงค์อีเมลทุกฐานข้อมูล"
-                  >
-                    <Database className="w-3.5 h-3.5 text-blue-400" />
-                    <span className="hidden sm:inline">ตรวจสอบอีเมล</span>
-                  </button>
-                </>
-              )}
 
               <button
                 type="button"
@@ -457,10 +446,50 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             <button
               type="button"
               onClick={() => setActiveModalId('btn-1')}
-              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-transform hover:scale-105 flex items-center gap-1.5"
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-transform hover:scale-105 flex items-center gap-1.5 cursor-pointer"
             >
               <UploadCloud className="w-3.5 h-3.5" />
               <span>ส่งสื่อนวัตกรรม 5 ชิ้น</span>
+            </button>
+          </div>
+        </section>
+
+        {/* Special Privileges Activity Banner: โพสต์แชร์แหล่งเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม */}
+        <section
+          id="teacher-special-privileges-banner"
+          onClick={() => setIsPrivilegesModalOpen(true)}
+          className="mb-5 p-4 sm:p-4.5 rounded-2xl bg-gradient-to-r from-amber-950/70 via-orange-950/60 to-purple-950/70 border border-amber-500/40 hover:border-amber-400 shadow-[0_8px_25px_rgba(245,158,11,0.2)] backdrop-blur-md flex flex-col md:flex-row items-start md:items-center justify-between gap-3 cursor-pointer group transition-all duration-200 hover:scale-[1.01]"
+        >
+          <div className="flex items-start sm:items-center gap-3.5">
+            <div className="w-11 h-11 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-600 p-0.5 shadow-md flex-shrink-0 flex items-center justify-center text-white group-hover:rotate-6 transition-transform">
+              <Gift className="w-6 h-6 text-white" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="font-extrabold text-sm sm:text-base text-transparent bg-clip-text bg-gradient-to-r from-amber-200 via-yellow-100 to-white">
+                  สิทธิพิเศษ สำหรับผู้เข้าใช้งานระบบคลังสื่อนวัตกรรม
+                </span>
+                <span className="px-2 py-0.5 rounded-full bg-amber-400/20 text-amber-300 border border-amber-400/30 text-[10px] font-bold">
+                  รางวัลที่ 1.ตุ๊กตา 🧸 2.ขนม 🍪 3.ลูกอม 🍬
+                </span>
+              </div>
+              <p className="text-xs text-slate-300 mt-0.5">
+                <strong className="text-amber-300 font-semibold">เงื่อนไข:</strong> เพียงแค่คุณครูโพสต์แชร์แหล่งการเรียนรู้ <strong>20 ครั้งขึ้นไป</strong> ลุ้นรับรางวัล • ติดต่อรับได้ที่ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์)
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 self-end md:self-center flex-shrink-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                setIsPrivilegesModalOpen(true);
+              }}
+              className="px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-400 hover:to-orange-400 text-slate-950 font-bold text-xs shadow-md transition-all group-hover:shadow-amber-500/30 flex items-center gap-1.5 cursor-pointer"
+            >
+              <span>เช็คสถานะ & ขอรับรางวัล</span>
+              <ChevronRight className="w-4 h-4 text-slate-950 group-hover:translate-x-1 transition-transform" />
             </button>
           </div>
         </section>
@@ -789,6 +818,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         </div>
       )}
 
+      {/* Special Privileges and 20-Share Rewards Modal */}
+      <SpecialPrivilegesModal
+        isOpen={isPrivilegesModalOpen}
+        onClose={() => setIsPrivilegesModalOpen(false)}
+        userEmail={userEmail}
+        teacherName={profile?.fullName || profile?.displayName}
+        onOpenMediaUpload={() => setActiveModalId('btn-1')}
+        onOpenIdeaBank={() => setActiveModalId('btn-6')}
+      />
+
       {/* Full User Profile Modal (Cross-device synced) */}
       <UserProfileModal
         isOpen={isProfileModalOpen}
@@ -806,27 +845,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
           setProfile(updated);
         }}
       />
-
-      {/* Admin Quick Action Modals (เฉพาะ Admin: weerapong1625@acu.ac.th) */}
-      {userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase() && (
-        <>
-          <AdminUserManagementModal
-            isOpen={showUserManagementModal}
-            onClose={() => setShowUserManagementModal(false)}
-            adminEmail={SUPER_ADMIN_EMAIL}
-            onOpenEmailAudit={() => {
-              setShowUserManagementModal(false);
-              setShowEmailAuditModal(true);
-            }}
-          />
-
-          <AdminEmailAuditModal
-            isOpen={showEmailAuditModal}
-            onClose={() => setShowEmailAuditModal(false)}
-            adminEmail={SUPER_ADMIN_EMAIL}
-          />
-        </>
-      )}
     </div>
   );
 };

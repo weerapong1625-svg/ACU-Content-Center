@@ -27,8 +27,10 @@ import {
   Heart,
   RotateCcw,
   Printer,
-  Trash2
+  Trash2,
+  Gift
 } from 'lucide-react';
+import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { 
   FullUserProfile, 
   InnovationItem, 
@@ -38,8 +40,7 @@ import {
   recordProfileVisit,
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS,
-  getCleanRealName,
-  deleteUserAccountCompletely
+  getCleanRealName
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 import { 
@@ -80,45 +81,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 }) => {
   // Active Tab: 'info' (ข้อมูลส่วนตัว) | 'innovations' (สถานะส่งสื่อ 5 ชิ้น) | 'stats' (สถิติการเข้าชม) | 'praise' (ให้ดาวและชื่นชม)
   const [activeTab, setActiveTab] = useState<'info' | 'innovations' | 'stats' | 'praise'>('info');
-
-  // Check Admin permission to delete user account
-  const currentViewer = (currentUserEmail || localStorage.getItem('acu_current_user_email') || '').toLowerCase().trim();
-  const isViewerSuperAdmin = currentViewer === SUPER_ADMIN_EMAIL.toLowerCase();
-  const canAdminDeleteThisUser = isViewerSuperAdmin && userEmail.toLowerCase().trim() !== SUPER_ADMIN_EMAIL.toLowerCase();
-  const [isDeletingUser, setIsDeletingUser] = useState(false);
-
-  const handleAdminDeleteUser = async () => {
-    if (!canAdminDeleteThisUser) return;
-    const realName = getCleanRealName(profile.fullName, userEmail);
-    const confirmed = window.confirm(
-      `[เฉพาะ Admin] ยืนยันการลบบัญชีผู้ใช้: ${realName} (${userEmail})\n\nคำเตือน: ข้อมูลโปรไฟล์ สื่อการเรียนรู้ และประวัติการเข้าชมทั้งหมดจะถูกลบออกจากทุกฐานข้อมูลระบบอย่างถาวร!`
-    );
-    if (!confirmed) return;
-
-    setIsDeletingUser(true);
-    try {
-      const res = await deleteUserAccountCompletely(userEmail, SUPER_ADMIN_EMAIL, {
-        deleteLogs: true,
-        deleteSubmissions: true,
-        deleteFacilities: true,
-        deleteMedia: true,
-      });
-
-      if (res.success) {
-        alert(`ลบบัญชีผู้ใช้ ${userEmail} ออกจากทุกฐานข้อมูลเรียบร้อยแล้ว`);
-        if (onUserDeleted) {
-          onUserDeleted(userEmail);
-        }
-        onClose();
-      } else {
-        alert(res.error || 'ไม่สามารถลบบัญชีได้');
-      }
-    } catch (err: any) {
-      alert('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'));
-    } finally {
-      setIsDeletingUser(false);
-    }
-  };
 
   // Profile Data State initialized synchronously to prevent delay
   const isMasterWeerapong = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
@@ -172,6 +134,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
+  const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
   // Subscribe to real-time login logs
   useEffect(() => {
@@ -572,18 +535,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {canAdminDeleteThisUser && (
-              <button
-                type="button"
-                onClick={handleAdminDeleteUser}
-                disabled={isDeletingUser}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold transition-all shadow-xs disabled:opacity-50 cursor-pointer"
-                title="ลบบัญชีผู้ใช้นี้ออกจากทุกฐานข้อมูล (เฉพาะ Admin)"
-              >
-                <Trash2 className="w-3.5 h-3.5 text-red-400" />
-                <span>{isDeletingUser ? 'กำลังลบ...' : 'ลบบัญชีนี้ (Admin)'}</span>
-              </button>
-            )}
+            {/* Special Privileges Check Status Button */}
+            <button
+              type="button"
+              id="btn-profile-check-privileges"
+              onClick={() => setShowPrivilegesModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500/25 via-orange-500/25 to-red-500/25 hover:from-amber-500/40 hover:to-orange-500/40 border border-amber-400/50 text-amber-200 hover:text-white text-xs font-semibold transition-all shadow-xs cursor-pointer group"
+              title="เช็คสถานะสิทธิพิเศษ: โพสต์แชร์แหล่งเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม"
+            >
+              <Gift className="w-3.5 h-3.5 text-amber-400 group-hover:scale-110 transition-transform animate-pulse" />
+              <span>สิทธิพิเศษ (แชร์ 20 ครั้ง)</span>
+            </button>
 
             {/* Quick Exit Button (กดออกหน้านี้) */}
             <button
@@ -1681,6 +1643,14 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           }}
         />
       )}
+
+      {/* Special Privileges & Rewards Status Modal */}
+      <SpecialPrivilegesModal
+        isOpen={showPrivilegesModal}
+        onClose={() => setShowPrivilegesModal(false)}
+        userEmail={userEmail}
+        teacherName={profile.fullName || userName}
+      />
     </div>
   );
 };

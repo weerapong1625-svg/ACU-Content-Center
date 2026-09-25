@@ -3,37 +3,84 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
-import { Megaphone } from 'lucide-react';
+import React, { useState, useCallback } from 'react';
+import { Megaphone, Clock } from 'lucide-react';
 import { SchoolLogo } from './components/SchoolLogo';
 import { GmailLoginForm } from './components/GmailLoginForm';
 import { RoleSelectionDashboard } from './components/RoleSelectionDashboard';
 import { AnnouncementPopupModal } from './components/AnnouncementPopupModal';
+import { InactivityWarningModal } from './components/InactivityWarningModal';
+import { SessionTimeoutModal } from './components/SessionTimeoutModal';
+import {
+  useInactivityTimeout,
+  INACTIVITY_TIMEOUT_MS,
+  WARNING_BEFORE_TIMEOUT_MS,
+  ACU_LAST_ACTIVE_KEY,
+} from './hooks/useInactivityTimeout';
 
 export default function App() {
+  // Check if session has expired prior to mount
+  const [sessionTimedOut, setSessionTimedOut] = useState<boolean>(() => {
+    try {
+      const email = localStorage.getItem('acu_current_user_email');
+      const lastActive = localStorage.getItem(ACU_LAST_ACTIVE_KEY);
+      if (email && lastActive) {
+        const diff = Date.now() - parseInt(lastActive, 10);
+        if (diff >= INACTIVITY_TIMEOUT_MS) {
+          localStorage.removeItem('acu_current_user_email');
+          localStorage.removeItem('acu_user_role');
+          localStorage.removeItem(ACU_LAST_ACTIVE_KEY);
+          sessionStorage.clear();
+          return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  });
+
   const [loggedInUser, setLoggedInUser] = useState<string | null>(() => {
     try {
-      return localStorage.getItem('acu_current_user_email');
+      const email = localStorage.getItem('acu_current_user_email');
+      const lastActive = localStorage.getItem(ACU_LAST_ACTIVE_KEY);
+      if (email && lastActive) {
+        const diff = Date.now() - parseInt(lastActive, 10);
+        if (diff >= INACTIVITY_TIMEOUT_MS) {
+          return null;
+        }
+      }
+      if (email) {
+        // Refresh active timestamp on valid existing session
+        localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
+      }
+      return email;
     } catch {
       return null;
     }
   });
 
-  const handleLogout = () => {
+  const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
     try {
       localStorage.removeItem('acu_current_user_email');
       localStorage.removeItem('acu_user_role');
+      localStorage.removeItem(ACU_LAST_ACTIVE_KEY);
       sessionStorage.clear();
     } catch {
       // ignore
     }
-  };
+    if (reason === 'timeout') {
+      setSessionTimedOut(true);
+    }
+  }, []);
 
   const handleLoginSuccess = (email: string) => {
     setLoggedInUser(email);
+    setSessionTimedOut(false);
     try {
       localStorage.setItem('acu_current_user_email', email);
+      localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
     } catch {
       // ignore
     }
@@ -50,13 +97,30 @@ export default function App() {
     }
   });
 
-  // If user has logged in, show Page 2 (Role Selection Dashboard)
+  // Track inactivity: auto-logout and bounce to login screen if inactive for 30 minutes
+  const { showWarning, remainingSeconds, extendSession } = useInactivityTimeout({
+    timeoutMs: INACTIVITY_TIMEOUT_MS,
+    warningMs: WARNING_BEFORE_TIMEOUT_MS,
+    isLoggedIn: Boolean(loggedInUser),
+    onTimeout: () => handleLogout('timeout'),
+  });
+
+  // If user has logged in, show Page 2 (Role Selection Dashboard) with optional timeout warning
   if (loggedInUser) {
     return (
-      <RoleSelectionDashboard
-        userEmail={loggedInUser}
-        onLogout={handleLogout}
-      />
+      <>
+        <RoleSelectionDashboard
+          userEmail={loggedInUser}
+          onLogout={() => handleLogout('manual')}
+        />
+        {showWarning && (
+          <InactivityWarningModal
+            remainingSeconds={remainingSeconds}
+            onStayLoggedIn={extendSession}
+            onLogout={() => handleLogout('manual')}
+          />
+        )}
+      </>
     );
   }
 
@@ -185,8 +249,38 @@ export default function App() {
              ========================================================================= */}
           <section
             id="row-3-gmail-login-section"
-            className="w-full flex items-center justify-center animate-in fade-in zoom-in-95 duration-700"
+            className="w-full flex flex-col items-center justify-center animate-in fade-in zoom-in-95 duration-700"
           >
+            {/* Session Timeout Banner if auto logged out */}
+            {sessionTimedOut && (
+              <div
+                id="session-timeout-banner"
+                className="w-full max-w-xl mb-6 p-4 rounded-2xl bg-amber-500/15 border border-amber-500/40 backdrop-blur-md flex items-center justify-between gap-3 text-amber-200 shadow-lg animate-in fade-in slide-in-from-top-3 duration-300"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-xl bg-amber-500/20 text-amber-400 flex-shrink-0">
+                    <Clock className="w-5 h-5 animate-pulse" />
+                  </div>
+                  <div>
+                    <h4 className="text-sm font-bold text-amber-300">
+                      ออกจากระบบอัตโนมัติ (Session Timeout)
+                    </h4>
+                    <p className="text-xs text-slate-300 mt-0.5">
+                      ระบบได้ออกจากระบบอัตโนมัติเนื่องจากไม่มีการเข้าใช้งานเกิน 30 นาที กรุณาลงชื่อเข้าใช้ใหม่อีกครั้ง
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setSessionTimedOut(false)}
+                  className="p-1.5 text-slate-400 hover:text-white hover:bg-white/10 rounded-lg transition-colors flex-shrink-0 text-sm font-semibold"
+                  title="ปิดการแจ้งเตือน"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
             <GmailLoginForm onLoginSuccess={handleLoginSuccess} />
           </section>
 
@@ -224,6 +318,11 @@ export default function App() {
         isOpen={isAnnouncementOpen}
         onClose={() => setIsAnnouncementOpen(false)}
       />
+
+      {/* Session Timeout Explanatory Modal */}
+      {sessionTimedOut && (
+        <SessionTimeoutModal onClose={() => setSessionTimedOut(false)} />
+      )}
     </div>
   );
 }

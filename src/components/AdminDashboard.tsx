@@ -38,7 +38,8 @@ import {
   Award,
   Printer,
   MapPin,
-  Database
+  Database,
+  Gift
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -50,6 +51,16 @@ import {
 import { AdminUserManagementModal } from './AdminUserManagementModal';
 import { AdminEmailAuditModal } from './AdminEmailAuditModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
+import { AdminPrivilegeRewardModal } from './AdminPrivilegeRewardModal';
+import { 
+  TeacherPrivilegeAdminItem, 
+  subscribeAllTeachersPrivilegeStatus, 
+  generatePrivilegesCSV, 
+  generatePrivilegesTSV,
+  TARGET_SHARE_COUNT,
+  PICKUP_LOCATION,
+  ADMIN_CONTACT_NAME
+} from '../services/privilegeService';
 import { 
   SUPER_ADMIN_EMAIL, 
   saveSchoolLogo, 
@@ -128,7 +139,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const isSuperAdmin = userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'certificates' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
+  const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'certificates' | 'privileges' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
 
   // Real-time Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
@@ -136,6 +147,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
+
+  // 0. Special Privileges and 20-Share Rewards Management
+  const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
+  const [privilegeFilter, setPrivilegeFilter] = useState<'all' | 'eligible' | 'received' | 'pending' | 'in_progress'>('all');
+  const [privilegeSearchTerm, setPrivilegeSearchTerm] = useState<string>('');
+  const [managingPrivilegeTeacher, setManagingPrivilegeTeacher] = useState<TeacherPrivilegeAdminItem | null>(null);
 
   // Yearly Stats & Certificate Filter
   const [selectedYear, setSelectedYear] = useState<string>('2026');
@@ -308,6 +325,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       }
     });
 
+    const unsubPrivileges = subscribeAllTeachersPrivilegeStatus((list) => {
+      setPrivilegeSummaries(list);
+    });
+
     // Fetch Google Sheets Config
     fetchGoogleSheetsConfig().then((cfg) => {
       if (cfg.sheetUrl) setGoogleSheetsUrl(cfg.sheetUrl);
@@ -321,6 +342,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubLogs();
       unsubProfiles();
       unsubBanner();
+      unsubPrivileges();
     };
   }, []);
 
@@ -781,6 +803,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
+  // Filtered Teacher Privileges for Admin Table
+  const filteredPrivileges = useMemo(() => {
+    return privilegeSummaries.filter((p) => {
+      if (privilegeFilter === 'eligible' && !p.isEligible) return false;
+      if (privilegeFilter === 'received' && p.claimStatus !== 'received') return false;
+      if (privilegeFilter === 'pending' && p.claimStatus !== 'pending_pickup') return false;
+      if (privilegeFilter === 'in_progress' && p.isEligible) return false;
+
+      if (privilegeSearchTerm.trim()) {
+        const q = privilegeSearchTerm.toLowerCase().trim();
+        return (
+          p.name.toLowerCase().includes(q) ||
+          p.email.toLowerCase().includes(q) ||
+          (p.department && p.department.toLowerCase().includes(q))
+        );
+      }
+      return true;
+    });
+  }, [privilegeSummaries, privilegeFilter, privilegeSearchTerm]);
+
+  // Privilege Statistics Summary
+  const privilegeStats = useMemo(() => {
+    const totalTeachers = privilegeSummaries.length;
+    const eligibleCount = privilegeSummaries.filter((p) => p.isEligible).length;
+    const receivedCount = privilegeSummaries.filter((p) => p.claimStatus === 'received').length;
+    const pendingCount = privilegeSummaries.filter((p) => p.claimStatus === 'pending_pickup').length;
+    const inProgressCount = privilegeSummaries.filter((p) => !p.isEligible).length;
+    const dollCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ตุ๊กตา') || (p.claimStatus === 'received' && p.selectedReward?.includes('ตุ๊กตา'))).length;
+    const snackCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ขนม') || (p.claimStatus === 'received' && p.selectedReward?.includes('ขนม'))).length;
+    const candyCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ลูกอม') || (p.claimStatus === 'received' && p.selectedReward?.includes('ลูกอม'))).length;
+    const totalPostsShared = privilegeSummaries.reduce((acc, p) => acc + p.totalShares, 0);
+
+    return {
+      totalTeachers,
+      eligibleCount,
+      receivedCount,
+      pendingCount,
+      inProgressCount,
+      dollCount,
+      snackCount,
+      candyCount,
+      totalPostsShared,
+    };
+  }, [privilegeSummaries]);
+
+  // Handle Export Privileges CSV
+  const handleExportPrivilegesCSV = () => {
+    const csv = generatePrivilegesCSV(filteredPrivileges);
+    downloadFile('ACU_รายงานสถิติสิทธิพิเศษและรางวัล_20แชร์.csv', csv);
+    showToast('ดาวน์โหลดรายงานสถิติสิทธิพิเศษและรางวัล (CSV) สำเร็จแล้ว');
+  };
+
+  // Handle Copy Privileges TSV for Google Sheets
+  const handleCopyPrivilegesTSV = async () => {
+    const tsv = generatePrivilegesTSV(filteredPrivileges);
+    const ok = await copyToClipboard(tsv);
+    if (ok) {
+      showToast('คัดลอกข้อมูลสิทธิพิเศษเรียบร้อยแล้ว! วางลง Google Sheets ได้ทันที (Ctrl+V)');
+    } else {
+      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+    }
+  };
+
   // Yearly Stats calculation
   const yearlyStats = useMemo(() => {
     const targetYear = parseInt(selectedYear) || 2026;
@@ -1153,22 +1238,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           <div className="flex items-center gap-2 w-full md:w-auto justify-between md:justify-end flex-wrap">
             <button
               type="button"
+              id="btn-admin-delete-user"
               onClick={() => setShowUserManagementModal(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600 border border-red-500/40 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer group active:scale-95"
+              className="px-3.5 py-1.5 rounded-xl bg-red-600/25 hover:bg-red-600 border border-red-500/50 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-red-950/40 transition-all cursor-pointer group active:scale-95 hover:border-red-400"
               title="ระบบจัดการและลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
             >
               <Trash2 className="w-3.5 h-3.5 text-red-400 group-hover:text-white transition-colors" />
-              <span>จัดการ/ลบบัญชีผู้ใช้</span>
+              <span>ลบบัญชีผู้ใช้</span>
             </button>
 
             <button
               type="button"
+              id="btn-admin-check-emails"
               onClick={() => setShowEmailAuditModal(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-sm transition-all cursor-pointer group active:scale-95"
+              className="px-3.5 py-1.5 rounded-xl bg-blue-600/25 hover:bg-blue-600 border border-blue-500/50 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-950/40 transition-all cursor-pointer group active:scale-95 hover:border-blue-400"
               title="ตรวจสอบและซิงค์บัญชีอีเมลทุกฐานข้อมูลให้ตรงกัน 100%"
             >
               <Database className="w-3.5 h-3.5 text-blue-400 group-hover:text-white transition-colors" />
-              <span>ตรวจสอบอีเมลทุกฐานข้อมูล</span>
+              <span>ตรวจสอบอีเมล</span>
             </button>
 
             <button
@@ -1235,6 +1322,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <span>ตรวจสอบเกียรติบัตร (ครบ 100 ครั้ง)</span>
             <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold">
               {certificateStats.eligible} ท่าน
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('privileges')}
+            className={`px-3.5 py-2 rounded-xl font-semibold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer ${
+              activeTab === 'privileges'
+                ? 'bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 text-white shadow-md shadow-amber-500/25 font-bold'
+                : 'text-amber-400 hover:text-amber-300 hover:bg-amber-500/10'
+            }`}
+          >
+            <Gift className="w-3.5 h-3.5" />
+            <span>รายงานสิทธิพิเศษ & รางวัล (แชร์ 20 ครั้ง)</span>
+            <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-amber-500/20 text-amber-300 text-[10px] font-bold border border-amber-400/30">
+              {privilegeStats.eligibleCount} ท่าน
             </span>
           </button>
 
@@ -2187,6 +2290,410 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                     <span className="hidden sm:inline">ลบ</span>
                                   </button>
                                 )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: สิทธิพิเศษ & รางวัล (Special Privileges & 20-Share Rewards)
+            เงื่อนไข: เพียงแค่คุณครูโพสต์แชร์แหล่งการเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับรางวัล
+            ที่ 1.ตุ๊กตา 2.ขนม 3.ลูกอม ติดต่อรับได้ที่ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์) และสามารถเช็คสถานะได้
+           ========================================================================= */}
+        {activeTab === 'privileges' && (
+          <div className="space-y-6">
+            
+            {/* Header & Conditions Notice */}
+            <div className="p-5 sm:p-6 rounded-3xl bg-gradient-to-r from-amber-950/80 via-slate-900 to-indigo-950/80 border border-amber-500/40 shadow-xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-80 h-40 bg-amber-500/10 rounded-full blur-3xl pointer-events-none" />
+              <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/40 text-xs font-bold flex items-center gap-1">
+                      <Gift className="w-3.5 h-3.5 text-amber-400" />
+                      <span>รายงานระบบสิทธิพิเศษสำหรับผู้เข้าใช้งาน</span>
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-400/40 text-[11px] font-semibold">
+                      Real-time ซิงค์สด
+                    </span>
+                  </div>
+
+                  <h2 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+                    รายงานสถิติสิทธิพิเศษและรางวัล สำหรับผู้ใช้งานระบบคลังสื่อนวัตกรรม
+                  </h2>
+
+                  <p className="text-xs sm:text-sm text-slate-300 mt-1 max-w-3xl leading-relaxed">
+                    <strong className="text-amber-300 font-bold">เงื่อนไข:</strong> เพียงแค่คุณครูโพสต์แชร์แหล่งการเรียนรู้{' '}
+                    <strong className="text-white underline decoration-amber-400 decoration-2">20 ครั้งขึ้นไป</strong>{' '}
+                    ลุ้นรับรางวัลที่ <strong className="text-pink-300">1.ตุ๊กตา 🧸</strong>,{' '}
+                    <strong className="text-amber-300">2.ขนม 🍪</strong>,{' '}
+                    <strong className="text-purple-300">3.ลูกอม 🍬</strong> •{' '}
+                    <span className="text-amber-200 font-semibold">ติดต่อรับได้ที่ห้องพักครู Com ชั้น 3 ({ADMIN_CONTACT_NAME})</span>
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-2 self-end md:self-center flex-shrink-0">
+                  <div className="px-4 py-2.5 rounded-2xl bg-slate-800/90 border border-amber-400/40 text-amber-200 text-xs font-semibold shadow-md flex items-center gap-2">
+                    <MapPin className="w-4 h-4 text-amber-400" />
+                    <span>จุดรับ: {PICKUP_LOCATION}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* 4 Metric Cards */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-slate-400">ครูที่แชร์แหล่งเรียนรู้ทั้งหมด</span>
+                  <div className="w-8 h-8 rounded-xl bg-blue-500/20 text-blue-300 flex items-center justify-center">
+                    <Users className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black text-white">
+                  {privilegeStats.totalTeachers} <span className="text-sm font-normal text-slate-400">ท่าน</span>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  กำลังสะสม {privilegeStats.inProgressCount} ท่าน
+                </div>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-amber-950/60 to-slate-900 border border-amber-500/40 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-amber-300">ผ่านเกณฑ์ครบ 20 ครั้ง (มีสิทธิ์)</span>
+                  <div className="w-8 h-8 rounded-xl bg-amber-500/20 text-amber-300 flex items-center justify-center">
+                    <Gift className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black text-amber-300">
+                  {privilegeStats.eligibleCount} <span className="text-sm font-normal text-slate-400">ท่าน</span>
+                </div>
+                <div className="text-[11px] text-amber-200/80 mt-1">
+                  มีสิทธิ์ลุ้นรับรางวัล 1.ตุ๊กตา 2.ขนม 3.ลูกอม
+                </div>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-emerald-950/60 to-slate-900 border border-emerald-500/40 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-bold text-emerald-300">รับมอบรางวัลแล้ว</span>
+                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-300 flex items-center justify-center">
+                    <CheckCircle2 className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black text-emerald-400">
+                  {privilegeStats.receivedCount} <span className="text-sm font-normal text-slate-400">ท่าน</span>
+                </div>
+                <div className="text-[11px] text-emerald-200/80 mt-1">
+                  ยื่นขอรับแล้ว {privilegeStats.pendingCount} ท่าน (รอรับที่ห้องพักครู Com)
+                </div>
+              </div>
+
+              <div className="p-5 rounded-2xl bg-gradient-to-br from-purple-950/60 to-slate-900 border border-purple-500/40 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold text-purple-300">โพสต์แชร์แหล่งเรียนรู้รวม</span>
+                  <div className="w-8 h-8 rounded-xl bg-purple-500/20 text-purple-300 flex items-center justify-center">
+                    <FolderArchive className="w-4 h-4" />
+                  </div>
+                </div>
+                <div className="text-3xl font-black text-white">
+                  {privilegeStats.totalPostsShared} <span className="text-sm font-normal text-slate-400">ครั้ง</span>
+                </div>
+                <div className="text-[11px] text-slate-400 mt-1">
+                  เป้าหมายต่อคน 20 ครั้งขึ้นไป
+                </div>
+              </div>
+            </div>
+
+            {/* Prize Breakdown Banner */}
+            <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 flex flex-col md:flex-row items-start md:items-center justify-between gap-4 text-xs">
+              <div className="flex items-center gap-2">
+                <Award className="w-4 h-4 text-amber-400" />
+                <span className="font-bold text-white">สถิติของรางวัลที่ส่งมอบ (ณ ห้องพักครู Com ชั้น 3):</span>
+              </div>
+
+              <div className="flex items-center gap-3 sm:gap-6 flex-wrap">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-pink-500/15 border border-pink-500/30 text-pink-200">
+                  <span className="text-lg">🧸</span>
+                  <span>รางวัลที่ 1 (ตุ๊กตา): <strong>{privilegeStats.dollCount}</strong> ชิ้น</span>
+                </div>
+
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/15 border border-amber-500/30 text-amber-200">
+                  <span className="text-lg">🍪</span>
+                  <span>รางวัลที่ 2 (ขนม): <strong>{privilegeStats.snackCount}</strong> ชุด</span>
+                </div>
+
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-purple-500/15 border border-purple-500/30 text-purple-200">
+                  <span className="text-lg">🍬</span>
+                  <span>รางวัลที่ 3 (ลูกอม): <strong>{privilegeStats.candyCount}</strong> ชิ้น</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Toolbar: Search, Filter, Export CSV / Google Sheets */}
+            <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col lg:flex-row items-center justify-between gap-3 text-xs">
+              <div className="flex items-center gap-2.5 w-full lg:w-auto flex-wrap">
+                {/* Search */}
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-64">
+                  <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="ค้นหาชื่อครู, อีเมล, สังกัด..."
+                    value={privilegeSearchTerm}
+                    onChange={(e) => setPrivilegeSearchTerm(e.target.value)}
+                    className="w-full pl-9 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-amber-400"
+                  />
+                  {privilegeSearchTerm && (
+                    <button
+                      type="button"
+                      onClick={() => setPrivilegeSearchTerm('')}
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
+
+                {/* Filter Status */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Filter className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-slate-300">ตัวกรอง:</span>
+                  <select
+                    value={privilegeFilter}
+                    onChange={(e) => setPrivilegeFilter(e.target.value as any)}
+                    className="bg-transparent text-amber-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value="all" className="bg-slate-900 text-white">แสดงทั้งหมด ({privilegeSummaries.length})</option>
+                    <option value="eligible" className="bg-slate-900 text-white">ผ่านเกณฑ์ครบ 20 ครั้ง ({privilegeStats.eligibleCount})</option>
+                    <option value="received" className="bg-slate-900 text-white">รับมอบรางวัลแล้ว ({privilegeStats.receivedCount})</option>
+                    <option value="pending" className="bg-slate-900 text-white">ยื่นขอรับแล้ว (รอรับ) ({privilegeStats.pendingCount})</option>
+                    <option value="in_progress" className="bg-slate-900 text-white">กำลังสะสมผลงาน ({privilegeStats.inProgressCount})</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Export actions */}
+              <div className="flex items-center gap-2 w-full lg:w-auto justify-end">
+                <button
+                  type="button"
+                  onClick={handleCopyPrivilegesTSV}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="คัดลอกข้อมูลเพื่อวางลง Google Sheets (Ctrl+V)"
+                >
+                  <Copy className="w-3.5 h-3.5 text-blue-400" />
+                  <span>คัดลอก (Google Sheets)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleExportPrivilegesCSV}
+                  className="px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition-all cursor-pointer"
+                  title="ดาวน์โหลดไฟล์ CSV (เปิดใน Excel ได้ฟอนต์ไทยไม่เพี้ยน)"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>ดาวน์โหลด CSV</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Comprehensive Table */}
+            <div className="rounded-3xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-950/90 text-slate-400 font-bold border-b border-slate-800">
+                    <tr>
+                      <th className="py-3.5 px-3 text-center w-12">ลำดับ</th>
+                      <th className="py-3.5 px-4">ชื่อ-สกุลจริง (ครูผู้สอน)</th>
+                      <th className="py-3.5 px-3">อีเมลผู้ใช้งาน</th>
+                      <th className="py-3.5 px-3">สังกัด / กลุ่มสาระ</th>
+                      <th className="py-3.5 px-3 w-44">จำนวนโพสต์แชร์ (เกณฑ์ 20)</th>
+                      <th className="py-3.5 px-3 text-center">สถานะเกณฑ์ 20 ครั้ง</th>
+                      <th className="py-3.5 px-3 text-center">สถานะการรับรางวัล</th>
+                      <th className="py-3.5 px-3">ของรางวัล (เลือก/มอบ)</th>
+                      <th className="py-3.5 px-3">จุดรับ / ผู้มอบ</th>
+                      <th className="py-3.5 px-3 text-center">การจัดการ (Admin)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/60">
+                    {filteredPrivileges.length === 0 ? (
+                      <tr>
+                        <td colSpan={10} className="py-12 text-center text-slate-400">
+                          {privilegeSearchTerm
+                            ? 'ไม่พบข้อมูลครูที่ตรงกับคำค้นหา'
+                            : 'ยังไม่มีข้อมูลคุณครูในตัวกรองนี้'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredPrivileges.map((item, idx) => {
+                        const isDone = item.claimStatus === 'received';
+                        const isPending = item.claimStatus === 'pending_pickup';
+                        const isElig = item.isEligible;
+
+                        return (
+                          <tr
+                            key={item.email}
+                            className={`transition-colors ${
+                              isDone
+                                ? 'bg-emerald-950/10 hover:bg-emerald-950/20'
+                                : isPending
+                                ? 'bg-amber-950/15 hover:bg-amber-950/25'
+                                : isElig
+                                ? 'bg-purple-950/10 hover:bg-purple-950/20'
+                                : 'hover:bg-slate-800/40'
+                            }`}
+                          >
+                            <td className="py-3.5 px-3 text-center font-bold text-slate-400">
+                              {idx + 1}
+                            </td>
+
+                            {/* ครูผู้สอน */}
+                            <td className="py-3.5 px-4">
+                              <div className="flex items-center gap-2.5">
+                                <div className="w-8 h-8 rounded-full overflow-hidden bg-slate-800 border border-slate-700 flex-shrink-0">
+                                  <img
+                                    src={`https://ui-avatars.com/api/?name=${encodeURIComponent(item.name || item.email)}&background=2563eb&color=ffffff&size=80`}
+                                    alt={item.name}
+                                    className="w-full h-full object-cover"
+                                  />
+                                </div>
+                                <div>
+                                  <span className="font-bold text-white text-xs block">
+                                    {item.name}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400">
+                                    {item.role || 'ครูผู้สอน'}
+                                  </span>
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* อีเมล */}
+                            <td className="py-3.5 px-3 font-mono text-sky-300 text-xs">
+                              {item.email}
+                            </td>
+
+                            {/* สังกัด */}
+                            <td className="py-3.5 px-3 text-slate-300">
+                              <span className="truncate max-w-[140px] block" title={item.department}>
+                                {item.department}
+                              </span>
+                            </td>
+
+                            {/* สถิติโพสต์แชร์ & Progress */}
+                            <td className="py-3.5 px-3">
+                              <div className="space-y-1">
+                                <div className="flex items-center justify-between text-xs font-semibold">
+                                  <span className={item.isEligible ? 'text-amber-300 font-bold' : 'text-slate-300'}>
+                                    {item.totalShares} <span className="text-[10px] font-normal text-slate-400">/ 20 ครั้ง</span>
+                                  </span>
+                                  <span className="text-[10px] text-amber-400 font-bold">
+                                    {item.progressPercent}%
+                                  </span>
+                                </div>
+                                <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all ${
+                                      item.isEligible
+                                        ? 'bg-gradient-to-r from-amber-400 to-emerald-400'
+                                        : 'bg-blue-500'
+                                    }`}
+                                    style={{ width: `${item.progressPercent}%` }}
+                                  />
+                                </div>
+                              </div>
+                            </td>
+
+                            {/* สถานะเกณฑ์ 20 ครั้ง */}
+                            <td className="py-3.5 px-3 text-center">
+                              {item.isEligible ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>ครบ 20 ครั้งแล้ว</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 text-[11px]">
+                                  <Clock className="w-3 h-3 text-slate-400" />
+                                  <span>ขาดอีก {Math.max(0, 20 - item.totalShares)}</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* สถานะการรับรางวัล */}
+                            <td className="py-3.5 px-3 text-center">
+                              {isDone ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-bold">
+                                  <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>รับมอบแล้ว</span>
+                                </span>
+                              ) : isPending ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-bold animate-pulse">
+                                  <Clock className="w-3.5 h-3.5 text-amber-400" />
+                                  <span>ยื่นขอรับแล้ว</span>
+                                </span>
+                              ) : isElig ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-bold">
+                                  <Gift className="w-3.5 h-3.5 text-purple-400" />
+                                  <span>มีสิทธิ์รับรางวัล</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-slate-800/80 text-slate-400 text-[11px]">
+                                  <span>กำลังสะสม</span>
+                                </span>
+                              )}
+                            </td>
+
+                            {/* ของรางวัล */}
+                            <td className="py-3.5 px-3">
+                              <span className="font-semibold text-white">
+                                {item.receivedReward || item.selectedReward || '-'}
+                              </span>
+                              {item.receivedAt && (
+                                <span className="block text-[10px] text-slate-400 mt-0.5">
+                                  มอบเมื่อ: {new Date(item.receivedAt).toLocaleDateString('th-TH')}
+                                </span>
+                              )}
+                            </td>
+
+                            {/* จุดรับ & ผู้มอบ */}
+                            <td className="py-3.5 px-3 text-[11px] text-slate-300">
+                              <div className="flex items-center gap-1 text-slate-400">
+                                <MapPin className="w-3 h-3 text-amber-400 flex-shrink-0" />
+                                <span>ห้องพักครู Com ชั้น 3</span>
+                              </div>
+                              <span className="text-[10px] text-slate-400 block mt-0.5">
+                                ({ADMIN_CONTACT_NAME})
+                              </span>
+                            </td>
+
+                            {/* Action Buttons */}
+                            <td className="py-3.5 px-3 text-center">
+                              <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setManagingPrivilegeTeacher(item)}
+                                  className="px-2.5 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600 border border-amber-500/40 text-amber-200 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all shadow-xs cursor-pointer"
+                                  title="บันทึกการมอบรางวัล / ตรวจสอบสิทธิ์"
+                                >
+                                  <Gift className="w-3 h-3" />
+                                  <span>บันทึกมอบรางวัล</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => setManagingPrivilegeTeacher(item)}
+                                  className="px-2 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-[11px] font-medium inline-flex items-center gap-1 transition-colors cursor-pointer"
+                                  title="ดูรายการโพสต์ที่ครูท่านนี้แชร์ทั้งหมด"
+                                >
+                                  <span>{item.posts?.length || 0} ชิ้น</span>
+                                </button>
                               </div>
                             </td>
                           </tr>
@@ -3740,6 +4247,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
         }}
       />
+
+      {/* Admin Privilege Reward Management Modal */}
+      {managingPrivilegeTeacher && (
+        <AdminPrivilegeRewardModal
+          teacher={managingPrivilegeTeacher}
+          isOpen={Boolean(managingPrivilegeTeacher)}
+          onClose={() => setManagingPrivilegeTeacher(null)}
+          onSuccess={(msg) => {
+            showToast(msg);
+            setManagingPrivilegeTeacher(null);
+          }}
+        />
+      )}
     </div>
   );
 };
