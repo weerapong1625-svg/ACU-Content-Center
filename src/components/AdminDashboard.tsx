@@ -2185,6 +2185,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <Download className="w-3.5 h-3.5" />
                   <span>ส่งออก CSV</span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab('settings');
+                    setTimeout(() => {
+                      const el = document.getElementById('cert-logo-section');
+                      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    }, 150);
+                  }}
+                  className="px-3 py-1.5 rounded-xl bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-bold text-xs flex items-center gap-1.5 shadow-md shadow-amber-500/10 transition-all cursor-pointer"
+                  title="เปลี่ยนภาพโลโก้หรือตราสัญลักษณ์บนเกียรติบัตรออนไลน์"
+                >
+                  <Award className="w-3.5 h-3.5" />
+                  <span>เปลี่ยนโลโก้บนเกียรติบัตร</span>
+                </button>
               </div>
             </div>
 
@@ -3692,7 +3708,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             </div>
 
             {/* Section 2: จัดการและเปลี่ยนภาพโลโก้บนเกียรติบัตร (Certificate Logo Management) */}
-            <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl">
+            <div id="cert-logo-section" className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl scroll-mt-24">
               <div className="flex items-center gap-3 pb-4 border-b border-slate-800 mb-6">
                 <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/30 text-amber-300 flex items-center justify-center">
                   <Award className="w-5 h-5" />

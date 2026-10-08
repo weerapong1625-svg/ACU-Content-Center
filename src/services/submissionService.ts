@@ -164,6 +164,7 @@ export interface TeacherMediaWork {
   thumbnailUrl: string;
   description: string;
   mediaType: string;
+  productionType?: string;
   itemNumber?: number; // 1 to 5
   onlineUrl?: string;
   ratingAvg: number;
@@ -252,32 +253,31 @@ export async function saveInnovationSubmission(data: {
       notifiedAdminEmail: ADMIN_TARGET_EMAIL,
     });
 
-    // 3. If teacher produced media themselves, feed into Teacher Media Repository
-    if (data.productionType === 'ครูผลิตสื่อเอง') {
-      const mediaDocId = `work_${id}`;
-      const mediaPayload: TeacherMediaWork = {
-        id: mediaDocId,
-        title: data.mediaTitle.trim(),
-        teacherName: data.teacherName.trim(),
-        subjectGroup: selectedSubjectGroup,
-        gradeLevel: data.gradeLevel,
-        subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-        thumbnailUrl: data.imageUrl || '/ACU N.png',
-        description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}`,
-        mediaType: data.mediaType,
-        itemNumber: Number(data.itemNumber) || 1,
-        onlineUrl: data.onlineUrl?.trim() || '',
-        ratingAvg: 5.0,
-        ratingCount: 1,
-        views: 1,
-        likes: 0,
-        likedBy: [],
-        submittedByEmail: data.userEmail.trim(),
-        createdAt: nowIso,
-      };
-      const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
-      await setDoc(mediaRef, mediaPayload, { merge: true });
-    }
+    // 3. Feed immediately into Teacher Media Repository (คลังสื่อคุณครู) so it displays immediately after posting
+    const mediaDocId = `work_${id}`;
+    const mediaPayload: TeacherMediaWork = {
+      id: mediaDocId,
+      title: data.mediaTitle.trim(),
+      teacherName: data.teacherName.trim(),
+      subjectGroup: selectedSubjectGroup,
+      gradeLevel: data.gradeLevel,
+      subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+      thumbnailUrl: data.imageUrl || '/acu_active_logo.png',
+      description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}${data.productionType ? ` (${data.productionType})` : ''}`,
+      mediaType: data.mediaType,
+      productionType: data.productionType,
+      itemNumber: Number(data.itemNumber) || 1,
+      onlineUrl: data.onlineUrl?.trim() || '',
+      ratingAvg: 5.0,
+      ratingCount: 1,
+      views: 1,
+      likes: 0,
+      likedBy: [],
+      submittedByEmail: data.userEmail.trim(),
+      createdAt: nowIso,
+    };
+    const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
+    await setDoc(mediaRef, mediaPayload, { merge: true });
 
     return { success: true, id };
   } catch (error: any) {
@@ -322,7 +322,7 @@ export async function updateInnovationSubmission(
       // ignore
     }
 
-    // If there is a corresponding media item in teacher media repository, update it as well
+    // If there is a corresponding media item in teacher media repository, update or create it
     try {
       const mediaDocId = `work_${id}`;
       const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
@@ -333,16 +333,44 @@ export async function updateInnovationSubmission(
         if (updates.imageUrl) mediaUpdate.thumbnailUrl = updates.imageUrl;
         if (updates.onlineUrl !== undefined) mediaUpdate.onlineUrl = updates.onlineUrl;
         if (updates.mediaType) mediaUpdate.mediaType = updates.mediaType;
+        if (updates.productionType) mediaUpdate.productionType = updates.productionType;
         if (updates.gradeLevel) {
           mediaUpdate.gradeLevel = updates.gradeLevel;
         }
         if (updates.subjectGroup) {
           mediaUpdate.subjectGroup = updates.subjectGroup;
         }
-        if (updates.usageDetails) {
-          mediaUpdate.description = `กลุ่มสาระ: ${updates.subjectGroup || currentData.subjectGroup || '-'} | นำไปใช้: ${updates.usageDetails} | ประเภท: ${updates.mediaType || currentData.mediaType}`;
+        if (updates.usageDetails || updates.subjectGroup || updates.mediaType || updates.productionType) {
+          const sGroup = updates.subjectGroup || currentData.subjectGroup || '-';
+          const uDetails = updates.usageDetails || currentData.usageDetails || '-';
+          const mType = updates.mediaType || currentData.mediaType || '-';
+          const pType = updates.productionType || currentData.productionType || '';
+          mediaUpdate.description = `กลุ่มสาระ: ${sGroup} | นำไปใช้: ${uDetails} | ประเภท: ${mType}${pType ? ` (${pType})` : ''}`;
         }
         await updateDoc(mediaRef, mediaUpdate);
+      } else {
+        const newMediaPayload: TeacherMediaWork = {
+          id: mediaDocId,
+          title: updates.mediaTitle || currentData.mediaTitle,
+          teacherName: updates.teacherName || currentData.teacherName,
+          subjectGroup: updates.subjectGroup || currentData.subjectGroup || SUBJECT_GROUPS[0],
+          gradeLevel: updates.gradeLevel || currentData.gradeLevel,
+          subjectName: updates.usageDetails || currentData.usageDetails || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+          thumbnailUrl: updates.imageUrl || currentData.imageUrl || '/acu_active_logo.png',
+          description: `กลุ่มสาระ: ${updates.subjectGroup || currentData.subjectGroup || '-'} | นำไปใช้: ${updates.usageDetails || currentData.usageDetails || '-'} | ประเภท: ${updates.mediaType || currentData.mediaType || '-'}${updates.productionType || currentData.productionType ? ` (${updates.productionType || currentData.productionType})` : ''}`,
+          mediaType: updates.mediaType || currentData.mediaType,
+          productionType: updates.productionType || currentData.productionType,
+          itemNumber: Number(updates.itemNumber || currentData.itemNumber) || 1,
+          onlineUrl: updates.onlineUrl !== undefined ? updates.onlineUrl : currentData.onlineUrl || '',
+          ratingAvg: 5.0,
+          ratingCount: 1,
+          views: 1,
+          likes: 0,
+          likedBy: [],
+          submittedByEmail: currentData.userEmail,
+          createdAt: currentData.submittedAt || new Date().toISOString(),
+        };
+        await setDoc(mediaRef, newMediaPayload, { merge: true });
       }
     } catch {
       // ignore

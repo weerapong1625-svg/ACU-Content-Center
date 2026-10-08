@@ -172,6 +172,9 @@ export const OnlineCertificateModal: React.FC<OnlineCertificateModalProps> = ({
                 src={certLogoUrl} 
                 alt="ACU Certificate Seal Watermark" 
                 className="w-80 h-80 object-contain filter grayscale" 
+                onError={(e) => {
+                  (e.currentTarget as HTMLImageElement).src = '/acu_active_logo.png';
+                }}
               />
             </div>
 
@@ -183,6 +186,9 @@ export const OnlineCertificateModal: React.FC<OnlineCertificateModalProps> = ({
                     src={certLogoUrl}
                     alt="Assumption College Ubonratchathani"
                     className="w-full h-full object-contain rounded-full"
+                    onError={(e) => {
+                      (e.currentTarget as HTMLImageElement).src = '/acu_active_logo.png';
+                    }}
                   />
                 </div>
               </div>

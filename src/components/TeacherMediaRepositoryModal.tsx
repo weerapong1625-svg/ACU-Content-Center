@@ -88,6 +88,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
 }) => {
   const [rawMediaList, setRawMediaList] = useState<TeacherMediaWork[]>([]);
   const [mediaList, setMediaList] = useState<TeacherMediaWork[]>([]);
+  const [sortOrder, setSortOrder] = useState<'newest' | 'shuffle'>('newest');
+  const [onlyMyPosts, setOnlyMyPosts] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('all');
   const [activeViewItem, setActiveViewItem] = useState<TeacherMediaWork | null>(null);
@@ -135,16 +137,21 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     day: 'numeric',
   });
 
-  // Subscribe to teacher media works, shuffle with daily seed and limit to max 100
+  // Subscribe to teacher media works (Default to newest first so teacher submissions appear immediately)
   useEffect(() => {
     const unsub = subscribeTeacherMedia((items) => {
       setRawMediaList(items);
-      const seed = getDailyRandomSeed();
-      const dailyShuffled = shuffleWithSeed(items, seed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
-      setMediaList(dailyShuffled);
+      if (sortOrder === 'shuffle') {
+        const seed = getDailyRandomSeed();
+        const dailyShuffled = shuffleWithSeed(items, seed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
+        setMediaList(dailyShuffled);
+      } else {
+        // Newest first - items already sorted newest first from service
+        setMediaList(items.slice(0, MAX_MEDIA_DISPLAY_LIMIT));
+      }
     });
     return () => unsub();
-  }, []);
+  }, [sortOrder]);
 
   const handleStartEdit = (item: TeacherMediaWork) => {
     setEditingItem(item);
@@ -212,7 +219,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       subjectName: addForm.subjectName.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
       mediaType: addForm.mediaType,
       description: addForm.description.trim() || `สื่อการสอนวิชา ${addForm.subjectGroup}`,
-      thumbnailUrl: addForm.thumbnailUrl.trim() || '/ACU N.png',
+      thumbnailUrl: addForm.thumbnailUrl.trim() || '/acu_active_logo.png',
       onlineUrl: addForm.onlineUrl.trim(),
       submittedByEmail: userEmail,
     });
@@ -221,6 +228,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     if (res.success) {
       setVoteSuccessMsg(`เพิ่มสื่อ "${addForm.title}" เข้าสู่คลังเรียบร้อยแล้ว`);
       setIsAddModalOpen(false);
+      setSortOrder('newest');
       setAddForm({
         title: '',
         teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
@@ -245,7 +253,11 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       item.subjectName.toLowerCase().includes(searchTerm.toLowerCase()) ||
       (item.gradeLevel && item.gradeLevel.toLowerCase().includes(searchTerm.toLowerCase()));
     const matchesGroup = selectedGroup === 'all' || item.subjectGroup === selectedGroup;
-    return matchesSearch && matchesGroup;
+    const matchesMyPosts = !onlyMyPosts || (
+      (item.submittedByEmail && item.submittedByEmail.toLowerCase().trim() === userEmail.toLowerCase().trim()) ||
+      item.teacherName.toLowerCase().includes(userEmail.split('@')[0].toLowerCase())
+    );
+    return matchesSearch && matchesGroup && matchesMyPosts;
   });
 
   // Handle star rating click
@@ -332,7 +344,15 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     const randomSeed = Math.floor(Math.random() * 1000000) + 1;
     const shuffled = shuffleWithSeed(rawMediaList, randomSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
     setMediaList(shuffled);
+    setSortOrder('shuffle');
     setVoteSuccessMsg(`สุ่มแสดงผลสื่อชุดใหม่เรียบร้อยแล้ว (${shuffled.length} รายการ จากทั้งหมด ${rawMediaList.length} รายการ)`);
+    setTimeout(() => setVoteSuccessMsg(null), 2500);
+  };
+
+  const handleShowNewest = () => {
+    setSortOrder('newest');
+    setMediaList(rawMediaList.slice(0, MAX_MEDIA_DISPLAY_LIMIT));
+    setVoteSuccessMsg('แสดงผลสื่อเรียงตามล่าสุด (ส่งสื่อนวัตกรรมใหม่แสดงผลทันทีด้านบนสุด)');
     setTimeout(() => setVoteSuccessMsg(null), 2500);
   };
 
@@ -356,13 +376,26 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                 <h3 className="text-base sm:text-lg font-bold text-white">
                   3. คลังสื่อคุณครูผลิตเอง
                 </h3>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-400/30 flex items-center gap-1 font-medium">
-                  <Shuffle className="w-3 h-3 text-purple-400" />
-                  สุ่มแสดงผลทุกวัน (สูงสุด 100 สื่อ)
+                <span className={`text-[10px] px-2 py-0.5 rounded-full border flex items-center gap-1 font-medium ${
+                  sortOrder === 'newest'
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-purple-500/20 text-purple-300 border-purple-400/30'
+                }`}>
+                  {sortOrder === 'newest' ? (
+                    <>
+                      <Sparkles className="w-3 h-3 text-emerald-400" />
+                      <span>แสดงสื่อล่าสุดทันที ({rawMediaList.length} รายการ)</span>
+                    </>
+                  ) : (
+                    <>
+                      <Shuffle className="w-3 h-3 text-purple-400" />
+                      <span>สุ่มแสดงผลประจำวัน</span>
+                    </>
+                  )}
                 </span>
               </div>
               <p className="text-xs text-slate-300 flex items-center gap-2 flex-wrap mt-0.5">
-                <span>รวบรวมสื่อคุณครู ACU สุ่มสลับผลงานแสดงไม่เกิน 100 รายการทุกวัน พร้อมให้คะแนนดาวและกดเข้าชม</span>
+                <span>รวบรวมสื่อคุณครู ACU คุณครูส่งปุ๊บแสดงผลทันที พร้อมให้คะแนนดาวและกดเข้าชม</span>
                 <span className="inline-flex items-center gap-1 text-[11px] text-amber-300 bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20 font-medium">
                   <Calendar className="w-3 h-3" />
                   {todayThai}
@@ -385,7 +418,11 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleShuffle}
-              className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+              className={`px-3 py-1.5 rounded-xl text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer ${
+                sortOrder === 'shuffle'
+                  ? 'bg-purple-600 ring-2 ring-purple-400'
+                  : 'bg-slate-800 hover:bg-slate-700 text-slate-300'
+              }`}
               title="สุ่มลำดับสื่อชุดใหม่ (สูงสุด 100 รายการ)"
             >
               <Shuffle className="w-3.5 h-3.5" />
@@ -395,7 +432,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={onClose}
-              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors cursor-pointer"
             >
               <X className="w-4 h-4" />
             </button>
@@ -403,32 +440,79 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
         </div>
 
         {/* Filter & Search Toolbar */}
-        <div className="p-3 sm:p-4 bg-slate-950/60 border-b border-slate-800 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="relative w-full sm:w-80">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              value={searchTerm}
-              onChange={(e) => setSearchTerm(e.target.value)}
-              placeholder="ค้นหาชื่อสื่อ, คุณครูผู้จัดทำ, วิชา..."
-              className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 outline-none focus:border-purple-500"
-            />
+        <div className="p-3 sm:p-4 bg-slate-950/60 border-b border-slate-800 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 flex-1 flex-wrap">
+            <div className="relative w-full sm:w-64">
+              <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+                placeholder="ค้นหาชื่อสื่อ, ครูผู้จัดทำ, วิชา..."
+                className="w-full pl-9 pr-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 outline-none focus:border-purple-500"
+              />
+            </div>
+
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <Filter className="w-4 h-4 text-slate-400 flex-shrink-0" />
+              <select
+                value={selectedGroup}
+                onChange={(e) => setSelectedGroup(e.target.value)}
+                className="w-full sm:w-auto px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-200 outline-none cursor-pointer focus:border-purple-500"
+              >
+                <option value="all">ทุกกลุ่มสาระการเรียนรู้</option>
+                {SUBJECT_GROUPS.map((g) => (
+                  <option key={g} value={g}>
+                    {g}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Filter className="w-4 h-4 text-slate-400 flex-shrink-0" />
-            <select
-              value={selectedGroup}
-              onChange={(e) => setSelectedGroup(e.target.value)}
-              className="w-full sm:w-auto px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-200 outline-none cursor-pointer focus:border-purple-500"
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Sort Toggle */}
+            <div className="flex items-center bg-slate-900 p-1 rounded-xl border border-slate-800 text-xs">
+              <button
+                type="button"
+                onClick={handleShowNewest}
+                className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  sortOrder === 'newest'
+                    ? 'bg-purple-600 text-white font-bold shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                <span>ล่าสุด</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleShuffle}
+                className={`px-2.5 py-1 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 ${
+                  sortOrder === 'shuffle'
+                    ? 'bg-purple-600 text-white font-bold shadow-sm'
+                    : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Shuffle className="w-3.5 h-3.5" />
+                <span>สุ่มสลับ</span>
+              </button>
+            </div>
+
+            {/* My Submissions Filter */}
+            <button
+              type="button"
+              onClick={() => setOnlyMyPosts(!onlyMyPosts)}
+              className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-all cursor-pointer ${
+                onlyMyPosts
+                  ? 'bg-indigo-600/30 border-indigo-400 text-indigo-300 shadow-sm'
+                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200'
+              }`}
+              title="แสดงเฉพาะสื่อที่คุณครูเป็นผู้ส่ง"
             >
-              <option value="all">ทุกกลุ่มสาระการเรียนรู้</option>
-              {SUBJECT_GROUPS.map((g) => (
-                <option key={g} value={g}>
-                  {g}
-                </option>
-              ))}
-            </select>
+              <User className="w-3.5 h-3.5" />
+              <span>ผลงานของฉัน</span>
+            </button>
           </div>
         </div>
 
