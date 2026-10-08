@@ -67,8 +67,15 @@ import {
   saveSchoolLogo, 
   resetSchoolLogo, 
   subscribeSchoolLogo, 
+  getInitialLogoUrl,
   DEFAULT_LOGO_IMAGE 
 } from '../services/logoService';
+import { 
+  getInitialCertificateLogoUrl, 
+  subscribeCertificateLogo, 
+  saveCertificateLogo, 
+  resetCertificateLogo 
+} from '../services/certificateLogoService';
 import { 
   InnovationSubmission, 
   FacilitySubmission, 
@@ -76,6 +83,7 @@ import {
   subscribeAllSubmissions,
   saveCriteriaPoster,
   subscribeCriteriaPoster,
+  getInitialCriteriaPosterUrl,
   DEFAULT_CRITERIA_POSTER,
   GRADE_LEVELS,
   SUBJECT_GROUPS,
@@ -206,13 +214,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const banner2FileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Logo management state
-  const [currentLogoUrl, setCurrentLogoUrl] = useState(DEFAULT_LOGO_IMAGE);
+  const [currentLogoUrl, setCurrentLogoUrl] = useState<string>(() => getInitialLogoUrl());
   const [logoPreview, setLogoPreview] = useState<string | null>(null);
   const [isSavingLogo, setIsSavingLogo] = useState(false);
   const [logoStatusMsg, setLogoStatusMsg] = useState<string | null>(null);
 
+  // Certificate Logo management state
+  const [currentCertLogoUrl, setCurrentCertLogoUrl] = useState<string>(() => getInitialCertificateLogoUrl());
+  const [certLogoPreview, setCertLogoPreview] = useState<string | null>(null);
+  const [isSavingCertLogo, setIsSavingCertLogo] = useState(false);
+  const [certLogoStatusMsg, setCertLogoStatusMsg] = useState<string | null>(null);
+  const [showCertPreviewModal, setShowCertPreviewModal] = useState(false);
+  const certLogoFileInputRef = React.useRef<HTMLInputElement>(null);
+
   // Criteria Poster management state
-  const [currentPosterUrl, setCurrentPosterUrl] = useState(DEFAULT_CRITERIA_POSTER);
+  const [currentPosterUrl, setCurrentPosterUrl] = useState<string>(() => getInitialCriteriaPosterUrl());
   const [posterPreview, setPosterPreview] = useState<string | null>(null);
   const [isSavingPoster, setIsSavingPoster] = useState(false);
   const [posterStatusMsg, setPosterStatusMsg] = useState<string | null>(null);
@@ -312,6 +328,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setCurrentLogoUrl(url);
     });
 
+    const unsubCertLogo = subscribeCertificateLogo((url: string) => {
+      setCurrentCertLogoUrl(url);
+    });
+
     const unsubPoster = subscribeCriteriaPoster((url: string) => {
       setCurrentPosterUrl(url);
     });
@@ -345,6 +365,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubInnovations();
       unsubFacilities();
       unsubLogo();
+      unsubCertLogo();
       unsubPoster();
       unsubLogs();
       unsubProfiles();
@@ -516,6 +537,82 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setLogoPreview(null);
       setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
       showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
+    }
+  };
+
+  // Handle Certificate Logo Upload
+  const handleCertLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_DIM = 500;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_DIM) {
+            height = Math.round((height * MAX_DIM) / width);
+            width = MAX_DIM;
+          }
+        } else {
+          if (height > MAX_DIM) {
+            width = Math.round((width * MAX_DIM) / height);
+            height = MAX_DIM;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressed = canvas.toDataURL('image/png');
+          setCertLogoPreview(compressed);
+          setCertLogoStatusMsg(null);
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleSaveCertLogo = async () => {
+    if (!certLogoPreview) return;
+    setIsSavingCertLogo(true);
+    setCertLogoStatusMsg(null);
+    const res = await saveCertificateLogo(certLogoPreview, SUPER_ADMIN_EMAIL);
+    setIsSavingCertLogo(false);
+    if (res.success) {
+      setCurrentCertLogoUrl(certLogoPreview);
+      setCertLogoPreview(null);
+      setCertLogoStatusMsg('บันทึกภาพโลโก้บนเกียรติบัตรสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+      showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
+    } else {
+      setCertLogoStatusMsg(res.message);
+    }
+  };
+
+  const handleResetCertLogo = async () => {
+    if (!confirm('ยืนยันรีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพตราสัญลักษณ์โรงเรียนเริ่มต้น ใช่หรือไม่?')) return;
+    setIsSavingCertLogo(true);
+    const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
+    setIsSavingCertLogo(false);
+    if (res.success) {
+      setCertLogoPreview(null);
+      setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
+      showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
+    } else {
+      setCertLogoStatusMsg(res.message);
     }
   };
 
@@ -3594,7 +3691,129 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
             </div>
 
-            {/* Section 2: เปลี่ยนภาพเกณฑ์และประเภทสื่อ (Criteria Infographic) */}
+            {/* Section 2: จัดการและเปลี่ยนภาพโลโก้บนเกียรติบัตร (Certificate Logo Management) */}
+            <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl">
+              <div className="flex items-center gap-3 pb-4 border-b border-slate-800 mb-6">
+                <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/30 text-amber-300 flex items-center justify-center">
+                  <Award className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-white flex items-center gap-2">
+                    <span>จัดการและเปลี่ยนภาพโลโก้บนเกียรติบัตร (Certificate Logo)</span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 font-semibold">
+                      Online Certificate
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-400">
+                    สิทธิ์เฉพาะ Admin: สามารถเปลี่ยนภาพโลโก้หรือตราสัญลักษณ์ที่จะพิมพ์บนเกียรติบัตรออนไลน์ (แสดงทั้งส่วนหัวและลายน้ำตรงกลาง) ได้อย่างอิสระ
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex flex-col md:flex-row items-center md:items-start gap-8">
+                {/* Certificate Logo Preview with parchment background simulation */}
+                <div className="flex flex-col items-center flex-shrink-0">
+                  <div className="relative w-40 h-40 rounded-2xl bg-gradient-to-br from-[#FFFDF9] via-[#FAF6EE] to-[#F7F2E7] border-4 border-[#B8860B]/70 shadow-2xl p-3 flex flex-col items-center justify-center overflow-hidden">
+                    {/* Inner gold frame accent */}
+                    <div className="absolute inset-1.5 border border-[#D4AF37]/50 rounded-xl pointer-events-none" />
+                    
+                    {/* Simulated subtle watermark behind */}
+                    <div className="absolute inset-0 flex items-center justify-center opacity-[0.06] pointer-events-none">
+                      <img
+                        src={certLogoPreview || currentCertLogoUrl}
+                        alt="Watermark preview"
+                        className="w-28 h-28 object-contain filter grayscale"
+                      />
+                    </div>
+
+                    {/* Circular Logo Emblem on white backdrop */}
+                    <div className="relative z-10 w-20 h-20 rounded-full bg-white/95 p-1 shadow-md border-2 border-[#D4AF37]/60 flex items-center justify-center overflow-hidden">
+                      <img
+                        src={certLogoPreview || currentCertLogoUrl}
+                        alt="Certificate Logo Preview"
+                        className="w-full h-full object-contain rounded-full"
+                      />
+                    </div>
+                    <span className="relative z-10 text-[9px] font-bold text-[#92400E] mt-1.5 font-['Prompt',sans-serif]">
+                      เกียรติบัตรออนไลน์
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-amber-300/80 mt-2 font-medium">
+                    พรีวิวบนพื้นผิวเกียรติบัตร
+                  </span>
+                </div>
+
+                {/* Upload & Save Controls */}
+                <div className="flex-grow space-y-4 w-full">
+                  <input
+                    ref={certLogoFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleCertLogoFileChange}
+                    className="hidden"
+                  />
+
+                  <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
+                    <h4 className="text-xs font-semibold text-slate-300 mb-1">
+                      เลือกภาพโลโก้ใหม่สำหรับเกียรติบัตร
+                    </h4>
+                    <p className="text-xs text-slate-400 mb-3">
+                      แนะนำภาพตราสัญลักษณ์หรือโลโก้คมชัด (PNG/JPG พื้นหลังโปร่งใสหรือวงกลม) ระบบจะปรับสัดส่วนเพื่อแสดงทั้งหัวเกียรติบัตรและลายน้ำตรงกลางเกียรติบัตรอย่างสมบูรณ์แบบ
+                    </p>
+
+                    <div className="flex items-center gap-2.5 flex-wrap">
+                      <button
+                        type="button"
+                        onClick={() => certLogoFileInputRef.current?.click()}
+                        className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer shadow-md"
+                      >
+                        <Camera className="w-4 h-4" />
+                        <span>เลือกไฟล์รูปภาพโลโก้เกียรติบัตร...</span>
+                      </button>
+
+                      {certLogoPreview && (
+                        <button
+                          type="button"
+                          onClick={handleSaveCertLogo}
+                          disabled={isSavingCertLogo}
+                          className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md"
+                        >
+                          <Check className="w-4 h-4" />
+                          <span>{isSavingCertLogo ? 'กำลังบันทึก...' : 'บันทึกภาพโลโก้เกียรติบัตรใหม่ลงระบบ'}</span>
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleResetCertLogo}
+                        className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer border border-slate-700"
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>รีเซ็ตกลับเป็นโลโก้โรงเรียนเริ่มต้น</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setShowCertPreviewModal(true)}
+                        className="px-3.5 py-2 rounded-xl bg-indigo-600/30 hover:bg-indigo-600/40 text-indigo-300 border border-indigo-500/40 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>ดูตัวอย่างเกียรติบัตรจริงพร้อมโลโก้นี้</span>
+                      </button>
+                    </div>
+
+                    {certLogoStatusMsg && (
+                      <div className="mt-3 px-3 py-2 rounded-xl bg-emerald-500/20 text-emerald-300 text-xs flex items-center gap-2 border border-emerald-500/30">
+                        <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+                        <span>{certLogoStatusMsg}</span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3: เปลี่ยนภาพเกณฑ์และประเภทสื่อ (Criteria Infographic) */}
             <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl">
               <div className="flex items-center gap-3 pb-4 border-b border-slate-800 mb-6">
                 <div className="w-10 h-10 rounded-xl bg-purple-600/20 border border-purple-400/30 text-purple-300 flex items-center justify-center">
@@ -4402,6 +4621,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           academicYear={selectedYear}
           visitCount={certificateTargetUser.visits}
           schoolName={certificateTargetUser.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี'}
+        />
+      )}
+
+      {/* Sample Preview Certificate Modal for Testing Certificate Logo */}
+      {showCertPreviewModal && (
+        <OnlineCertificateModal
+          isOpen={showCertPreviewModal}
+          onClose={() => setShowCertPreviewModal(false)}
+          recipientName="ม.วีระพงษ์ มีทรัพย์ (ตัวอย่างพรีวิวโลโก้)"
+          recipientEmail={SUPER_ADMIN_EMAIL}
+          academicYear={selectedYear}
+          visitCount={108}
+          schoolName="โรงเรียนอัสสัมชัญอุบลราชธานี"
         />
       )}
 

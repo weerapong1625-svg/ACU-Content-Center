@@ -144,7 +144,7 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
 
   const handleReset = async () => {
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
-    if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นรูปทางการดั้งเดิม (ACU N.png) ใช่หรือไม่?')) return;
+    if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นรูปทางการดั้งเดิม ใช่หรือไม่?')) return;
     setIsSaving(true);
     setLogoUrl(DEFAULT_LOGO_IMAGE);
     const res = await resetSchoolLogo(emailToUse);
@@ -171,11 +171,17 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
         >
           {!imgFailed ? (
             <img
-              src={logoUrl}
+              src={logoUrl || DEFAULT_LOGO_IMAGE}
               alt="โรงเรียนอัสสัมชัญอุบลราชธานี Assumption College Ubonratchathani"
               referrerPolicy="no-referrer"
               className="w-full h-full object-contain rounded-full"
-              onError={() => setImgFailed(true)}
+              onError={() => {
+                if (logoUrl !== DEFAULT_LOGO_IMAGE) {
+                  setLogoUrl(DEFAULT_LOGO_IMAGE);
+                } else {
+                  setImgFailed(true);
+                }
+              }}
             />
           ) : (
             <ACUEmblemVector className="w-full h-full object-contain" />

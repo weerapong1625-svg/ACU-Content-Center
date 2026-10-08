@@ -2,7 +2,7 @@ import { doc, getDoc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
 import { db } from '../firebase';
 
 export const SUPER_ADMIN_EMAIL = 'weerapong1625@acu.ac.th';
-export const DEFAULT_LOGO_IMAGE = '/ACU N.png';
+export const DEFAULT_LOGO_IMAGE = '/acu_active_logo.png';
 
 const LOGO_DOC_ID = 'school_logo';
 export const LOGO_STORAGE_KEY = 'acu_school_logo_config';
@@ -155,7 +155,7 @@ export async function resetSchoolLogo(
   try {
     const logoRef = doc(db, 'system_settings', LOGO_DOC_ID);
     await deleteDoc(logoRef);
-    return { success: true, message: 'รีเซ็ตโลโก้กลับเป็นค่าเริ่มต้นทางการ (ACU N.png) เรียบร้อยแล้ว' };
+    return { success: true, message: 'รีเซ็ตโลโก้กลับเป็นค่าเริ่มต้นทางการเรียบร้อยแล้ว' };
   } catch (err) {
     console.error('Failed to delete school logo from Firestore:', err);
     return { success: false, message: 'เกิดข้อผิดพลาดในการรีเซ็ตโลโก้' };

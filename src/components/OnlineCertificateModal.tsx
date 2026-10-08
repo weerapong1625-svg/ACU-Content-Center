@@ -1,6 +1,10 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Award, Printer, X, CheckCircle2, Shield, Calendar, Download, Sparkles, School } from 'lucide-react';
-import { DEFAULT_LOGO_IMAGE } from '../services/logoService';
+import { DEFAULT_LOGO_IMAGE, getInitialLogoUrl } from '../services/logoService';
+import { 
+  getInitialCertificateLogoUrl, 
+  subscribeCertificateLogo 
+} from '../services/certificateLogoService';
 import { getCleanRealName } from '../services/userProfileService';
 
 interface OnlineCertificateModalProps {
@@ -25,6 +29,14 @@ export const OnlineCertificateModal: React.FC<OnlineCertificateModalProps> = ({
   certificateCode,
 }) => {
   const certificateRef = useRef<HTMLDivElement>(null);
+  const [certLogoUrl, setCertLogoUrl] = useState<string>(() => getInitialCertificateLogoUrl());
+
+  useEffect(() => {
+    const unsub = subscribeCertificateLogo((url) => {
+      setCertLogoUrl(url);
+    });
+    return () => unsub();
+  }, []);
 
   if (!isOpen) return null;
 
@@ -155,18 +167,24 @@ export const OnlineCertificateModal: React.FC<OnlineCertificateModalProps> = ({
             <div className="absolute bottom-4 right-4 w-8 h-8 sm:w-10 sm:h-10 border-b-2 border-r-2 border-[#B8860B] pointer-events-none"></div>
 
             {/* Subtle Center Watermark */}
-            <div className="absolute inset-0 flex items-center justify-center opacity-[0.035] pointer-events-none select-none">
-              <img src={DEFAULT_LOGO_IMAGE} alt="ACU Seal" className="w-80 h-80 object-contain filter grayscale" />
+            <div className="absolute inset-0 flex items-center justify-center opacity-[0.04] pointer-events-none select-none">
+              <img 
+                src={certLogoUrl} 
+                alt="ACU Certificate Seal Watermark" 
+                className="w-80 h-80 object-contain filter grayscale" 
+              />
             </div>
 
             {/* Header Section */}
             <div className="relative z-10 text-center flex flex-col items-center">
               <div className="flex items-center justify-center gap-3 mb-2">
-                <img
-                  src={DEFAULT_LOGO_IMAGE}
-                  alt="Assumption College Ubonratchathani"
-                  className="w-14 h-14 sm:w-16 sm:h-16 object-contain drop-shadow-md"
-                />
+                <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-full bg-white/95 p-1 shadow-md border-2 border-[#D4AF37]/50 flex items-center justify-center overflow-hidden flex-shrink-0">
+                  <img
+                    src={certLogoUrl}
+                    alt="Assumption College Ubonratchathani"
+                    className="w-full h-full object-contain rounded-full"
+                  />
+                </div>
               </div>
 
               <h2 className="text-base sm:text-xl font-bold text-[#1E293B] tracking-wide">

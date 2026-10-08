@@ -38,10 +38,12 @@
     },
     "system_settings": {
       "title": "System Settings and Banners",
-      "description": "Stores global announcement popup banners, active state, and admin configurations",
+      "description": "Stores global announcement popup banners, school logo, certificate logo, and admin configurations",
       "type": "object",
       "properties": {
         "bannerImageUrl": { "type": "string" },
+        "logoUrl": { "type": "string" },
+        "certificateLogoUrl": { "type": "string" },
         "title": { "type": "string" },
         "enabled": { "type": "boolean" },
         "updatedBy": { "type": "string" },
