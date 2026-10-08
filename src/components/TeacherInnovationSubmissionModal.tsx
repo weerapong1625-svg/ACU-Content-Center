@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { 
   GRADE_LEVELS, 
+  SUBJECT_GROUPS,
   MEDIA_ITEM_NUMBERS, 
   INNOVATION_MEDIA_TYPES, 
   PRODUCTION_TYPES, 
@@ -50,6 +51,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   // Form states matching exact questionnaire
   const [teacherName, setTeacherName] = useState(defaultTeacherName);
+  const [subjectGroup, setSubjectGroup] = useState<string>(SUBJECT_GROUPS[0]);
   const [gradeLevel, setGradeLevel] = useState<string>(GRADE_LEVELS[0]);
   const [itemNumber, setItemNumber] = useState<number>(1);
   const [mediaTitle, setMediaTitle] = useState('');
@@ -58,6 +60,9 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [usageDetails, setUsageDetails] = useState('');
   const [onlineUrl, setOnlineUrl] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
+
+  // Filter state for viewing by Subject Group
+  const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all');
 
   // Edit mode state
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -81,6 +86,12 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   useEffect(() => {
     const unsubUser = subscribeUserInnovations(userEmail, (list) => {
       setUserSubmissions(list);
+      if (list.length > 0) {
+        const prevGroup = list.find((s) => s.subjectGroup)?.subjectGroup;
+        if (prevGroup && !editingId) {
+          setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
+        }
+      }
     });
     const unsubAll = subscribeAllInnovations((list) => {
       setAllSubmissions(list);
@@ -89,7 +100,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       unsubUser();
       unsubAll();
     };
-  }, [userEmail]);
+  }, [userEmail, editingId]);
 
   // Handle image upload & compression
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -152,6 +163,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
         editingId,
         {
           teacherName: teacherName.trim(),
+          subjectGroup,
           gradeLevel,
           itemNumber,
           mediaTitle: mediaTitle.trim(),
@@ -184,6 +196,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     // Perform Create
     const res = await saveInnovationSubmission({
       teacherName: teacherName.trim(),
+      subjectGroup,
       gradeLevel,
       itemNumber,
       mediaTitle: mediaTitle.trim(),
@@ -216,6 +229,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const handleStartEdit = (sub: InnovationSubmission) => {
     setEditingId(sub.id);
     setTeacherName(sub.teacherName);
+    setSubjectGroup(sub.subjectGroup || SUBJECT_GROUPS[0]);
     setGradeLevel(sub.gradeLevel);
     setItemNumber(sub.itemNumber);
     setMediaTitle(sub.mediaTitle);
@@ -264,7 +278,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const handleCopyGoogleSheetsTab = () => {
     const dataToExport = allSubmissions.length > 0 ? allSubmissions : userSubmissions;
     const headers = [
-      'ลำดับ\tรหัสการส่ง\tวันเวลา\tอีเมลผู้ส่ง\tชื่อ-สกุล\tระดับชั้น\tสื่อชิ้นที่\tชื่อสื่อ/นวัตกรรม\tประเภท\tการจัดทำ\tการนำไปใช้\tURL\tสถานะ'
+      'ลำดับ\tรหัสการส่ง\tวันเวลา\tอีเมลผู้ส่ง\tชื่อ-สกุล\tกลุ่มสาระการเรียนรู้\tระดับชั้น\tสื่อชิ้นที่\tชื่อสื่อ/นวัตกรรม\tประเภท\tการจัดทำ\tการนำไปใช้\tURL\tสถานะ'
     ];
     const rows = dataToExport.map((sub, idx) => {
       return [
@@ -273,6 +287,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
         new Date(sub.submittedAt).toLocaleString('th-TH'),
         sub.userEmail,
         sub.teacherName,
+        sub.subjectGroup || '-',
         sub.gradeLevel,
         `ชิ้นที่ ${sub.itemNumber}`,
         sub.mediaTitle,
@@ -487,7 +502,26 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                   />
                 </div>
 
-                {/* 2. ระบุระดับชั้นของครูผู้สอน */}
+                {/* 2. กลุ่มสาระการเรียนรู้ของครูผู้สอน (ต่อจากชื่อ-สกุล ครูผู้สอน) */}
+                <div>
+                  <label className="block text-xs sm:text-sm font-semibold text-slate-200 mb-1.5 flex items-center justify-between">
+                    <span>กลุ่มสาระการเรียนรู้ของครูผู้สอน <span className="text-rose-400">*</span></span>
+                    <span className="text-[11px] text-blue-400 font-normal">9 กลุ่มสาระตามหลักสูตร</span>
+                  </label>
+                  <select
+                    value={subjectGroup}
+                    onChange={(e) => setSubjectGroup(e.target.value)}
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-800/90 border border-slate-700 focus:border-blue-500 focus:ring-1 focus:ring-blue-500 text-sm text-white outline-none cursor-pointer"
+                  >
+                    {SUBJECT_GROUPS.map((sg) => (
+                      <option key={sg} value={sg} className="bg-slate-900 text-white">
+                        {sg}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 3. ระบุระดับชั้นของครูผู้สอน */}
                 <div>
                   <label className="block text-xs sm:text-sm font-semibold text-slate-200 mb-1.5">
                     ระบุระดับชั้นของครูผู้สอน <span className="text-rose-400">*</span>
@@ -748,267 +782,331 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
           )}
 
           {/* TAB 2: STATUS */}
-          {activeTab === 'status' && (
-            <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                    <span>
-                      {isAdmin && showAllUsersForAdmin
-                        ? 'สถานะการส่งสื่อของคุณครูทุกคน (สิทธิ์ Admin)'
-                        : `สถานะการส่งสื่อของอีเมล: ${userEmail}`}
-                    </span>
+          {activeTab === 'status' && (() => {
+            const baseSubmissions = isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions;
+            const displayedSubmissions = baseSubmissions.filter((sub) => {
+              if (selectedGroupFilter === 'all') return true;
+              return sub.subjectGroup === selectedGroupFilter;
+            });
+
+            return (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700 flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                      <span>
+                        {isAdmin && showAllUsersForAdmin
+                          ? 'สถานะการส่งสื่อของคุณครูทุกคน (สิทธิ์ Admin)'
+                          : `สถานะการส่งสื่อของอีเมล: ${userEmail}`}
+                      </span>
+                      {isAdmin && (
+                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold">
+                          Admin Mode
+                        </span>
+                      )}
+                    </h4>
+                    <p className="text-xs text-slate-400">
+                      ส่งแล้วทั้งหมด {baseSubmissions.length} รายการ
+                      {selectedGroupFilter !== 'all' && ` (แสดงกลุ่มสาระที่เลือก: ${displayedSubmissions.length} รายการ)`}
+                      {!(isAdmin && showAllUsersForAdmin) && ' (เป้าหมาย 5 ชิ้น)'}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {/* Filter by Subject Group */}
+                    <div className="flex items-center gap-1.5 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-700">
+                      <span className="text-xs text-slate-400">กลุ่มสาระ:</span>
+                      <select
+                        value={selectedGroupFilter}
+                        onChange={(e) => setSelectedGroupFilter(e.target.value)}
+                        className="bg-transparent text-xs text-indigo-300 font-semibold focus:outline-none cursor-pointer"
+                      >
+                        <option value="all" className="bg-slate-900 text-white">ทุกกลุ่มสาระ ({baseSubmissions.length})</option>
+                        {SUBJECT_GROUPS.map((sg) => {
+                          const count = baseSubmissions.filter(s => s.subjectGroup === sg).length;
+                          return (
+                            <option key={sg} value={sg} className="bg-slate-900 text-white">
+                              {sg} ({count})
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
                     {isAdmin && (
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold">
-                        Admin Mode
+                      <button
+                        type="button"
+                        onClick={() => setShowAllUsersForAdmin(!showAllUsersForAdmin)}
+                        className="text-xs px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-amber-300 border border-amber-500/40 font-semibold transition-colors"
+                      >
+                        {showAllUsersForAdmin ? 'แสดงเฉพาะของฉัน' : 'แสดงของทุกคน (Admin)'}
+                      </button>
+                    )}
+                    {!(isAdmin && showAllUsersForAdmin) && (
+                      <span className="text-xs px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
+                        {userSubmissions.length >= 5 ? 'ครบ 5 ชิ้นแล้ว' : `ขาดอีก ${5 - userSubmissions.length} ชิ้น`}
                       </span>
                     )}
-                  </h4>
-                  <p className="text-xs text-slate-400">
-                    ส่งแล้วทั้งหมด {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length} รายการ
-                    {!(isAdmin && showAllUsersForAdmin) && ' (เป้าหมาย 5 ชิ้น)'}
-                  </p>
+                  </div>
                 </div>
-                <div className="flex items-center gap-2 flex-wrap">
-                  {isAdmin && (
+
+                {displayedSubmissions.length === 0 ? (
+                  <div className="py-12 text-center text-slate-400">
+                    <BookOpen className="w-10 h-10 mx-auto mb-2 text-slate-600" />
+                    <p className="text-sm">
+                      {selectedGroupFilter !== 'all' 
+                        ? `ไม่พบรายการส่งสื่อในกลุ่มสาระ "${selectedGroupFilter}"` 
+                        : 'ยังไม่พบรายการส่งสื่อ (เริ่มต้น 0 รายการ)'}
+                    </p>
                     <button
                       type="button"
-                      onClick={() => setShowAllUsersForAdmin(!showAllUsersForAdmin)}
-                      className="text-xs px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-amber-300 border border-amber-500/40 font-semibold transition-colors"
+                      onClick={() => {
+                        setSelectedGroupFilter('all');
+                        setEditingId(null);
+                        setActiveTab('form');
+                      }}
+                      className="mt-3 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-semibold transition-colors"
                     >
-                      {showAllUsersForAdmin ? 'แสดงเฉพาะของฉัน' : 'แสดงของทุกคน (Admin)'}
+                      ส่งสื่อชิ้นที่ 1 ตอนนี้
                     </button>
-                  )}
-                  {!(isAdmin && showAllUsersForAdmin) && (
-                    <span className="text-xs px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                      {userSubmissions.length >= 5 ? 'ครบ 5 ชิ้นแล้ว' : `ขาดอีก ${5 - userSubmissions.length} ชิ้น`}
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {((isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).length === 0) ? (
-                <div className="py-12 text-center text-slate-400">
-                  <BookOpen className="w-10 h-10 mx-auto mb-2 text-slate-600" />
-                  <p className="text-sm">ยังไม่พบรายการส่งสื่อ (เริ่มต้น 0 รายการ)</p>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEditingId(null);
-                      setActiveTab('form');
-                    }}
-                    className="mt-3 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-semibold transition-colors"
-                  >
-                    ส่งสื่อชิ้นที่ 1 ตอนนี้
-                  </button>
-                </div>
-              ) : (
-                <div className="space-y-3">
-                  {(isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions).map((sub) => (
-                    <div
-                      key={sub.id}
-                      className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 hover:border-blue-500/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
-                    >
-                      <div className="flex items-start gap-3 flex-1 min-w-0">
-                        {sub.imageUrl ? (
-                          <img
-                            src={sub.imageUrl}
-                            alt={sub.mediaTitle}
-                            className="w-16 h-16 rounded-xl object-cover border border-slate-600 flex-shrink-0"
-                          />
-                        ) : (
-                          <div className="w-16 h-16 rounded-xl bg-blue-900/40 border border-blue-500/30 flex items-center justify-center text-blue-300 flex-shrink-0">
-                            <Layers className="w-6 h-6" />
-                          </div>
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap mb-1">
-                            <span className="px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 font-bold text-xs">
-                              สื่อชิ้นที่ {sub.itemNumber}
-                            </span>
-                            <span className="text-xs text-slate-400">{sub.gradeLevel}</span>
-                            <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                              {sub.status}
-                            </span>
-                            {isAdmin && sub.userEmail !== userEmail && (
-                              <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-400/30">
-                                ครู: {sub.userEmail}
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {displayedSubmissions.map((sub) => (
+                      <div
+                        key={sub.id}
+                        className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 hover:border-blue-500/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
+                      >
+                        <div className="flex items-start gap-3 flex-1 min-w-0">
+                          {sub.imageUrl ? (
+                            <img
+                              src={sub.imageUrl}
+                              alt={sub.mediaTitle}
+                              className="w-16 h-16 rounded-xl object-cover border border-slate-600 flex-shrink-0"
+                            />
+                          ) : (
+                            <div className="w-16 h-16 rounded-xl bg-blue-900/40 border border-blue-500/30 flex items-center justify-center text-blue-300 flex-shrink-0">
+                              <Layers className="w-6 h-6" />
+                            </div>
+                          )}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-2 flex-wrap mb-1">
+                              <span className="px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 font-bold text-xs">
+                                สื่อชิ้นที่ {sub.itemNumber}
                               </span>
-                            )}
-                          </div>
-                          <h5 className="text-sm font-bold text-white truncate">{sub.mediaTitle}</h5>
-                          <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
-                            {sub.usageDetails}
-                          </p>
-                          <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
-                            <span className="flex items-center gap-1">
-                              <Clock className="w-3 h-3 text-slate-500" />
-                              {new Date(sub.submittedAt).toLocaleString('th-TH')}
-                            </span>
-                            <span>การจัดทำ: {sub.productionType}</span>
-                            <span>ครูผู้สอน: <strong>{sub.teacherName}</strong></span>
+                              <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium text-xs">
+                                {sub.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์'}
+                              </span>
+                              <span className="text-xs text-slate-400">{sub.gradeLevel}</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                {sub.status}
+                              </span>
+                              {isAdmin && sub.userEmail !== userEmail && (
+                                <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-400/30">
+                                  ครู: {sub.userEmail}
+                                </span>
+                              )}
+                            </div>
+                            <h5 className="text-sm font-bold text-white truncate">{sub.mediaTitle}</h5>
+                            <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
+                              {sub.usageDetails}
+                            </p>
+                            <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
+                              <span className="flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-slate-500" />
+                                {new Date(sub.submittedAt).toLocaleString('th-TH')}
+                              </span>
+                              <span>การจัดทำ: {sub.productionType}</span>
+                              <span>ครูผู้สอน: <strong>{sub.teacherName}</strong></span>
+                            </div>
                           </div>
                         </div>
-                      </div>
 
-                      {/* Actions: Open URL, Edit, Delete */}
-                      <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
-                        {sub.onlineUrl && (
-                          <a
-                            href={sub.onlineUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="px-2.5 py-1.5 rounded-xl bg-slate-700/80 hover:bg-slate-700 text-xs text-blue-300 flex items-center gap-1 transition-colors"
-                            title="เปิดดูสื่อออนไลน์"
-                          >
-                            <ExternalLink className="w-3.5 h-3.5" />
-                            <span className="hidden md:inline">เปิดดู</span>
-                          </a>
-                        )}
-
-                        {canUserModify(sub.userEmail, userEmail) && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => handleStartEdit(sub)}
-                              className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
-                              title="แก้ไขข้อมูลสื่อ"
+                        {/* Actions: Open URL, Edit, Delete */}
+                        <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
+                          {sub.onlineUrl && (
+                            <a
+                              href={sub.onlineUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-2.5 py-1.5 rounded-xl bg-slate-700/80 hover:bg-slate-700 text-xs text-blue-300 flex items-center gap-1 transition-colors"
+                              title="เปิดดูสื่อออนไลน์"
                             >
-                              <Edit3 className="w-3.5 h-3.5" />
-                              <span>แก้ไข</span>
-                            </button>
+                              <ExternalLink className="w-3.5 h-3.5" />
+                              <span className="hidden md:inline">เปิดดู</span>
+                            </a>
+                          )}
 
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSubmission(sub)}
-                              className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
-                              title="ลบข้อมูลสื่อ"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                              <span>ลบ</span>
-                            </button>
-                          </>
-                        )}
+                          {canUserModify(sub.userEmail, userEmail) && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => handleStartEdit(sub)}
+                                className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                                title="แก้ไขข้อมูลสื่อ"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                                <span>แก้ไข</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteSubmission(sub)}
+                                className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                                title="ลบข้อมูลสื่อ"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>ลบ</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* TAB 3: GOOGLE SHEETS SUMMARY */}
-          {activeTab === 'sheets' && (
-            <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
-                <div>
-                  <h4 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
-                    <FileSpreadsheet className="w-4 h-4" />
-                    ปุ่มสรุปข้อมูล Google Sheets (เชื่อมต่ออีเมล: {ADMIN_TARGET_EMAIL})
-                  </h4>
-                  <p className="text-xs text-slate-300 mt-1">
-                    ข้อมูลทั้งหมดถูกจัดเก็บในฐานข้อมูล Firebase Project <strong className="text-white">"System Test"</strong> สามารถสรุปผล ส่งต่อ หรือเปิดใน Google Sheets ได้ทันที
-                  </p>
+          {activeTab === 'sheets' && (() => {
+            const baseSubmissions = (allSubmissions.length > 0 ? allSubmissions : userSubmissions);
+            const displayedSubmissions = baseSubmissions.filter((sub) => {
+              if (selectedGroupFilter === 'all') return true;
+              return sub.subjectGroup === selectedGroupFilter;
+            });
+
+            return (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-emerald-950/40 border border-emerald-500/30 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                  <div>
+                    <h4 className="text-sm font-bold text-emerald-300 flex items-center gap-2">
+                      <FileSpreadsheet className="w-4 h-4" />
+                      ปุ่มสรุปข้อมูล Google Sheets (เชื่อมต่ออีเมล: {ADMIN_TARGET_EMAIL})
+                    </h4>
+                    <p className="text-xs text-slate-300 mt-1">
+                      ข้อมูลทั้งหมดถูกจัดเก็บในฐานข้อมูล Firebase Project <strong className="text-white">"System Test"</strong> สามารถสรุปผล แยกดูตามกลุ่มสาระ หรือเปิดใน Google Sheets ได้ทันที
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2">
+                    {/* Filter in Sheets tab */}
+                    <div className="flex items-center gap-1.5 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-700">
+                      <span className="text-xs text-slate-400">กลุ่มสาระ:</span>
+                      <select
+                        value={selectedGroupFilter}
+                        onChange={(e) => setSelectedGroupFilter(e.target.value)}
+                        className="bg-transparent text-xs text-emerald-300 font-semibold focus:outline-none cursor-pointer"
+                      >
+                        <option value="all" className="bg-slate-900 text-white">ทุกกลุ่มสาระ ({baseSubmissions.length})</option>
+                        {SUBJECT_GROUPS.map((sg) => (
+                          <option key={sg} value={sg} className="bg-slate-900 text-white">
+                            {sg}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleDownloadCSV}
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white flex items-center gap-1.5 transition-colors shadow-md"
+                    >
+                      <Download className="w-4 h-4" />
+                      <span>ดาวน์โหลด CSV สำหรับ Google Sheets</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleCopyGoogleSheetsTab}
+                      className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors"
+                    >
+                      <Copy className="w-4 h-4 text-emerald-400" />
+                      <span>{copyNotice ? 'คัดลอกตารางแล้ว!' : 'คัดลอกลง Google Sheets'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleSendEmailSummary}
+                      className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white flex items-center gap-1.5 transition-colors shadow-md"
+                    >
+                      <Mail className="w-4 h-4" />
+                      <span>ส่งรายงานสรุปถึง Admin</span>
+                    </button>
+                  </div>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={handleDownloadCSV}
-                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-bold text-white flex items-center gap-1.5 transition-colors shadow-md"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>ดาวน์โหลด CSV สำหรับ Google Sheets</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleCopyGoogleSheetsTab}
-                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-200 border border-slate-700 flex items-center gap-1.5 transition-colors"
-                  >
-                    <Copy className="w-4 h-4 text-emerald-400" />
-                    <span>{copyNotice ? 'คัดลอกตารางแล้ว!' : 'คัดลอกลง Google Sheets'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleSendEmailSummary}
-                    className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs font-bold text-white flex items-center gap-1.5 transition-colors shadow-md"
-                  >
-                    <Mail className="w-4 h-4" />
-                    <span>ส่งรายงานสรุปถึง Admin</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Data Table */}
-              <div className="border border-slate-800 rounded-2xl overflow-hidden bg-slate-950/60">
-                <div className="overflow-x-auto max-h-80">
-                  <table className="w-full text-left text-xs border-collapse">
-                    <thead className="bg-slate-800 text-slate-300 uppercase sticky top-0 border-b border-slate-700">
-                      <tr>
-                        <th className="p-3">#</th>
-                        <th className="p-3">ชิ้นที่</th>
-                        <th className="p-3">ชื่อ - สกุล</th>
-                        <th className="p-3">ระดับชั้น</th>
-                        <th className="p-3">ชื่อสื่อ / นวัตกรรม</th>
-                        <th className="p-3">ประเภท</th>
-                        <th className="p-3">การจัดทำ</th>
-                        <th className="p-3">วันเวลาส่ง</th>
-                        <th className="p-3">อีเมล</th>
-                        <th className="p-3">สถานะ</th>
-                        {isAdmin && <th className="p-3 text-center text-amber-300 font-semibold">จัดการ (Admin)</th>}
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-800 text-slate-300">
-                      {(allSubmissions.length > 0 ? allSubmissions : userSubmissions).map((item, idx) => (
-                        <tr key={item.id} className="hover:bg-slate-800/50">
-                          <td className="p-3 text-slate-500">{idx + 1}</td>
-                          <td className="p-3 font-bold text-blue-300">{item.itemNumber}</td>
-                          <td className="p-3 text-white font-medium">{item.teacherName}</td>
-                          <td className="p-3">{item.gradeLevel}</td>
-                          <td className="p-3 max-w-xs truncate font-medium text-slate-200">{item.mediaTitle}</td>
-                          <td className="p-3">{item.mediaType}</td>
-                          <td className="p-3">{item.productionType}</td>
-                          <td className="p-3 text-slate-400 whitespace-nowrap">
-                            {new Date(item.submittedAt).toLocaleDateString('th-TH')}
-                          </td>
-                          <td className="p-3 text-slate-400 whitespace-nowrap">{item.userEmail}</td>
-                          <td className="p-3">
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px]">
-                              {item.status}
-                            </span>
-                          </td>
-                          {isAdmin && (
-                            <td className="p-3 whitespace-nowrap text-center">
-                              <div className="flex items-center justify-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleStartEdit(item)}
-                                  className="p-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30"
-                                  title="Admin: แก้ไขสื่อนี้"
-                                >
-                                  <Edit3 className="w-3 h-3" />
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteSubmission(item)}
-                                  className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
-                                  title="Admin: ลบสื่อนี้"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                            </td>
-                          )}
+                {/* Data Table */}
+                <div className="border border-slate-800 rounded-2xl overflow-hidden bg-slate-950/60">
+                  <div className="overflow-x-auto max-h-80">
+                    <table className="w-full text-left text-xs border-collapse">
+                      <thead className="bg-slate-800 text-slate-300 uppercase sticky top-0 border-b border-slate-700">
+                        <tr>
+                          <th className="p-3">#</th>
+                          <th className="p-3">ชิ้นที่</th>
+                          <th className="p-3">ชื่อ - สกุล</th>
+                          <th className="p-3 text-indigo-300">กลุ่มสาระการเรียนรู้</th>
+                          <th className="p-3">ระดับชั้น</th>
+                          <th className="p-3">ชื่อสื่อ / นวัตกรรม</th>
+                          <th className="p-3">ประเภท</th>
+                          <th className="p-3">การจัดทำ</th>
+                          <th className="p-3">วันเวลาส่ง</th>
+                          <th className="p-3">อีเมล</th>
+                          <th className="p-3">สถานะ</th>
+                          {isAdmin && <th className="p-3 text-center text-amber-300 font-semibold">จัดการ (Admin)</th>}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800 text-slate-300">
+                        {displayedSubmissions.map((item, idx) => (
+                          <tr key={item.id} className="hover:bg-slate-800/50">
+                            <td className="p-3 text-slate-500">{idx + 1}</td>
+                            <td className="p-3 font-bold text-blue-300">{item.itemNumber}</td>
+                            <td className="p-3 text-white font-medium">{item.teacherName}</td>
+                            <td className="p-3 font-semibold text-indigo-300 whitespace-nowrap">{item.subjectGroup || '-'}</td>
+                            <td className="p-3">{item.gradeLevel}</td>
+                            <td className="p-3 max-w-xs truncate font-medium text-slate-200">{item.mediaTitle}</td>
+                            <td className="p-3">{item.mediaType}</td>
+                            <td className="p-3">{item.productionType}</td>
+                            <td className="p-3 text-slate-400 whitespace-nowrap">
+                              {new Date(item.submittedAt).toLocaleDateString('th-TH')}
+                            </td>
+                            <td className="p-3 text-slate-400 whitespace-nowrap">{item.userEmail}</td>
+                            <td className="p-3">
+                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px]">
+                                {item.status}
+                              </span>
+                            </td>
+                            {isAdmin && (
+                              <td className="p-3 whitespace-nowrap text-center">
+                                <div className="flex items-center justify-center gap-1.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartEdit(item)}
+                                    className="p-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30"
+                                    title="Admin: แก้ไขสื่อนี้"
+                                  >
+                                    <Edit3 className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSubmission(item)}
+                                    className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                                    title="Admin: ลบสื่อนี้"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
         </div>
       </div>

@@ -123,6 +123,7 @@ export const INNOVATION_HEADERS = [
   'รหัสการส่ง',
   'วันเวลาที่ส่ง',
   'ชื่อ-สกุล ครูผู้สอน',
+  'กลุ่มสาระการเรียนรู้ของครูผู้สอน',
   'ระดับชั้น',
   'สื่อชิ้นที่ (1-5)',
   'ชื่อสื่อ / นวัตกรรม',
@@ -141,6 +142,7 @@ export function generateInnovationsTSV(list: InnovationSubmission[]): string {
     item.id,
     new Date(item.submittedAt).toLocaleString('th-TH'),
     item.teacherName,
+    item.subjectGroup || '-',
     item.gradeLevel,
     item.itemNumber,
     item.mediaTitle,
@@ -162,6 +164,7 @@ export function generateInnovationsCSV(list: InnovationSubmission[]): string {
     item.id,
     new Date(item.submittedAt).toLocaleString('th-TH'),
     item.teacherName,
+    item.subjectGroup || '-',
     item.gradeLevel,
     item.itemNumber,
     item.mediaTitle,
@@ -184,6 +187,7 @@ export function generateInnovationsCSV(list: InnovationSubmission[]): string {
 export const TEACHER_SUMMARY_HEADERS = [
   'ลำดับ',
   'ชื่อ-สกุล ครูผู้สอน',
+  'กลุ่มสาระการเรียนรู้',
   'อีเมลครู',
   'ระดับชั้น',
   'ส่งแล้วกี่ชิ้น (จาก 5)',
@@ -199,6 +203,7 @@ export const TEACHER_SUMMARY_HEADERS = [
 export interface TeacherSummaryItem {
   teacherName: string;
   email: string;
+  subjectGroup?: string;
   gradeLevel: string;
   submittedCount: number;
   isComplete: boolean;
@@ -220,6 +225,7 @@ export function aggregateTeacherSummary(list: InnovationSubmission[]): TeacherSu
       current = {
         teacherName: sub.teacherName || 'ไม่ระบุชื่อ',
         email: sub.userEmail,
+        subjectGroup: sub.subjectGroup || 'ไม่ระบุกลุ่มสาระ',
         gradeLevel: sub.gradeLevel || '-',
         submittedCount: 0,
         isComplete: false,
@@ -231,6 +237,10 @@ export function aggregateTeacherSummary(list: InnovationSubmission[]): TeacherSu
         lastSubmittedAt: sub.submittedAt,
       };
       map.set(key, current);
+    } else {
+      if (sub.subjectGroup && current.subjectGroup === 'ไม่ระบุกลุ่มสาระ') {
+        current.subjectGroup = sub.subjectGroup;
+      }
     }
 
     // Assign items
@@ -268,6 +278,7 @@ export function generateTeacherSummaryTSV(summaryList: TeacherSummaryItem[]): st
   const rows = summaryList.map((t, idx) => [
     idx + 1,
     t.teacherName,
+    t.subjectGroup || '-',
     t.email,
     t.gradeLevel,
     `${t.submittedCount}/5`,
@@ -287,6 +298,7 @@ export function generateTeacherSummaryCSV(summaryList: TeacherSummaryItem[]): st
   const rows = summaryList.map((t, idx) => [
     idx + 1,
     t.teacherName,
+    t.subjectGroup || '-',
     t.email,
     t.gradeLevel,
     `${t.submittedCount}/5`,

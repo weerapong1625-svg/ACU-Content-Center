@@ -39,7 +39,8 @@ import {
   Printer,
   MapPin,
   Database,
-  Gift
+  Gift,
+  BookOpen
 } from 'lucide-react';
 import { SchoolLogo } from './SchoolLogo';
 import { 
@@ -77,6 +78,7 @@ import {
   subscribeCriteriaPoster,
   DEFAULT_CRITERIA_POSTER,
   GRADE_LEVELS,
+  SUBJECT_GROUPS,
   updateInnovationSubmission,
   deleteInnovationSubmission,
   updateFacilitySubmission,
@@ -242,6 +244,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedGradeFilter, setSelectedGradeFilter] = useState('all');
   const [selectedMediaTypeFilter, setSelectedMediaTypeFilter] = useState('all');
+  const [selectedSubjectGroupFilter, setSelectedSubjectGroupFilter] = useState('all');
+
+  // Search & Filters for Teachers Summary (Tab 3)
+  const [teacherSearchTerm, setTeacherSearchTerm] = useState('');
+  const [teacherSubjectGroupFilter, setTeacherSubjectGroupFilter] = useState('all');
 
   // File inputs
   const logoFileInputRef = React.useRef<HTMLInputElement>(null);
@@ -351,6 +358,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return aggregateTeacherSummary(innovations);
   }, [innovations]);
 
+  // Filtered teachers list (Tab 3)
+  const filteredTeacherSummaries = useMemo(() => {
+    return teacherSummaries.filter((t) => {
+      const matchSearch = teacherSearchTerm === '' ||
+        t.teacherName.toLowerCase().includes(teacherSearchTerm.toLowerCase()) ||
+        t.email.toLowerCase().includes(teacherSearchTerm.toLowerCase());
+      const matchGroup = teacherSubjectGroupFilter === 'all' || (t.subjectGroup || '') === teacherSubjectGroupFilter;
+      return matchSearch && matchGroup;
+    });
+  }, [teacherSummaries, teacherSearchTerm, teacherSubjectGroupFilter]);
+
   // Filtered innovations list
   const filteredInnovations = useMemo(() => {
     return innovations.filter((item) => {
@@ -369,10 +387,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       
       const matchGrade = selectedGradeFilter === 'all' || item.gradeLevel === selectedGradeFilter;
       const matchType = selectedMediaTypeFilter === 'all' || item.mediaType === selectedMediaTypeFilter;
+      const matchSubjectGroup = selectedSubjectGroupFilter === 'all' || (item.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์') === selectedSubjectGroupFilter;
 
-      return matchSearch && matchGrade && matchType;
+      return matchSearch && matchGrade && matchType && matchSubjectGroup;
     });
-  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, innovationYear]);
+  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear]);
 
   // Statistics calculation
   const stats = useMemo(() => {
@@ -381,6 +400,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     const completed5Count = teacherSummaries.filter(t => t.isComplete).length;
     const inProgressCount = totalTeachers - completed5Count;
     const totalFacilities = facilities.length;
+
+    // By Subject Group
+    const subjectGroupCounts: Record<string, number> = {};
+    SUBJECT_GROUPS.forEach(sg => {
+      subjectGroupCounts[sg] = 0;
+    });
+    innovations.forEach(i => {
+      const sg = i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์';
+      subjectGroupCounts[sg] = (subjectGroupCounts[sg] || 0) + 1;
+    });
 
     // By Grade
     const gradeCounts: Record<string, number> = {};
@@ -416,6 +445,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       completed5Count,
       inProgressCount,
       totalFacilities,
+      subjectGroupCounts,
       gradeCounts,
       mediaTypeCounts,
       selfMadeCount,
@@ -933,6 +963,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       editingInnovation.id,
       {
         teacherName: editingInnovation.teacherName,
+        subjectGroup: editingInnovation.subjectGroup,
         gradeLevel: editingInnovation.gradeLevel,
         itemNumber: editingInnovation.itemNumber,
         mediaType: editingInnovation.mediaType,
@@ -1520,6 +1551,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                             className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500"
                             style={{ width: `${percent}%` }}
                           />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Subject Groups Breakdown (9 กลุ่มสาระ) */}
+              <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl lg:col-span-2">
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                  <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                    <BookOpen className="w-4 h-4 text-purple-400" />
+                    <span>การส่งสื่อแยกตามกลุ่มสาระการเรียนรู้ของครูผู้สอน (9 กลุ่มสาระ)</span>
+                  </h3>
+                  <span className="text-xs text-indigo-300 font-semibold bg-indigo-500/10 px-2.5 py-1 rounded-xl border border-indigo-500/20">
+                    สื่อทั้งหมด {stats.totalSubmissions} ชิ้น
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {SUBJECT_GROUPS.map((sg) => {
+                    const count = stats.subjectGroupCounts[sg] || 0;
+                    const percent = stats.totalSubmissions > 0 
+                      ? Math.round((count / stats.totalSubmissions) * 100) 
+                      : 0;
+                    return (
+                      <div key={sg} className="p-3.5 rounded-2xl bg-slate-800/60 border border-slate-700/60 hover:border-indigo-500/40 transition-colors">
+                        <div className="flex items-center justify-between text-xs mb-1.5">
+                          <span className="text-slate-200 font-medium truncate" title={sg}>{sg}</span>
+                          <span className="font-bold text-indigo-300 ml-2 whitespace-nowrap">{count} ชิ้น</span>
+                        </div>
+                        <div className="w-full h-2 rounded-full bg-slate-700 overflow-hidden">
+                          <div
+                            className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-500"
+                            style={{ width: `${percent}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between items-center text-[10px] text-slate-400 mt-1">
+                          <span>สัดส่วน</span>
+                          <span>{percent}%</span>
                         </div>
                       </div>
                     );
@@ -2758,6 +2829,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 </select>
 
                 <select
+                  value={selectedSubjectGroupFilter}
+                  onChange={(e) => setSelectedSubjectGroupFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-indigo-300 font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="all">ทุกกลุ่มสาระ ({innovations.length})</option>
+                  {SUBJECT_GROUPS.map(sg => {
+                    const count = innovations.filter(i => (i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์') === sg).length;
+                    return (
+                      <option key={sg} value={sg} className="bg-slate-900 text-white">
+                        {sg} ({count})
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <select
                   value={selectedMediaTypeFilter}
                   onChange={(e) => setSelectedMediaTypeFilter(e.target.value)}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-slate-200 focus:outline-none"
@@ -2791,6 +2878,50 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <span>ส่งออก CSV</span>
                 </button>
               </div>
+            </div>
+
+            {/* Quick Subject Group Pill Filter Bar for Innovations */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <BookOpen className="w-3.5 h-3.5 text-indigo-400" />
+                <span>กลุ่มสาระ:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setSelectedSubjectGroupFilter('all')}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  selectedSubjectGroupFilter === 'all'
+                    ? 'bg-indigo-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                ทุกกลุ่มสาระ ({innovations.length})
+              </button>
+              {SUBJECT_GROUPS.map((sg) => {
+                const count = innovations.filter(i => (i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์') === sg).length;
+                const isSelected = selectedSubjectGroupFilter === sg;
+                return (
+                  <button
+                    key={sg}
+                    type="button"
+                    onClick={() => setSelectedSubjectGroupFilter(sg)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : count > 0
+                        ? 'bg-slate-800 text-indigo-300 border border-indigo-500/30 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>{sg.replace('กลุ่มสาระการเรียนรู้', '')}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-white/20 text-white' : count > 0 ? 'bg-indigo-500/20 text-indigo-300 font-bold' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
 
             {/* Quick Year Pill Filter Bar for Innovations */}
@@ -2869,6 +3000,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     <tr>
                       <th className="py-3 px-3.5 text-center w-12">ลำดับ</th>
                       <th className="py-3 px-3.5">ชื่อ-สกุลครูผู้สอน</th>
+                      <th className="py-3 px-3.5 text-indigo-300">กลุ่มสาระการเรียนรู้</th>
                       <th className="py-3 px-3.5">ระดับชั้น</th>
                       <th className="py-3 px-3 text-center">ชิ้นที่</th>
                       <th className="py-3 px-3.5">ชื่อสื่อ / นวัตกรรม</th>
@@ -2882,7 +3014,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <tbody className="divide-y divide-slate-800">
                     {filteredInnovations.length === 0 ? (
                       <tr>
-                        <td colSpan={10} className="py-12 text-center text-slate-500">
+                        <td colSpan={11} className="py-12 text-center text-slate-500">
                           {isLoading ? 'กำลังโหลดข้อมูลจาก Firestore...' : 'ไม่พบข้อมูลที่ตรงกับเงื่อนไขการค้นหา'}
                         </td>
                       </tr>
@@ -2893,6 +3025,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                           <td className="py-3 px-3.5 font-medium text-white">
                             <div>{item.teacherName}</div>
                             <div className="text-[10px] text-slate-500 font-mono">{item.userEmail}</div>
+                          </td>
+                          <td className="py-3 px-3.5 whitespace-nowrap">
+                            <span className="px-2.5 py-1 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium text-xs">
+                              {item.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์'}
+                            </span>
                           </td>
                           <td className="py-3 px-3.5 text-slate-300 whitespace-nowrap">{item.gradeLevel}</td>
                           <td className="py-3 px-3 text-center">
@@ -2989,10 +3126,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex items-center justify-between gap-3 flex-wrap">
               <div>
                 <h3 className="text-sm font-bold text-white">ตารางสรุปสถานะการส่งสื่อ 5 ชิ้น แยกตามรายชื่อครูผู้สอน</h3>
-                <p className="text-xs text-slate-400">ตรวจสอบได้ทันทีว่าคุณครูท่านใดส่งครบ 5 ชิ้นแล้ว หรือยังขาดชิ้นใด</p>
+                <p className="text-xs text-slate-400">ตรวจสอบได้ทันทีว่าคุณครูท่านใดส่งครบ 5 ชิ้นแล้ว หรือแยกดูตามกลุ่มสาระการเรียนรู้</p>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                {/* Search teacher */}
+                <div className="relative w-48 sm:w-56">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={teacherSearchTerm}
+                    onChange={(e) => setTeacherSearchTerm(e.target.value)}
+                    placeholder="ค้นหาชื่อครู, อีเมล..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-indigo-500"
+                  />
+                </div>
+
+                {/* Filter by Subject Group */}
+                <select
+                  value={teacherSubjectGroupFilter}
+                  onChange={(e) => setTeacherSubjectGroupFilter(e.target.value)}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-indigo-300 font-semibold focus:outline-none cursor-pointer"
+                >
+                  <option value="all">ทุกกลุ่มสาระ ({teacherSummaries.length} ท่าน)</option>
+                  {SUBJECT_GROUPS.map((sg) => {
+                    const count = teacherSummaries.filter(t => (t.subjectGroup || '') === sg).length;
+                    return (
+                      <option key={sg} value={sg}>
+                        {sg} ({count})
+                      </option>
+                    );
+                  })}
+                </select>
+
                 <button
                   type="button"
                   onClick={handleCopyTeachersTSV}
@@ -3005,7 +3171,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                 <button
                   type="button"
-                  onClick={() => downloadFile('ACU_สรุปรายชื่อครูผู้ส่งสื่อ.csv', generateTeacherSummaryCSV(teacherSummaries))}
+                  onClick={() => downloadFile('ACU_สรุปรายชื่อครูผู้ส่งสื่อ.csv', generateTeacherSummaryCSV(filteredTeacherSummaries))}
                   className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5" />
@@ -3021,6 +3187,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     <tr>
                       <th className="py-3 px-3.5 text-center w-12">ลำดับ</th>
                       <th className="py-3 px-3.5">ชื่อ-สกุลครูผู้สอน</th>
+                      <th className="py-3 px-3.5 text-indigo-300">กลุ่มสาระการเรียนรู้</th>
                       <th className="py-3 px-3.5">อีเมลบัญชี</th>
                       <th className="py-3 px-3.5 text-center">ความคืบหน้า (จาก 5 ชิ้น)</th>
                       <th className="py-3 px-3.5 text-center">สถานะ</th>
@@ -3033,20 +3200,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800">
-                    {teacherSummaries.length === 0 ? (
+                    {filteredTeacherSummaries.length === 0 ? (
                       <tr>
-                        <td colSpan={11} className="py-12 text-center text-slate-500">
-                          ยังไม่มีข้อมูลการส่งสื่อจากคุณครู
+                        <td colSpan={12} className="py-12 text-center text-slate-500">
+                          {teacherSummaries.length === 0 ? 'ยังไม่มีข้อมูลการส่งสื่อจากคุณครู' : 'ไม่พบคุณครูที่ตรงกับเงื่อนไขการค้นหา/กลุ่มสาระ'}
                         </td>
                       </tr>
                     ) : (
-                      teacherSummaries.map((teacher, index) => {
+                      filteredTeacherSummaries.map((teacher, index) => {
                         const isSuper = teacher.email?.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
                         return (
                         <tr key={teacher.email || index} className="hover:bg-slate-800/40 transition-colors">
                           <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
                           <td className="py-3 px-3.5 font-bold text-white whitespace-nowrap">{teacher.teacherName}</td>
+                          <td className="py-3 px-3.5 text-indigo-300 font-semibold whitespace-nowrap">
+                            <span className="px-2.5 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-[11px]">
+                              {teacher.subjectGroup || 'ไม่ระบุกลุ่มสาระ'}
+                            </span>
+                          </td>
                           <td className="py-3 px-3.5 font-mono text-[11px] text-slate-400 whitespace-nowrap">{teacher.email}</td>
                           <td className="py-3 px-3.5 text-center">
                             <div className="flex items-center justify-center gap-2">
@@ -3826,6 +3998,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   onChange={(e) => setEditingInnovation({ ...editingInnovation, mediaTitle: e.target.value })}
                   className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
                 />
+              </div>
+
+              <div>
+                <label className="block text-slate-300 font-semibold mb-1">กลุ่มสาระการเรียนรู้ของครูผู้สอน</label>
+                <select
+                  value={editingInnovation.subjectGroup || SUBJECT_GROUPS[0]}
+                  onChange={(e) => setEditingInnovation({ ...editingInnovation, subjectGroup: e.target.value })}
+                  className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none cursor-pointer"
+                >
+                  {SUBJECT_GROUPS.map((sg) => (
+                    <option key={sg} value={sg}>{sg}</option>
+                  ))}
+                </select>
               </div>
 
               <div className="grid grid-cols-2 gap-3">

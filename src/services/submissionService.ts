@@ -49,9 +49,23 @@ export const PRODUCTION_TYPES = [
   'ครูนำสื่อจากแหล่งอื่นมาใช้',
 ] as const;
 
+// Exact 9 Subject Groups requested by user (กลุ่มสาระการเรียนรู้ของครูผู้สอน)
+export const SUBJECT_GROUPS = [
+  'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+  'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+  'กลุ่มสาระการเรียนรู้ภาษาไทย',
+  'กลุ่มสาระการเรียนรู้ภาษาต่างประเทศ',
+  'กลุ่มสาระการเรียนรู้สุขศึกษาและพลศึกษา',
+  'กลุ่มสาระการเรียนรู้ศิลปะ',
+  'กลุ่มสาระการเรียนรู้การงานอาชีพ',
+  'กลุ่มสาระการเรียนรู้สังคมศึกษา ศาสนา และวัฒนธรรม',
+  'กลุ่มพัฒนาผู้เรียน',
+] as const;
+
 export interface InnovationSubmission {
   id: string;
   teacherName: string;
+  subjectGroup?: string; // กลุ่มสาระการเรียนรู้ของครูผู้สอน (9 กลุ่มสาระ)
   gradeLevel: string;
   itemNumber: number; // 1 to 5
   mediaTitle: string;
@@ -70,19 +84,6 @@ export interface InnovationSubmission {
 // =========================================================================
 // 2. บันทึกแหล่งเรียนรู้ภายในโรงเรียน (Facility Submissions - 33 แหล่ง, 9 คาบ)
 // =========================================================================
-
-// Exact 9 Subject Groups requested by user
-export const SUBJECT_GROUPS = [
-  'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-  'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-  'กลุ่มสาระการเรียนรู้ภาษาไทย',
-  'กลุ่มสาระการเรียนรู้ภาษาต่างประเทศ',
-  'กลุ่มสาระการเรียนรู้สุขศึกษาและพลศึกษา',
-  'กลุ่มสาระการเรียนรู้ศิลปะ',
-  'กลุ่มสาระการเรียนรู้การงานอาชีพ',
-  'กลุ่มสาระการเรียนรู้สังคมศึกษา ศาสนา และวัฒนธรรม',
-  'กลุ่มพัฒนาผู้เรียน',
-] as const;
 
 // Exact 33 Learning Centers / Facilities requested by user
 export const LEARNING_CENTERS = [
@@ -203,6 +204,7 @@ const TEACHER_MEDIA_COLLECTION = 'teacher_media_repository';
  */
 export async function saveInnovationSubmission(data: {
   teacherName: string;
+  subjectGroup?: string;
   gradeLevel: string;
   itemNumber: number;
   mediaTitle: string;
@@ -217,9 +219,12 @@ export async function saveInnovationSubmission(data: {
     const id = `innov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     const nowIso = new Date().toISOString();
 
+    const selectedSubjectGroup = data.subjectGroup?.trim() || SUBJECT_GROUPS[0];
+
     const payload: InnovationSubmission = {
       id,
       teacherName: data.teacherName.trim(),
+      subjectGroup: selectedSubjectGroup,
       gradeLevel: data.gradeLevel,
       itemNumber: Number(data.itemNumber) || 1,
       mediaTitle: data.mediaTitle.trim(),
@@ -254,11 +259,11 @@ export async function saveInnovationSubmission(data: {
         id: mediaDocId,
         title: data.mediaTitle.trim(),
         teacherName: data.teacherName.trim(),
-        subjectGroup: data.gradeLevel,
+        subjectGroup: selectedSubjectGroup,
         gradeLevel: data.gradeLevel,
         subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
         thumbnailUrl: data.imageUrl || '/ACU N.png',
-        description: `นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}`,
+        description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}`,
         mediaType: data.mediaType,
         itemNumber: Number(data.itemNumber) || 1,
         onlineUrl: data.onlineUrl?.trim() || '',
@@ -330,10 +335,12 @@ export async function updateInnovationSubmission(
         if (updates.mediaType) mediaUpdate.mediaType = updates.mediaType;
         if (updates.gradeLevel) {
           mediaUpdate.gradeLevel = updates.gradeLevel;
-          mediaUpdate.subjectGroup = updates.gradeLevel;
+        }
+        if (updates.subjectGroup) {
+          mediaUpdate.subjectGroup = updates.subjectGroup;
         }
         if (updates.usageDetails) {
-          mediaUpdate.description = `นำไปใช้: ${updates.usageDetails} | ประเภท: ${updates.mediaType || currentData.mediaType}`;
+          mediaUpdate.description = `กลุ่มสาระ: ${updates.subjectGroup || currentData.subjectGroup || '-'} | นำไปใช้: ${updates.usageDetails} | ประเภท: ${updates.mediaType || currentData.mediaType}`;
         }
         await updateDoc(mediaRef, mediaUpdate);
       }
@@ -471,6 +478,7 @@ export function exportInnovationsToGoogleSheetsCSV(submissions: InnovationSubmis
     'วันเวลาที่ส่ง',
     'อีเมลผู้ส่ง',
     'ชื่อ - สกุล (ครูผู้สอน)',
+    'กลุ่มสาระการเรียนรู้ของครูผู้สอน',
     'ระดับชั้นของครูผู้สอน',
     'สื่อชิ้นที่',
     'ชื่อสื่อ / นวัตกรรมการสอน',
@@ -496,6 +504,7 @@ export function exportInnovationsToGoogleSheetsCSV(submissions: InnovationSubmis
       escapeCSV(new Date(sub.submittedAt).toLocaleString('th-TH')),
       escapeCSV(sub.userEmail),
       escapeCSV(sub.teacherName),
+      escapeCSV(sub.subjectGroup || '-'),
       escapeCSV(sub.gradeLevel),
       escapeCSV(sub.itemNumber),
       escapeCSV(sub.mediaTitle),
