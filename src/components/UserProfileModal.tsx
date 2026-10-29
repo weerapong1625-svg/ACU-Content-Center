@@ -42,7 +42,7 @@ import {
   DEFAULT_INNOVATION_ITEMS,
   getCleanRealName
 } from '../services/userProfileService';
-import { SUPER_ADMIN_EMAIL } from '../services/logoService';
+import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
   subscribeUserInnovations, 
   subscribeTeacherMedia, 
@@ -84,6 +84,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   // Profile Data State initialized synchronously to prevent delay
   const isMasterWeerapong = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
+
+  // Check if current active session user is Admin (weerapong1625@acu.ac.th)
+  const activeViewerEmail = (
+    currentUserEmail ||
+    (typeof window !== 'undefined' ? (localStorage.getItem('acu_current_user_email') || localStorage.getItem('acu_user_email') || '') : '') ||
+    userEmail ||
+    ''
+  ).trim().toLowerCase();
+  const isAdmin = isSuperAdmin(activeViewerEmail) || isSuperAdmin(userEmail);
   const [profile, setProfile] = useState<FullUserProfile>(() => {
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
@@ -219,41 +228,53 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   useEffect(() => {
     if (!isOpen || !userEmail) return;
 
-    const unsubscribe = subscribeUserInnovations(userEmail, (userInnos) => {
-      setProfile((prev) => {
-        // Map real submissions into the 5 slots
-        const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
-          const match = userInnos.find((u) => u.itemNumber === defItem.id);
-          if (match) {
-            return {
-              id: defItem.id,
-              title: match.mediaTitle,
-              category: match.mediaType,
-              status: 'submitted' as const,
-              submittedDate: match.submittedAt
-                ? new Date(match.submittedAt).toLocaleDateString('th-TH', {
-                    day: 'numeric',
-                    month: 'short',
-                    year: 'numeric',
-                  })
-                : 'ส่งแล้ว',
-              linkUrl: match.onlineUrl || '',
-              coverImageUrl: match.imageUrl || '',
-              notes: `${match.productionType}${match.usageDetails ? ` • ${match.usageDetails}` : ''}`,
-            };
-          }
-          return defItem;
-        });
+    const teacherNameLookup = profile?.fullName || userName || '';
+    const unsubscribe = subscribeUserInnovations(
+      userEmail,
+      (userInnos) => {
+        setProfile((prev) => {
+          // Map real submissions into the 5 slots
+          const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
+            const match = userInnos.find((u) => Number(u.itemNumber) === defItem.id);
+            if (match) {
+              return {
+                id: defItem.id,
+                title: match.mediaTitle,
+                category: match.mediaType,
+                status: 'submitted' as const,
+                submittedDate: match.submittedAt
+                  ? new Date(match.submittedAt).toLocaleDateString('th-TH', {
+                      day: 'numeric',
+                      month: 'short',
+                      year: 'numeric',
+                    })
+                  : 'ส่งแล้ว',
+                linkUrl: match.onlineUrl || '',
+                coverImageUrl: match.imageUrl || '',
+                notes: `${match.productionType}${match.usageDetails ? ` • ${match.usageDetails}` : ''}`,
+              };
+            }
 
-        return {
-          ...prev,
-          innovations: updatedInnovations,
-        };
-      });
-    });
+            // If prev had an item that was already submitted or edited, keep it
+            const existing = prev.innovations?.find((ex) => ex.id === defItem.id);
+            if (existing && existing.title && existing.status !== 'pending') {
+              return existing;
+            }
+
+            return defItem;
+          });
+
+          return {
+            ...prev,
+            innovations: updatedInnovations,
+          };
+        });
+      },
+      teacherNameLookup
+    );
 
     return () => unsubscribe();
-  }, [isOpen, userEmail]);
+  }, [isOpen, userEmail, userName, profile?.fullName]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear) || new Date().getFullYear();
@@ -458,7 +479,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   // Calculate completed innovations
   const completedInnovationsCount = profile.innovations.filter(
-    (i) => i.status === 'approved' || i.status === 'submitted'
+    (i) => i.status === 'approved' || i.status === 'submitted' || i.status === 'under_review' || (i.title && i.status !== 'pending')
   ).length;
   const progressPercent = Math.round((completedInnovationsCount / 5) * 100);
 
@@ -817,23 +838,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     statusBadge = (
                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
                         <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                        <span>ผ่านการอนุมัติแล้ว</span>
+                        <span>{isAdmin ? 'ผ่านการอนุมัติแล้ว' : 'ส่งแล้ว'}</span>
                       </span>
                     );
                   } else if (item.status === 'submitted') {
                     statusBadge = (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[11px] font-medium">
-                        <Check className="w-3 h-3 text-blue-400" />
-                        <span>ส่งผลงานแล้ว</span>
+                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
+                        <Check className="w-3 h-3 text-emerald-400" />
+                        <span>ส่งแล้ว</span>
                       </span>
                     );
                   } else if (item.status === 'under_review') {
-                    statusBadge = (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-medium">
-                        <RefreshCw className="w-3 h-3 text-purple-400" />
-                        <span>อยู่ระหว่างตรวจสอบ</span>
-                      </span>
-                    );
+                    if (isAdmin) {
+                      statusBadge = (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-medium">
+                          <RefreshCw className="w-3 h-3 text-purple-400" />
+                          <span>อยู่ระหว่างตรวจสอบ</span>
+                        </span>
+                      );
+                    } else {
+                      statusBadge = (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
+                          <Check className="w-3 h-3 text-emerald-400" />
+                          <span>ส่งแล้ว</span>
+                        </span>
+                      );
+                    }
                   }
 
                   return (
@@ -877,48 +907,68 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                 type="text"
                                 defaultValue={item.title}
                                 id={`edit-item-title-${item.id}`}
-                                className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-600 text-xs text-white"
+                                className="w-full px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-600 focus:border-blue-500 outline-none text-xs text-white placeholder-slate-500"
                                 placeholder="ชื่อชิ้นงานสื่อ / นวัตกรรม"
                               />
                               <div className="flex items-center gap-2 flex-wrap">
-                                <select
-                                  id={`edit-item-status-${item.id}`}
-                                  defaultValue={item.status}
-                                  className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-600 text-xs text-slate-200"
-                                >
-                                  <option value="approved">ผ่านการอนุมัติแล้ว</option>
-                                  <option value="submitted">ส่งผลงานแล้ว</option>
-                                  <option value="under_review">อยู่ระหว่างตรวจสอบ</option>
-                                  <option value="pending">รอส่งผลงาน</option>
-                                </select>
+                                {/* Only Admin can choose status dropdown; for general users show fixed 'ส่งแล้ว' */}
+                                {isAdmin ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-[11px] text-amber-300 font-semibold whitespace-nowrap">
+                                      สถานะ (Admin):
+                                    </span>
+                                    <select
+                                      id={`edit-item-status-${item.id}`}
+                                      defaultValue={item.status}
+                                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-amber-500/50 hover:border-amber-400 text-xs text-slate-100 focus:border-amber-400 outline-none cursor-pointer"
+                                      title="เฉพาะ Admin เท่านั้นที่สามารถเปลี่ยนสถานะได้"
+                                    >
+                                      <option value="under_review">อยู่ระหว่างตรวจสอบ</option>
+                                      <option value="submitted">ส่งแล้ว</option>
+                                      <option value="approved">ผ่านการอนุมัติแล้ว</option>
+                                      <option value="pending">รอส่งผลงาน</option>
+                                    </select>
+                                  </div>
+                                ) : (
+                                  <div className="px-3 py-1.5 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-xs font-semibold text-emerald-300 inline-flex items-center gap-1.5 shadow-xs">
+                                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                                    <span>สถานะ: ส่งแล้ว</span>
+                                  </div>
+                                )}
                                 <input
                                   type="text"
                                   id={`edit-item-link-${item.id}`}
                                   defaultValue={item.linkUrl || ''}
-                                  className="flex-1 px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-600 text-xs text-white"
+                                  className="flex-1 min-w-[200px] px-3 py-1.5 rounded-lg bg-slate-900 border border-slate-600 focus:border-blue-500 outline-none text-xs text-white placeholder-slate-500"
                                   placeholder="ลิงก์ผลงาน (Google Drive / YouTube / เว็บไซต์)"
                                 />
                                 <button
                                   type="button"
                                   onClick={() => {
                                     const titleEl = document.getElementById(`edit-item-title-${item.id}`) as HTMLInputElement;
-                                    const statusEl = document.getElementById(`edit-item-status-${item.id}`) as HTMLSelectElement;
+                                    const statusEl = document.getElementById(`edit-item-status-${item.id}`) as HTMLSelectElement | null;
                                     const linkEl = document.getElementById(`edit-item-link-${item.id}`) as HTMLInputElement;
+                                    
+                                    // Only admin can set custom status from dropdown; general users default to 'submitted' (ส่งแล้ว)
+                                    const newStatus = isAdmin && statusEl
+                                      ? (statusEl.value as any)
+                                      : 'submitted';
+
                                     handleUpdateInnovation(item.id, {
                                       title: titleEl?.value || item.title,
-                                      status: (statusEl?.value as any) || item.status,
+                                      status: newStatus,
                                       linkUrl: linkEl?.value || item.linkUrl,
                                       submittedDate: new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }),
                                     });
                                   }}
-                                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold"
+                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"
                                 >
                                   บันทึกชิ้นนี้
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => setEditingInnovationId(null)}
-                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs"
+                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs cursor-pointer transition-colors"
                                 >
                                   ยกเลิก
                                 </button>
@@ -927,15 +977,23 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                           ) : (
                             <>
                               <h4 className="text-sm font-semibold text-white tracking-normal line-clamp-1">
-                                {item.title}
+                                {item.title || (
+                                  <span className="text-slate-400 italic font-normal">
+                                    ยังไม่ได้ส่งสื่อชิ้นที่ {item.id} (รอการส่งผลงาน)
+                                  </span>
+                                )}
                               </h4>
-                              {item.notes && (
+                              {item.notes ? (
                                 <p className="text-xs text-slate-400 line-clamp-1 mt-0.5">
                                   {item.notes}
                                 </p>
+                              ) : (
+                                <p className="text-[11px] text-slate-500 line-clamp-1 mt-0.5">
+                                  สามารถกดปุ่ม "ส่งสื่อ 5 ชิ้น" ที่หน้าแรกเพื่ออัปโหลดชิ้นงานนี้
+                                </p>
                               )}
                               <div className="flex items-center gap-3 text-[11px] text-slate-500 mt-1">
-                                <span>วันที่ส่ง: {item.submittedDate}</span>
+                                <span>วันที่ส่ง: {item.submittedDate || '-'}</span>
                                 {item.linkUrl && (
                                   <a
                                     href={item.linkUrl}

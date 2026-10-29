@@ -17,7 +17,8 @@ import {
   BookOpen,
   Edit3,
   Trash2,
-  AlertCircle
+  AlertCircle,
+  Search
 } from 'lucide-react';
 import { 
   GRADE_LEVELS, 
@@ -39,15 +40,17 @@ import {
 interface TeacherInnovationSubmissionModalProps {
   userEmail: string;
   defaultTeacherName?: string;
+  initialTab?: 'form' | 'status' | 'sheets';
   onClose: () => void;
 }
 
 export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmissionModalProps> = ({
   userEmail,
   defaultTeacherName = '',
+  initialTab = 'form',
   onClose,
 }) => {
-  const [activeTab, setActiveTab] = useState<'form' | 'status' | 'sheets'>('form');
+  const [activeTab, setActiveTab] = useState<'form' | 'status' | 'sheets'>(initialTab);
 
   // Form states matching exact questionnaire
   const [teacherName, setTeacherName] = useState(defaultTeacherName);
@@ -61,8 +64,11 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [onlineUrl, setOnlineUrl] = useState('');
   const [imagePreview, setImagePreview] = useState<string | null>(null);
 
-  // Filter state for viewing by Subject Group
+  // Filter state for viewing by Subject Group & Status search
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all');
+  const [statusSearchTerm, setStatusSearchTerm] = useState<string>('');
+  const [selectedTeacherView, setSelectedTeacherView] = useState<string>('my'); // 'my' | 'all' | email
+  const [statusCompletionFilter, setStatusCompletionFilter] = useState<'all' | 'complete' | 'incomplete'>('all');
 
   // Edit mode state
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -82,17 +88,22 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Subscribe to real-time submissions
+  // Subscribe to real-time submissions with case-insensitivity & teacherName fallback
   useEffect(() => {
-    const unsubUser = subscribeUserInnovations(userEmail, (list) => {
-      setUserSubmissions(list);
-      if (list.length > 0) {
-        const prevGroup = list.find((s) => s.subjectGroup)?.subjectGroup;
-        if (prevGroup && !editingId) {
-          setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
+    const targetName = defaultTeacherName || teacherName;
+    const unsubUser = subscribeUserInnovations(
+      userEmail,
+      (list) => {
+        setUserSubmissions(list);
+        if (list.length > 0) {
+          const prevGroup = list.find((s) => s.subjectGroup)?.subjectGroup;
+          if (prevGroup && !editingId) {
+            setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
+          }
         }
-      }
-    });
+      },
+      targetName
+    );
     const unsubAll = subscribeAllInnovations((list) => {
       setAllSubmissions(list);
     });
@@ -100,7 +111,42 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       unsubUser();
       unsubAll();
     };
-  }, [userEmail, editingId]);
+  }, [userEmail, defaultTeacherName, editingId]);
+
+  // Combined user submissions to ensure 0% missing items due to casing or name variations
+  const effectiveUserSubmissions = React.useMemo(() => {
+    const normEmail = userEmail.trim().toLowerCase();
+    const normName = (teacherName || defaultTeacherName || '').trim().toLowerCase();
+
+    const fromAll = allSubmissions.filter((sub) => {
+      const subEmail = (sub.userEmail || '').trim().toLowerCase();
+      const subName = (sub.teacherName || '').trim().toLowerCase();
+      const emailMatches = normEmail && subEmail === normEmail;
+      const nameMatches = normName && (subName === normName || (normName.length > 3 && subName.includes(normName)));
+      return emailMatches || nameMatches;
+    });
+
+    if (fromAll.length > 0) {
+      // Merge unique by id
+      const map = new Map<string, InnovationSubmission>();
+      userSubmissions.forEach(s => map.set(s.id, s));
+      fromAll.forEach(s => map.set(s.id, s));
+      const merged = Array.from(map.values());
+      merged.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+      return merged;
+    }
+
+    return userSubmissions;
+  }, [allSubmissions, userSubmissions, userEmail, teacherName, defaultTeacherName]);
+
+  // Calculate next unsubmitted item slot (1 to 5)
+  const nextUnsubmittedSlot = React.useMemo(() => {
+    for (let i = 1; i <= 5; i++) {
+      const exists = effectiveUserSubmissions.some((s) => Number(s.itemNumber) === i);
+      if (!exists) return i;
+    }
+    return 1;
+  }, [effectiveUserSubmissions]);
 
   // Handle image upload & compression
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -381,7 +427,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
             }`}
           >
             <Clock className="w-4 h-4" />
-            <span>เช็คสถานะการส่ง ({userSubmissions.length} รายการ)</span>
+            <span>เช็คสถานะการส่ง ({effectiveUserSubmissions.length}/5 ชิ้น)</span>
           </button>
 
           <button
@@ -445,34 +491,91 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
               )}
 
               {submitSuccess && !editingId && (
-                <div className="mb-6 p-4 rounded-2xl bg-emerald-950/60 border border-emerald-500/40 flex items-start gap-3">
+                <div className="mb-6 p-4 rounded-2xl bg-emerald-950/70 border border-emerald-500/50 flex items-start gap-3 shadow-lg shadow-emerald-950/50 animate-in fade-in">
                   <CheckCircle2 className="w-6 h-6 text-emerald-400 flex-shrink-0 mt-0.5" />
                   <div className="flex-1">
                     <h4 className="text-sm font-bold text-emerald-300">
                       บันทึกข้อมูลสื่อชิ้นที่ {itemNumber === 1 ? 5 : itemNumber - 1} ลงฐานข้อมูลสำเร็จ!
                     </h4>
                     <p className="text-xs text-slate-300 mt-1">
-                      ข้อมูลถูกจัดเก็บในฐานข้อมูล Firebase Project <span className="font-semibold text-white">"System Test"</span> เรียบร้อยแล้ว พร้อมส่งต่อไปยังคลังสื่อคุณครูผลิตเอง และเชื่อมโยงไปยังอีเมล <span className="text-emerald-300">{ADMIN_TARGET_EMAIL}</span>
+                      ข้อมูลถูกจัดเก็บในฐานข้อมูล Firebase Project <span className="font-semibold text-white">"System Test"</span> เรียบร้อยแล้ว พร้อมนำไปแสดงผลในคลังสื่อคุณครู และบันทึกสถานะการส่ง {effectiveUserSubmissions.length}/5 ชิ้น
                     </p>
-                    <div className="mt-3 flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setSubmitSuccess(false)}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors"
-                      >
-                        ส่งสื่อชิ้นถัดไป (ชิ้นที่ {itemNumber})
-                      </button>
+                    <div className="mt-3 flex items-center gap-2 flex-wrap">
                       <button
                         type="button"
                         onClick={() => setActiveTab('status')}
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs transition-colors"
+                        className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-blue-600/30 transition-all cursor-pointer"
                       >
-                        ดูสถานะการส่งทั้งหมด
+                        <Clock className="w-3.5 h-3.5" />
+                        <span>ตรวจสอบสถานะส่งสื่อ 5 ชิ้น ทันที</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSubmitSuccess(false);
+                          setItemNumber(nextUnsubmittedSlot);
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl bg-emerald-700/80 hover:bg-emerald-600 text-white text-xs font-semibold transition-colors"
+                      >
+                        ส่งสื่อชิ้นถัดไป (ชิ้นที่ {itemNumber})
                       </button>
                     </div>
                   </div>
                 </div>
               )}
+
+              {/* 5-Item Progress Chips Bar */}
+              <div className="mb-5 p-3.5 rounded-2xl bg-gradient-to-r from-blue-950/40 via-indigo-950/30 to-slate-900 border border-blue-500/30 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-amber-400" />
+                    <span className="font-bold text-white">ความคืบหน้าการส่งสื่อ:</span>
+                    <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 font-bold text-[11px] border border-blue-400/30">
+                      {effectiveUserSubmissions.length} จาก 5 ชิ้น ({Math.round((effectiveUserSubmissions.length / 5) * 100)}%)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('status')}
+                    className="text-blue-400 hover:text-blue-300 font-semibold underline text-xs flex items-center gap-1 transition-colors"
+                  >
+                    <span>เปิดหน้าเช็คสถานะละเอียด</span>
+                    <ExternalLink className="w-3 h-3" />
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-5 gap-2">
+                  {[1, 2, 3, 4, 5].map((slot) => {
+                    const found = effectiveUserSubmissions.find((s) => Number(s.itemNumber) === slot);
+                    const isSelected = itemNumber === slot;
+                    return (
+                      <button
+                        key={slot}
+                        type="button"
+                        onClick={() => {
+                          setItemNumber(slot);
+                          if (found && !editingId) {
+                            handleStartEdit(found);
+                          }
+                        }}
+                        className={`p-2 rounded-xl text-center border transition-all cursor-pointer ${
+                          isSelected
+                            ? 'border-blue-400 bg-blue-600/30 text-white font-bold ring-2 ring-blue-500/40 shadow-sm'
+                            : found
+                            ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300 font-medium hover:border-emerald-400'
+                            : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700'
+                        }`}
+                        title={found ? `ชิ้นที่ ${slot}: ${found.mediaTitle} (คลิกเพื่อแก้ไข)` : `ชิ้นที่ ${slot}: ยังไม่ส่ง (คลิกเพื่อส่ง)`}
+                      >
+                        <div className="text-[10px] opacity-80">ชิ้นที่ {slot}</div>
+                        <div className="text-xs font-bold truncate mt-0.5">
+                          {found ? '✔ ส่งแล้ว' : 'รอส่ง'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
 
               <form onSubmit={handleSubmit} className="space-y-5">
                 {/* Information Header */}
@@ -783,187 +886,499 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
           {/* TAB 2: STATUS */}
           {activeTab === 'status' && (() => {
-            const baseSubmissions = isAdmin && showAllUsersForAdmin ? allSubmissions : userSubmissions;
+            // Determine all unique teachers who have submitted
+            const teacherMap = new Map<string, { email: string; name: string; count: number; group: string }>();
+            allSubmissions.forEach((s) => {
+              const emailKey = (s.userEmail || '').trim().toLowerCase() || s.teacherName.trim().toLowerCase();
+              if (!emailKey) return;
+              const existing = teacherMap.get(emailKey);
+              if (existing) {
+                existing.count++;
+              } else {
+                teacherMap.set(emailKey, {
+                  email: s.userEmail.trim(),
+                  name: s.teacherName.trim(),
+                  count: 1,
+                  group: s.subjectGroup || '',
+                });
+              }
+            });
+            const distinctTeachers = Array.from(teacherMap.values());
+
+            // Active teacher focus for the 5-slot matrix
+            const isViewingSelf = selectedTeacherView === 'my' || selectedTeacherView === userEmail.toLowerCase().trim();
+            const activeTeacherEmail = isViewingSelf ? userEmail.trim().toLowerCase() : selectedTeacherView;
+            
+            // Submissions belonging to the focused teacher for the 5-slot board
+            const focusedTeacherSubmissions = isViewingSelf
+              ? effectiveUserSubmissions
+              : allSubmissions.filter((s) => (s.userEmail || '').trim().toLowerCase() === activeTeacherEmail);
+
+            const focusedTeacherName = isViewingSelf
+              ? (teacherName || defaultTeacherName || userEmail)
+              : (teacherMap.get(activeTeacherEmail)?.name || activeTeacherEmail);
+
+            // Filter submissions list based on search, view mode, subject group, and completion
+            const baseSubmissions = selectedTeacherView === 'my'
+              ? effectiveUserSubmissions
+              : selectedTeacherView === 'all'
+              ? allSubmissions
+              : allSubmissions.filter((s) => (s.userEmail || '').trim().toLowerCase() === selectedTeacherView);
+
             const displayedSubmissions = baseSubmissions.filter((sub) => {
-              if (selectedGroupFilter === 'all') return true;
-              return sub.subjectGroup === selectedGroupFilter;
+              // Subject group filter
+              if (selectedGroupFilter !== 'all' && sub.subjectGroup !== selectedGroupFilter) {
+                return false;
+              }
+
+              // Search term filter (teacher name, title, usage details, email)
+              if (statusSearchTerm.trim()) {
+                const term = statusSearchTerm.trim().toLowerCase();
+                const matchName = (sub.teacherName || '').toLowerCase().includes(term);
+                const matchTitle = (sub.mediaTitle || '').toLowerCase().includes(term);
+                const matchUsage = (sub.usageDetails || '').toLowerCase().includes(term);
+                const matchEmail = (sub.userEmail || '').toLowerCase().includes(term);
+                const matchGroup = (sub.subjectGroup || '').toLowerCase().includes(term);
+                if (!matchName && !matchTitle && !matchUsage && !matchEmail && !matchGroup) {
+                  return false;
+                }
+              }
+
+              return true;
             });
 
+            const completedSlotsCount = [1, 2, 3, 4, 5].filter((slot) =>
+              focusedTeacherSubmissions.some((s) => Number(s.itemNumber) === slot)
+            ).length;
+            const progressPercent = Math.round((completedSlotsCount / 5) * 100);
+
             return (
-              <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700 flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                      <span>
-                        {isAdmin && showAllUsersForAdmin
-                          ? 'สถานะการส่งสื่อของคุณครูทุกคน (สิทธิ์ Admin)'
-                          : `สถานะการส่งสื่อของอีเมล: ${userEmail}`}
-                      </span>
-                      {isAdmin && (
-                        <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold">
-                          Admin Mode
-                        </span>
-                      )}
-                    </h4>
-                    <p className="text-xs text-slate-400">
-                      ส่งแล้วทั้งหมด {baseSubmissions.length} รายการ
-                      {selectedGroupFilter !== 'all' && ` (แสดงกลุ่มสาระที่เลือก: ${displayedSubmissions.length} รายการ)`}
-                      {!(isAdmin && showAllUsersForAdmin) && ' (เป้าหมาย 5 ชิ้น)'}
-                    </p>
+              <div className="space-y-5">
+                {/* 1. Header & Search / Switcher Bar */}
+                <div className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 space-y-3.5 shadow-md">
+                  <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
+                    <div>
+                      <h4 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-blue-400" />
+                        <span>ระบบตรวจสอบและติดตามสถานะการส่งสื่อ 5 ชิ้น</span>
+                      </h4>
+                      <p className="text-xs text-slate-300 mt-0.5">
+                        ตรวจสอบความคืบหน้ารายชิ้นงาน (ชิ้นที่ 1-5) พร้อมค้นหาและตรวจสอบสถานะของคุณครูได้ทุกท่าน
+                      </p>
+                    </div>
+
+                    {/* View Switcher: My Submissions vs All Teachers */}
+                    <div className="flex items-center gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-700/80 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTeacherView('my')}
+                        className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
+                          selectedTeacherView === 'my'
+                            ? 'bg-blue-600 text-white shadow-sm'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        ผลงานของฉัน ({effectiveUserSubmissions.length}/5)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedTeacherView('all')}
+                        className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
+                          selectedTeacherView === 'all'
+                            ? 'bg-indigo-600 text-white shadow-sm'
+                            : 'text-slate-400 hover:text-white'
+                        }`}
+                      >
+                        คุณครูทั้งหมด ({allSubmissions.length} รายการ)
+                      </button>
+                    </div>
                   </div>
-                  <div className="flex items-center gap-2 flex-wrap">
-                    {/* Filter by Subject Group */}
+
+                  {/* Search and Filters Controls */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5 pt-2 border-t border-slate-700/60">
+                    {/* Search Input */}
+                    <div className="relative">
+                      <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                      <input
+                        type="text"
+                        value={statusSearchTerm}
+                        onChange={(e) => setStatusSearchTerm(e.target.value)}
+                        placeholder="ค้นหาชื่อครู, ชื่อสื่อ, กลุ่มสาระ, อีเมล..."
+                        className="w-full pl-8 pr-8 py-2 rounded-xl bg-slate-900/90 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 transition-all"
+                      />
+                      {statusSearchTerm && (
+                        <button
+                          type="button"
+                          onClick={() => setStatusSearchTerm('')}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Subject Group Filter */}
                     <div className="flex items-center gap-1.5 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-700">
-                      <span className="text-xs text-slate-400">กลุ่มสาระ:</span>
+                      <span className="text-xs text-slate-400 whitespace-nowrap">กลุ่มสาระ:</span>
                       <select
                         value={selectedGroupFilter}
                         onChange={(e) => setSelectedGroupFilter(e.target.value)}
-                        className="bg-transparent text-xs text-indigo-300 font-semibold focus:outline-none cursor-pointer"
+                        className="bg-transparent text-xs text-indigo-300 font-semibold focus:outline-none cursor-pointer w-full truncate"
                       >
-                        <option value="all" className="bg-slate-900 text-white">ทุกกลุ่มสาระ ({baseSubmissions.length})</option>
-                        {SUBJECT_GROUPS.map((sg) => {
-                          const count = baseSubmissions.filter(s => s.subjectGroup === sg).length;
-                          return (
-                            <option key={sg} value={sg} className="bg-slate-900 text-white">
-                              {sg} ({count})
-                            </option>
-                          );
-                        })}
+                        <option value="all" className="bg-slate-900 text-white">ทุกกลุ่มสาระการเรียนรู้</option>
+                        {SUBJECT_GROUPS.map((sg) => (
+                          <option key={sg} value={sg} className="bg-slate-900 text-white">
+                            {sg}
+                          </option>
+                        ))}
                       </select>
                     </div>
 
-                    {isAdmin && (
-                      <button
-                        type="button"
-                        onClick={() => setShowAllUsersForAdmin(!showAllUsersForAdmin)}
-                        className="text-xs px-3 py-1.5 rounded-xl bg-slate-700 hover:bg-slate-600 text-amber-300 border border-amber-500/40 font-semibold transition-colors"
+                    {/* Teacher Select Dropdown */}
+                    <div className="flex items-center gap-1.5 bg-slate-900/90 px-3 py-1.5 rounded-xl border border-slate-700">
+                      <span className="text-xs text-slate-400 whitespace-nowrap">เลือกครู:</span>
+                      <select
+                        value={selectedTeacherView}
+                        onChange={(e) => setSelectedTeacherView(e.target.value)}
+                        className="bg-transparent text-xs text-amber-300 font-semibold focus:outline-none cursor-pointer w-full truncate"
                       >
-                        {showAllUsersForAdmin ? 'แสดงเฉพาะของฉัน' : 'แสดงของทุกคน (Admin)'}
-                      </button>
-                    )}
-                    {!(isAdmin && showAllUsersForAdmin) && (
-                      <span className="text-xs px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30">
-                        {userSubmissions.length >= 5 ? 'ครบ 5 ชิ้นแล้ว' : `ขาดอีก ${5 - userSubmissions.length} ชิ้น`}
-                      </span>
-                    )}
+                        <option value="my" className="bg-slate-900 text-white">
+                          บัญชีของฉัน ({userEmail})
+                        </option>
+                        <option value="all" className="bg-slate-900 text-white">
+                          -- แสดงคุณครูทุกท่าน ({distinctTeachers.length} ท่าน) --
+                        </option>
+                        {distinctTeachers.map((t) => (
+                          <option key={t.email} value={t.email.toLowerCase()} className="bg-slate-900 text-white">
+                            {t.name} ({t.count}/5 ชิ้น) - {t.email}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                 </div>
 
-                {displayedSubmissions.length === 0 ? (
-                  <div className="py-12 text-center text-slate-400">
-                    <BookOpen className="w-10 h-10 mx-auto mb-2 text-slate-600" />
-                    <p className="text-sm">
-                      {selectedGroupFilter !== 'all' 
-                        ? `ไม่พบรายการส่งสื่อในกลุ่มสาระ "${selectedGroupFilter}"` 
-                        : 'ยังไม่พบรายการส่งสื่อ (เริ่มต้น 0 รายการ)'}
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSelectedGroupFilter('all');
-                        setEditingId(null);
-                        setActiveTab('form');
-                      }}
-                      className="mt-3 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-semibold transition-colors"
-                    >
-                      ส่งสื่อชิ้นที่ 1 ตอนนี้
-                    </button>
+                {/* 2. Visual 5-Item Progress Board */}
+                <div className="p-4 sm:p-5 rounded-3xl bg-gradient-to-br from-slate-900 via-blue-950/40 to-slate-900 border border-blue-500/30 shadow-xl space-y-4">
+                  <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                          <Layers className="w-4 h-4 text-blue-400" />
+                          <span>แผงสถานะการส่งสื่อ 5 ชิ้น:</span>
+                          <span className="text-amber-300 font-extrabold">{focusedTeacherName}</span>
+                        </span>
+                        {isViewingSelf && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-400/30 font-semibold">
+                            บัญชีของคุณ
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-300">
+                        เกณฑ์มาตรฐาน: ส่งสื่อการจัดการเรียนรู้อย่างน้อย 5 ชิ้น ในปีการศึกษาปัจจุบัน
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 shadow-sm ${
+                        completedSlotsCount >= 5
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                          : 'bg-blue-500/20 text-blue-300 border-blue-400/40'
+                      }`}>
+                        <CheckCircle2 className={`w-3.5 h-3.5 ${completedSlotsCount >= 5 ? 'text-emerald-400' : 'text-blue-400'}`} />
+                        <span>ส่งแล้ว {completedSlotsCount} จาก 5 ชิ้น ({progressPercent}%)</span>
+                      </div>
+                      {completedSlotsCount < 5 && (
+                        <span className="text-xs px-2.5 py-1 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/40 font-semibold">
+                          ขาดอีก {5 - completedSlotsCount} ชิ้น
+                        </span>
+                      )}
+                    </div>
                   </div>
-                ) : (
-                  <div className="space-y-3">
-                    {displayedSubmissions.map((sub) => (
-                      <div
-                        key={sub.id}
-                        className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 hover:border-blue-500/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4"
-                      >
-                        <div className="flex items-start gap-3 flex-1 min-w-0">
-                          {sub.imageUrl ? (
-                            <img
-                              src={sub.imageUrl}
-                              alt={sub.mediaTitle}
-                              className="w-16 h-16 rounded-xl object-cover border border-slate-600 flex-shrink-0"
-                            />
-                          ) : (
-                            <div className="w-16 h-16 rounded-xl bg-blue-900/40 border border-blue-500/30 flex items-center justify-center text-blue-300 flex-shrink-0">
-                              <Layers className="w-6 h-6" />
-                            </div>
-                          )}
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-center gap-2 flex-wrap mb-1">
-                              <span className="px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 font-bold text-xs">
-                                สื่อชิ้นที่ {sub.itemNumber}
+
+                  {/* Progress bar */}
+                  <div className="w-full h-2.5 rounded-full bg-slate-800/90 overflow-hidden p-0.5 border border-slate-700/60">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-blue-500 via-indigo-400 to-emerald-400 transition-all duration-500"
+                      style={{ width: `${progressPercent}%` }}
+                    />
+                  </div>
+
+                  {/* 5 Distinct Item Cards (ชิ้นที่ 1 ถึง ชิ้นที่ 5) */}
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
+                    {[1, 2, 3, 4, 5].map((slotNumber) => {
+                      const match = focusedTeacherSubmissions.find((s) => Number(s.itemNumber) === slotNumber);
+                      const isSubmitted = !!match;
+
+                      return (
+                        <div
+                          key={slotNumber}
+                          className={`rounded-2xl p-3.5 border transition-all flex flex-col justify-between ${
+                            isSubmitted
+                              ? 'bg-slate-800/90 border-emerald-500/50 shadow-md shadow-emerald-950/20 hover:border-emerald-400'
+                              : 'bg-slate-900/60 border-dashed border-slate-700/80 hover:border-slate-600'
+                          }`}
+                        >
+                          <div>
+                            {/* Card Header: Slot Number & Status Badge */}
+                            <div className="flex items-center justify-between gap-1 mb-2">
+                              <span className="text-xs font-black text-white px-2 py-0.5 rounded-md bg-slate-950/60 border border-slate-700">
+                                ชิ้นที่ {slotNumber}
                               </span>
-                              <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium text-xs">
-                                {sub.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์'}
-                              </span>
-                              <span className="text-xs text-slate-400">{sub.gradeLevel}</span>
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                {sub.status}
-                              </span>
-                              {isAdmin && sub.userEmail !== userEmail && (
-                                <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-400/30">
-                                  ครู: {sub.userEmail}
+                              {isSubmitted ? (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                  <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                                  <span>ส่งแล้ว</span>
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                  <Clock className="w-2.5 h-2.5" />
+                                  <span>รอส่ง</span>
                                 </span>
                               )}
                             </div>
-                            <h5 className="text-sm font-bold text-white truncate">{sub.mediaTitle}</h5>
-                            <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
-                              {sub.usageDetails}
-                            </p>
-                            <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
-                              <span className="flex items-center gap-1">
-                                <Clock className="w-3 h-3 text-slate-500" />
-                                {new Date(sub.submittedAt).toLocaleString('th-TH')}
-                              </span>
-                              <span>การจัดทำ: {sub.productionType}</span>
-                              <span>ครูผู้สอน: <strong>{sub.teacherName}</strong></span>
-                            </div>
+
+                            {/* Card Body: Thumbnail or Icon */}
+                            {isSubmitted && match ? (
+                              <div className="space-y-2">
+                                {match.imageUrl ? (
+                                  <div className="w-full h-20 rounded-xl overflow-hidden bg-slate-950 border border-slate-700 relative">
+                                    <img
+                                      src={match.imageUrl}
+                                      alt={match.mediaTitle}
+                                      className="w-full h-full object-cover"
+                                      onError={(e) => {
+                                        (e.target as HTMLImageElement).src = '/acu_active_logo.png';
+                                      }}
+                                    />
+                                    <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-[9px] text-white font-medium">
+                                      {match.mediaType}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="w-full h-16 rounded-xl bg-blue-950/40 border border-blue-500/30 flex items-center justify-center text-blue-300">
+                                    <Layers className="w-6 h-6" />
+                                  </div>
+                                )}
+                                <div>
+                                  <h5 className="text-xs font-bold text-white line-clamp-2 leading-tight" title={match.mediaTitle}>
+                                    {match.mediaTitle}
+                                  </h5>
+                                  <p className="text-[10px] text-slate-400 truncate mt-1">
+                                    {match.subjectGroup || '-'}
+                                  </p>
+                                  <p className="text-[10px] text-slate-500 mt-0.5">
+                                    {new Date(match.submittedAt).toLocaleDateString('th-TH')}
+                                  </p>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="py-6 text-center space-y-1.5">
+                                <div className="w-10 h-10 rounded-2xl bg-slate-800/80 border border-slate-700 mx-auto flex items-center justify-center text-slate-500">
+                                  <Layers className="w-5 h-5" />
+                                </div>
+                                <p className="text-[11px] text-slate-400 font-medium">
+                                  ยังไม่ได้ส่งสื่อชิ้นนี้
+                                </p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Card Footer Actions */}
+                          <div className="mt-3 pt-2.5 border-t border-slate-700/60">
+                            {isSubmitted && match ? (
+                              <div className="flex items-center gap-1.5 justify-between">
+                                {match.onlineUrl ? (
+                                  <a
+                                    href={match.onlineUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="px-2 py-1 rounded-lg bg-slate-700/80 hover:bg-slate-700 text-sky-300 text-[11px] font-medium flex items-center gap-1 transition-colors"
+                                    title="เปิดดูสื่อออนไลน์"
+                                  >
+                                    <ExternalLink className="w-3 h-3" />
+                                    <span>เปิดดู</span>
+                                  </a>
+                                ) : (
+                                  <span />
+                                )}
+
+                                {canUserModify(match.userEmail, userEmail) && (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleStartEdit(match)}
+                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3" />
+                                    <span>แก้ไข</span>
+                                  </button>
+                                )}
+                              </div>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setItemNumber(slotNumber);
+                                  setEditingId(null);
+                                  setActiveTab('form');
+                                }}
+                                className="w-full py-1.5 rounded-xl bg-blue-600/30 hover:bg-blue-600 text-blue-200 hover:text-white border border-blue-500/40 text-[11px] font-bold transition-all flex items-center justify-center gap-1 cursor-pointer"
+                              >
+                                <span>+ ส่งชิ้นที่ {slotNumber}</span>
+                              </button>
+                            )}
                           </div>
                         </div>
-
-                        {/* Actions: Open URL, Edit, Delete */}
-                        <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
-                          {sub.onlineUrl && (
-                            <a
-                              href={sub.onlineUrl}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              className="px-2.5 py-1.5 rounded-xl bg-slate-700/80 hover:bg-slate-700 text-xs text-blue-300 flex items-center gap-1 transition-colors"
-                              title="เปิดดูสื่อออนไลน์"
-                            >
-                              <ExternalLink className="w-3.5 h-3.5" />
-                              <span className="hidden md:inline">เปิดดู</span>
-                            </a>
-                          )}
-
-                          {canUserModify(sub.userEmail, userEmail) && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => handleStartEdit(sub)}
-                                className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
-                                title="แก้ไขข้อมูลสื่อ"
-                              >
-                                <Edit3 className="w-3.5 h-3.5" />
-                                <span>แก้ไข</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={() => handleDeleteSubmission(sub)}
-                                className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
-                                title="ลบข้อมูลสื่อ"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                                <span>ลบ</span>
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
-                )}
+                </div>
+
+                {/* 3. Detailed Submissions Records List */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                    <span>
+                      รายการผลงานที่แสดง: <strong className="text-white">{displayedSubmissions.length}</strong> รายการ
+                      {statusSearchTerm && ` (ค้นหา "${statusSearchTerm}")`}
+                    </span>
+                    {displayedSubmissions.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleCopyGoogleSheetsTab}
+                        className="text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1 cursor-pointer"
+                      >
+                        <Copy className="w-3 h-3" />
+                        <span>คัดลอกตาราง ({displayedSubmissions.length})</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {displayedSubmissions.length === 0 ? (
+                    <div className="py-12 text-center rounded-2xl bg-slate-900/60 border border-slate-800 text-slate-400 space-y-3">
+                      <BookOpen className="w-10 h-10 mx-auto text-slate-600" />
+                      <div>
+                        <p className="text-sm font-semibold text-slate-300">
+                          {statusSearchTerm
+                            ? `ไม่พบผลงานที่ตรงกับคำค้นหา "${statusSearchTerm}"`
+                            : 'ยังไม่พบรายการส่งสื่อตามเงื่อนไขที่เลือก'}
+                        </p>
+                        <p className="text-xs text-slate-500 mt-1">
+                          คุณครูสามารถคลิกปุ่มด้านล่างเพื่อส่งสื่อนวัตกรรมชิ้นแรกได้ทันที
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setSelectedGroupFilter('all');
+                          setStatusSearchTerm('');
+                          setItemNumber(nextUnsubmittedSlot);
+                          setEditingId(null);
+                          setActiveTab('form');
+                        }}
+                        className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-xs text-white font-bold transition-colors shadow-md shadow-blue-600/30"
+                      >
+                        ส่งสื่อชิ้นที่ {nextUnsubmittedSlot} ตอนนี้
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {displayedSubmissions.map((sub) => (
+                        <div
+                          key={sub.id}
+                          className="p-4 rounded-2xl bg-slate-800/80 border border-slate-700/80 hover:border-blue-500/50 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-sm"
+                        >
+                          <div className="flex items-start gap-3 flex-1 min-w-0">
+                            {sub.imageUrl ? (
+                              <img
+                                src={sub.imageUrl}
+                                alt={sub.mediaTitle}
+                                className="w-16 h-16 rounded-xl object-cover border border-slate-600 flex-shrink-0"
+                                onError={(e) => {
+                                  (e.target as HTMLImageElement).src = '/acu_active_logo.png';
+                                }}
+                              />
+                            ) : (
+                              <div className="w-16 h-16 rounded-xl bg-blue-900/40 border border-blue-500/30 flex items-center justify-center text-blue-300 flex-shrink-0">
+                                <Layers className="w-6 h-6" />
+                              </div>
+                            )}
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2 flex-wrap mb-1">
+                                <span className="px-2 py-0.5 rounded-md bg-blue-500/20 text-blue-300 font-bold text-xs">
+                                  สื่อชิ้นที่ {sub.itemNumber}
+                                </span>
+                                <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium text-xs">
+                                  {sub.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์'}
+                                </span>
+                                <span className="text-xs text-slate-400">{sub.gradeLevel}</span>
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-semibold">
+                                  {sub.status || 'ส่งเรียบร้อย'}
+                                </span>
+                                {sub.userEmail && (
+                                  <span className="text-[10px] px-2 py-0.5 rounded-md bg-purple-500/20 text-purple-300 border border-purple-400/30 font-mono">
+                                    {sub.userEmail}
+                                  </span>
+                                )}
+                              </div>
+                              <h5 className="text-sm font-bold text-white truncate">{sub.mediaTitle}</h5>
+                              <p className="text-xs text-slate-300 mt-0.5 line-clamp-1">
+                                {sub.usageDetails}
+                              </p>
+                              <div className="mt-2 flex items-center gap-3 text-[11px] text-slate-400 flex-wrap">
+                                <span className="flex items-center gap-1">
+                                  <Clock className="w-3 h-3 text-slate-500" />
+                                  {new Date(sub.submittedAt).toLocaleString('th-TH')}
+                                </span>
+                                <span>การจัดทำ: <strong className="text-slate-300">{sub.productionType}</strong></span>
+                                <span>ครูผู้สอน: <strong className="text-white">{sub.teacherName}</strong></span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Actions: Open URL, Edit, Delete */}
+                          <div className="flex items-center gap-2 self-end sm:self-center flex-shrink-0">
+                            {sub.onlineUrl && (
+                              <a
+                                href={sub.onlineUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="px-3 py-1.5 rounded-xl bg-slate-700/80 hover:bg-slate-700 text-xs text-blue-300 flex items-center gap-1 transition-colors font-medium"
+                                title="เปิดดูสื่อออนไลน์"
+                              >
+                                <ExternalLink className="w-3.5 h-3.5" />
+                                <span>เปิดดู</span>
+                              </a>
+                            )}
+
+                            {canUserModify(sub.userEmail, userEmail) && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleStartEdit(sub)}
+                                  className="px-3 py-1.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
+                                  title="แก้ไขข้อมูลสื่อ"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                  <span>แก้ไข</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteSubmission(sub)}
+                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
+                                  title="ลบข้อมูลสื่อ"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>ลบ</span>
+                                </button>
+                              </>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             );
           })()}

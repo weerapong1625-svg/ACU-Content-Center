@@ -222,19 +222,22 @@ export async function saveInnovationSubmission(data: {
 
     const selectedSubjectGroup = data.subjectGroup?.trim() || SUBJECT_GROUPS[0];
 
+    const normalizedEmail = data.userEmail.trim().toLowerCase();
+    const itemNum = Number(data.itemNumber) || 1;
+
     const payload: InnovationSubmission = {
       id,
       teacherName: data.teacherName.trim(),
       subjectGroup: selectedSubjectGroup,
       gradeLevel: data.gradeLevel,
-      itemNumber: Number(data.itemNumber) || 1,
+      itemNumber: itemNum,
       mediaTitle: data.mediaTitle.trim(),
       mediaType: data.mediaType,
       productionType: data.productionType,
       usageDetails: data.usageDetails.trim(),
       onlineUrl: data.onlineUrl?.trim() || '',
       imageUrl: data.imageUrl || '',
-      userEmail: data.userEmail.trim(),
+      userEmail: normalizedEmail,
       status: 'ส่งเรียบร้อย',
       submittedAt: nowIso,
       updatedAt: nowIso,
@@ -266,18 +269,64 @@ export async function saveInnovationSubmission(data: {
       description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}${data.productionType ? ` (${data.productionType})` : ''}`,
       mediaType: data.mediaType,
       productionType: data.productionType,
-      itemNumber: Number(data.itemNumber) || 1,
+      itemNumber: itemNum,
       onlineUrl: data.onlineUrl?.trim() || '',
       ratingAvg: 5.0,
       ratingCount: 1,
       views: 1,
       likes: 0,
       likedBy: [],
-      submittedByEmail: data.userEmail.trim(),
+      submittedByEmail: normalizedEmail,
       createdAt: nowIso,
     };
     const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
     await setDoc(mediaRef, mediaPayload, { merge: true });
+
+    // 4. Update the user profile document in user_profiles to keep the 5 slots immediately synchronized
+    try {
+      const safeDocId = encodeURIComponent(normalizedEmail);
+      const profileRef = doc(db, 'user_profiles', safeDocId);
+      const profileSnap = await getDoc(profileRef);
+      if (profileSnap.exists()) {
+        const profData = profileSnap.data();
+        const currentInnos = Array.isArray(profData.innovations) && profData.innovations.length === 5
+          ? [...profData.innovations]
+          : [1, 2, 3, 4, 5].map((slot) => ({
+              id: slot,
+              title: '',
+              category: '',
+              status: 'pending',
+              submittedDate: '-',
+              linkUrl: '',
+              notes: '',
+              coverImageUrl: '',
+            }));
+
+        const slotIndex = itemNum - 1;
+        if (slotIndex >= 0 && slotIndex < 5) {
+          currentInnos[slotIndex] = {
+            id: itemNum,
+            title: data.mediaTitle.trim(),
+            category: data.mediaType,
+            status: 'submitted',
+            submittedDate: new Date().toLocaleDateString('th-TH', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric',
+            }),
+            linkUrl: data.onlineUrl?.trim() || '',
+            coverImageUrl: data.imageUrl || '',
+            notes: `${data.productionType}${data.usageDetails ? ` • ${data.usageDetails}` : ''}`,
+          };
+          await updateDoc(profileRef, {
+            innovations: currentInnos,
+            updatedAt: nowIso,
+          });
+        }
+      }
+    } catch (profErr) {
+      console.warn('Could not sync to user_profiles:', profErr);
+    }
 
     return { success: true, id };
   } catch (error: any) {
@@ -434,23 +483,39 @@ export async function deleteInnovationSubmission(
  */
 export function subscribeUserInnovations(
   userEmail: string,
-  callback: (submissions: InnovationSubmission[]) => void
+  callback: (submissions: InnovationSubmission[]) => void,
+  teacherName?: string
 ): () => void {
-  if (!userEmail) {
+  if (!userEmail && !teacherName) {
     callback([]);
     return () => {};
   }
 
+  const normTargetEmail = (userEmail || '').trim().toLowerCase();
+  const normTargetName = (teacherName || '').trim().toLowerCase();
+
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
-    const q = query(colRef, where('userEmail', '==', userEmail.trim()));
 
     const unsubscribe = onSnapshot(
-      q,
+      colRef,
       (snapshot) => {
         const list: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as InnovationSubmission);
+          const item = docSnap.data() as InnovationSubmission;
+          const itemEmail = (item.userEmail || '').trim().toLowerCase();
+          const itemName = (item.teacherName || '').trim().toLowerCase();
+
+          const matchEmail = normTargetEmail && itemEmail === normTargetEmail;
+          const matchName = normTargetName && (
+            itemName === normTargetName || 
+            (normTargetName.length > 3 && itemName.includes(normTargetName)) ||
+            (itemName.length > 3 && normTargetName.includes(itemName))
+          );
+
+          if (matchEmail || matchName) {
+            list.push(item);
+          }
         });
         // Sort descending by submission time
         list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());

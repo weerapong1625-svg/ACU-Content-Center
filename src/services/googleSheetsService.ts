@@ -244,7 +244,7 @@ export function aggregateTeacherSummary(list: InnovationSubmission[]): TeacherSu
     }
 
     // Assign items
-    const itemNum = sub.itemNumber;
+    const itemNum = Number(sub.itemNumber);
     const title = `${sub.mediaTitle} (${sub.mediaType})`;
     if (itemNum === 1) current.item1 = title;
     else if (itemNum === 2) current.item2 = title;
