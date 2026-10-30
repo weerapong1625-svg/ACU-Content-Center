@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
+import { logUserLogin } from './auditService';
 
 export interface InnovationItem {
   id: number; // 1 to 5
@@ -380,17 +381,84 @@ export async function addVisitorPraiseAndRating(
 }
 
 /**
+ * Synchronously gather all user profiles cached in localStorage
+ */
+export function getAllLocalUserProfilesMap(): Record<string, FullUserProfile> {
+  const map: Record<string, FullUserProfile> = {};
+  if (typeof window === 'undefined') return map;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith(LOCAL_STORAGE_PREFIX)) {
+        const raw = localStorage.getItem(key);
+        if (raw) {
+          try {
+            const parsed = JSON.parse(raw);
+            if (parsed && parsed.email) {
+              map[parsed.email.toLowerCase().trim()] = parsed;
+            }
+          } catch {
+            // ignore
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('Error reading local profiles map:', err);
+  }
+  return map;
+}
+
+/**
  * Increment visit count when viewing profile
+ * Guaranteed to increment locally and sync to audit logs and Firestore
  */
 export async function recordProfileVisit(profileEmail: string): Promise<void> {
+  const normEmail = profileEmail.toLowerCase().trim();
+  if (!normEmail) return;
+
+  // 1. Update in local profile cache immediately
   try {
-    const safeDocId = getSafeDocId(profileEmail);
-    const profileRef = doc(db, 'user_profiles', safeDocId);
-    await updateDoc(profileRef, {
-      'stats.totalViews': increment(1),
+    const cached = getCachedUserProfile(normEmail);
+    if (cached) {
+      cached.stats = {
+        ...cached.stats,
+        totalViews: (cached.stats?.totalViews || 0) + 1,
+      };
+      setCachedUserProfile(cached);
+    }
+  } catch (err) {
+    console.warn('Could not update cached profile totalViews:', err);
+  }
+
+  // 2. Record visit log in auditService so verified visitor statistics increase
+  try {
+    const isAdmin = normEmail === 'weerapong1625@acu.ac.th';
+    await logUserLogin({
+      email: normEmail,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : normEmail.split('@')[0],
+      role: isAdmin ? 'admin' : 'teacher',
+      loginMethod: 'Profile Visit',
     });
-  } catch {
-    // silently ignore if document not ready
+  } catch (err) {
+    // ignore
+  }
+
+  // 3. Update Firestore with setDoc merge
+  try {
+    const safeDocId = getSafeDocId(normEmail);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    await setDoc(
+      profileRef,
+      {
+        stats: {
+          totalViews: increment(1),
+        },
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    // silently ignore quota / offline
   }
 }
 
@@ -400,12 +468,18 @@ export async function recordProfileVisit(profileEmail: string): Promise<void> {
 export function subscribeAllUserProfiles(
   callback: (profilesMap: Record<string, FullUserProfile>) => void
 ): () => void {
+  // Emit local cached profiles immediately
+  const initialLocal = getAllLocalUserProfilesMap();
+  if (Object.keys(initialLocal).length > 0) {
+    callback(initialLocal);
+  }
+
   try {
     const colRef = collection(db, 'user_profiles');
     return onSnapshot(
       colRef,
       (snapshot) => {
-        const map: Record<string, FullUserProfile> = {};
+        const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
           if (d.email) {
@@ -434,11 +508,13 @@ export function subscribeAllUserProfiles(
         callback(map);
       },
       (err) => {
-        console.warn('Realtime user profiles subscription fallback:', err);
+        console.warn('Realtime user profiles subscription fallback (quota/network):', err);
+        callback(getAllLocalUserProfilesMap());
       }
     );
   } catch (err) {
     console.warn('Error subscribing to all user profiles:', err);
+    callback(getAllLocalUserProfilesMap());
     return () => {};
   }
 }

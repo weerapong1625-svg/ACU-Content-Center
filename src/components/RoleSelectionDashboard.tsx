@@ -140,7 +140,22 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })
     );
     setDbStatus('saved');
-  }, [userEmail, userName]);
+
+    // Auto-record user session visit to guarantee visitor statistics increment
+    if (userEmail) {
+      const sessKey = `acu_dash_visit_${userEmail.toLowerCase().trim()}_${now.toISOString().slice(0, 13)}`;
+      if (typeof window !== 'undefined' && !sessionStorage.getItem(sessKey)) {
+        sessionStorage.setItem(sessKey, '1');
+        const isMaster = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
+        logUserLogin({
+          email: userEmail,
+          displayName: profileName || userName || (isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : userEmail.split('@')[0]),
+          role: isMaster ? 'admin' : 'teacher',
+          loginMethod: 'Dashboard Access',
+        });
+      }
+    }
+  }, [userEmail, userName, profileName]);
 
   // Handle Role Selection (View selection only - does not duplicate login visit count)
   const handleSelectRole = (role: 'teacher' | 'student') => {

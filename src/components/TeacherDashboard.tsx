@@ -51,6 +51,7 @@ import {
   Gift
 } from 'lucide-react';
 import { ADMIN_TARGET_EMAIL, subscribeUserInnovations } from '../services/submissionService';
+import { logUserLogin } from '../services/auditService';
 
 interface TeacherDashboardProps {
   userEmail: string;
@@ -82,6 +83,23 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [profile, setProfile] = useState<FullUserProfile | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isPrivilegesModalOpen, setIsPrivilegesModalOpen] = useState(false);
+
+  // Auto-record visit for visitor statistics
+  useEffect(() => {
+    if (userEmail) {
+      const sessKey = `acu_teach_visit_${userEmail.toLowerCase().trim()}_${new Date().toISOString().slice(0, 13)}`;
+      if (typeof window !== 'undefined' && !sessionStorage.getItem(sessKey)) {
+        sessionStorage.setItem(sessKey, '1');
+        const isMaster = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
+        logUserLogin({
+          email: userEmail,
+          displayName: profile?.fullName || profile?.displayName || (isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : userEmail.split('@')[0]),
+          role: isMaster ? 'admin' : 'teacher',
+          loginMethod: 'Teacher Dashboard',
+        });
+      }
+    }
+  }, [userEmail, profile?.fullName]);
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);

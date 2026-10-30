@@ -17,6 +17,7 @@ import {
   WARNING_BEFORE_TIMEOUT_MS,
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
+import { logUserLogin } from './services/auditService';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -60,6 +61,22 @@ export default function App() {
     }
   });
 
+  // Auto-record visit for active or returning session
+  React.useEffect(() => {
+    if (!loggedInUser) return;
+    const sessionKey = `acu_visit_logged_${loggedInUser}_${new Date().toISOString().slice(0, 13)}`;
+    if (typeof window !== 'undefined' && !sessionStorage.getItem(sessionKey)) {
+      sessionStorage.setItem(sessionKey, '1');
+      const isAdmin = loggedInUser.toLowerCase() === 'weerapong1625@acu.ac.th';
+      logUserLogin({
+        email: loggedInUser,
+        displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : loggedInUser.split('@')[0],
+        role: isAdmin ? 'admin' : 'teacher',
+        loginMethod: 'Session Visit',
+      });
+    }
+  }, [loggedInUser]);
+
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
     try {
@@ -84,6 +101,13 @@ export default function App() {
     } catch {
       // ignore
     }
+    const isAdmin = email.toLowerCase() === 'weerapong1625@acu.ac.th';
+    logUserLogin({
+      email,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : email.split('@')[0],
+      role: isAdmin ? 'admin' : 'teacher',
+      loginMethod: 'Direct Login',
+    });
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)
