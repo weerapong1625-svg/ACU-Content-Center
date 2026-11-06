@@ -51,7 +51,6 @@ import {
   Gift
 } from 'lucide-react';
 import { ADMIN_TARGET_EMAIL, subscribeUserInnovations } from '../services/submissionService';
-import { logUserLogin } from '../services/auditService';
 
 interface TeacherDashboardProps {
   userEmail: string;
@@ -83,23 +82,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [profile, setProfile] = useState<FullUserProfile | null>(null);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isPrivilegesModalOpen, setIsPrivilegesModalOpen] = useState(false);
-
-  // Auto-record visit for visitor statistics
-  useEffect(() => {
-    if (userEmail) {
-      const sessKey = `acu_teach_visit_${userEmail.toLowerCase().trim()}_${new Date().toISOString().slice(0, 13)}`;
-      if (typeof window !== 'undefined' && !sessionStorage.getItem(sessKey)) {
-        sessionStorage.setItem(sessKey, '1');
-        const isMaster = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
-        logUserLogin({
-          email: userEmail,
-          displayName: profile?.fullName || profile?.displayName || (isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : userEmail.split('@')[0]),
-          role: isMaster ? 'admin' : 'teacher',
-          loginMethod: 'Teacher Dashboard',
-        });
-      }
-    }
-  }, [userEmail, profile?.fullName]);
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
@@ -478,16 +460,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-            <button
-              type="button"
-              onClick={() => setActiveModalId('btn-1')}
-              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-transform hover:scale-105 flex items-center gap-1.5 cursor-pointer"
-            >
-              <UploadCloud className="w-3.5 h-3.5" />
-              <span>ส่งสื่อนวัตกรรม 5 ชิ้น</span>
-            </button>
-          </div>
+          {/* Welcome header without extra upload button */}
         </section>
 
         {/* Special Privileges Activity Banner: โพสต์แชร์แหล่งเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม */}
