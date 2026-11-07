@@ -29,71 +29,30 @@ export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 let lastLogTime = 0;
 let lastLogEmail = '';
 
+const FAKE_SAMPLE_EMAILS = new Set([
+  'kanda@acu.ac.th',
+  'pranee@acu.ac.th',
+  'somchai@acu.ac.th',
+  'anchalee@acu.ac.th',
+]);
+
 /**
- * Generate initial baseline logs if storage is empty
- * Ensures authentic statistics across 12 months with Admin having 100+ visits
+ * Filter out any legacy synthetic/seed logs to guarantee authentic real statistics
  */
-function generateInitialBaselineLogs(): LoginLogEntry[] {
-  const logs: LoginLogEntry[] = [];
-  const currentYear = new Date().getFullYear() || 2026;
-  const adminEmail = 'weerapong1625@acu.ac.th';
-
-  // Baseline for Admin: 105 visits across months 0..9 (Jan..Oct)
-  for (let i = 0; i < 105; i++) {
-    const month = i % 10;
-    const day = (i % 28) + 1;
-    const hour = 8 + (i % 10);
-    const minute = (i * 7) % 60;
-    const d = new Date(currentYear, month, day, hour, minute, 0);
-    logs.push({
-      id: `seed-log-admin-${i}`,
-      email: adminEmail,
-      displayName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
-      role: 'admin',
-      loginMethod: 'Google SSO',
-      status: 'online',
-      loginTimestamp: d.toISOString(),
-      source: 'ACU Learning Media & Innovation Portal',
-      avatarUrl: '',
-    });
-  }
-
-  // Baseline for other active school accounts
-  const sampleTeachers = [
-    { email: 'kanda@acu.ac.th', name: 'มิสกานดา รุ่งเรือง', count: 24 },
-    { email: 'pranee@acu.ac.th', name: 'มิสปราณี สุขสวัสดิ์', count: 18 },
-    { email: 'somchai@acu.ac.th', name: 'ม.สมชาย พงษ์สิทธิ์', count: 21 },
-    { email: 'anchalee@acu.ac.th', name: 'มิสอัญชลี จันทร์โอชา', count: 15 },
-  ];
-
-  sampleTeachers.forEach((t, tIdx) => {
-    for (let j = 0; j < t.count; j++) {
-      const month = j % 10;
-      const day = (j % 27) + 1;
-      const hour = 9 + (j % 8);
-      const minute = (j * 11) % 60;
-      const d = new Date(currentYear, month, day, hour, minute, 0);
-      logs.push({
-        id: `seed-log-teacher-${tIdx}-${j}`,
-        email: t.email,
-        displayName: t.name,
-        role: 'teacher',
-        loginMethod: 'Google SSO',
-        status: 'online',
-        loginTimestamp: d.toISOString(),
-        source: 'ACU Learning Media & Innovation Portal',
-        avatarUrl: '',
-      });
-    }
+function sanitizeAuthenticLogs(logs: any[]): LoginLogEntry[] {
+  if (!Array.isArray(logs)) return [];
+  return logs.filter((log) => {
+    if (!log || typeof log !== 'object') return false;
+    const id = String(log.id || '');
+    if (id.startsWith('seed-') || id.includes('seed-log-')) return false;
+    const email = String(log.email || '').toLowerCase().trim();
+    if (FAKE_SAMPLE_EMAILS.has(email)) return false;
+    return Boolean(email && log.loginTimestamp);
   });
-
-  // Sort descending by timestamp
-  logs.sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
-  return logs;
 }
 
 /**
- * Synchronously read cached login logs from localStorage with default seed baseline
+ * Synchronously read authentic login logs from localStorage (strictly genuine logs only)
  */
 export function getLocalLoginLogs(): LoginLogEntry[] {
   if (typeof window === 'undefined') return [];
@@ -101,17 +60,19 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
     const raw = localStorage.getItem(LOGIN_LOGS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const authentic = sanitizeAuthenticLogs(parsed);
+        // Clean out any cached seeds immediately
+        if (authentic.length !== parsed.length) {
+          localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(authentic));
+        }
+        return authentic;
       }
     }
-    const baseline = generateInitialBaselineLogs();
-    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(baseline));
-    return baseline;
   } catch (err) {
     console.warn('Could not read local login logs:', err);
-    return [];
   }
+  return [];
 }
 
 /**
@@ -133,14 +94,16 @@ export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): voi
  * Merge Firestore logs with local logs without duplicates
  */
 function mergeLogs(primary: LoginLogEntry[], secondary: LoginLogEntry[]): LoginLogEntry[] {
+  const cleanPrimary = sanitizeAuthenticLogs(primary);
+  const cleanSecondary = sanitizeAuthenticLogs(secondary);
   const map = new Map<string, LoginLogEntry>();
 
-  primary.forEach((log) => {
+  cleanPrimary.forEach((log) => {
     const key = log.id || `${log.email}_${log.loginTimestamp}`;
     map.set(key, log);
   });
 
-  secondary.forEach((log) => {
+  cleanSecondary.forEach((log) => {
     const key = log.id || `${log.email}_${log.loginTimestamp}`;
     if (!map.has(key)) {
       map.set(key, log);

@@ -85,14 +85,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   // Profile Data State initialized synchronously to prevent delay
   const isMasterWeerapong = userEmail.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
 
-  // Check if current active session user is Admin (weerapong1625@acu.ac.th)
+  // Check if current active session operator is Admin (weerapong1625@acu.ac.th)
   const activeViewerEmail = (
     currentUserEmail ||
     (typeof window !== 'undefined' ? (localStorage.getItem('acu_current_user_email') || localStorage.getItem('acu_user_email') || '') : '') ||
-    userEmail ||
     ''
   ).trim().toLowerCase();
-  const isAdmin = isSuperAdmin(activeViewerEmail) || isSuperAdmin(userEmail);
+  const isAdmin = isSuperAdmin(activeViewerEmail);
   const [profile, setProfile] = useState<FullUserProfile>(() => {
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
@@ -200,8 +199,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           setSchoolInput(fullData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
           setRoleInput(fullData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
         }
-        // Increment visit count
-        recordProfileVisit(userEmail);
       } catch (err) {
         console.error('Error loading full profile:', err);
       }
@@ -1664,17 +1661,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               <LogOut className="w-3.5 h-3.5 rotate-180" />
               <span>กดออกหน้านี้</span>
             </button>
-            {activeTab === 'info' && (
-              <button
-                type="button"
-                onClick={handleSaveProfile}
-                disabled={isSaving}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-colors inline-flex items-center gap-1.5"
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>บันทึก</span>
-              </button>
-            )}
           </div>
         </div>
 

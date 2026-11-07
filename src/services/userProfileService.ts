@@ -319,6 +319,24 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
     };
 
     await setDoc(profileRef, payload, { merge: true });
+
+    // Sync current session display name if saving active user profile
+    if (typeof window !== 'undefined') {
+      try {
+        const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
+        if (currentEmail === profile.email.trim().toLowerCase()) {
+          if (profile.fullName) {
+            localStorage.setItem('acu_current_user_name', profile.fullName);
+            localStorage.setItem('acu_user_name', profile.fullName);
+          }
+        }
+        window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
+        window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: payload }));
+      } catch {
+        // ignore
+      }
+    }
+
     return true;
   } catch (err) {
     console.error('Failed to save full user profile to Firestore:', err);
