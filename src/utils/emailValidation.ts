@@ -122,23 +122,24 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
     };
   }
 
-  // Check allowed educational and Google mail domains
+  // Check allowed educational, Gmail, and standard email provider domains
   const isAcuDomain = domainPart === 'acu.ac.th';
   const isGmailDomain = domainPart === 'gmail.com';
   const isGoogleWorkspace = domainPart.endsWith('.edu') || domainPart.endsWith('.ac.th') || domainPart === 'google.com';
+  const isStandardProvider = /^(gmail\.com|acu\.ac\.th|hotmail\.com|outlook\.com|yahoo\.com|icloud\.com|live\.com|windowslive\.com|mail\.com|proton\.me|protonmail\.com)$/.test(domainPart) || domainPart.endsWith('.ac.th') || domainPart.endsWith('.edu') || domainPart.endsWith('.go.th');
 
-  if (!isAcuDomain && !isGmailDomain && !isGoogleWorkspace) {
+  if (!isStandardProvider) {
     return {
       isValid: false,
-      errorMessage: `โดเมน "@${domainPart}" ไม่อยู่ในฐานข้อมูลบัญชีผู้ใช้งานที่รองรับ กรุณาใช้บัญชี @acu.ac.th หรือ @gmail.com ที่มีอยู่จริงเท่านั้น`,
+      errorMessage: `โดเมน "@${domainPart}" ไม่อยู่ในรายชื่อผู้ให้บริการที่รองรับ กรุณาใช้บัญชี @acu.ac.th, @gmail.com หรือบัญชีอีเมลมาตรฐานที่ถูกต้อง`,
     };
   }
 
-  // Gmail-specific username length rule: standard Gmail addresses must be at least 6 characters
-  if (isGmailDomain && localPart.replace(/[._-]/g, '').length < 6) {
+  // Minimum username length: at least 2 characters
+  if (localPart.replace(/[._-]/g, '').length < 2) {
     return {
       isValid: false,
-      errorMessage: 'ชื่อบัญชี Gmail ต้องมีความยาวอย่างน้อย 6 ตัวอักษรตามมาตรฐาน Google Account กรุณากรอกใหม่',
+      errorMessage: 'ชื่อบัญชีอีเมลสั้นเกินไป กรุณาตรวจสอบและกรอกใหม่ให้ถูกต้อง',
     };
   }
 

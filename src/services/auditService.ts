@@ -37,11 +37,35 @@ const FAKE_SAMPLE_EMAILS = new Set([
 ]);
 
 /**
- * Filter out any legacy synthetic/seed logs to guarantee authentic real statistics
+ * Deduplicate rapid consecutive duplicate logs (e.g. within 2 minutes for the same user)
+ */
+function deduplicateConsecutiveLogs(logs: LoginLogEntry[]): LoginLogEntry[] {
+  if (logs.length <= 1) return logs;
+  const sorted = [...logs].sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
+  const result: LoginLogEntry[] = [];
+  
+  for (let i = 0; i < sorted.length; i++) {
+    const current = sorted[i];
+    const prev = result[result.length - 1];
+    if (prev && prev.email.toLowerCase().trim() === current.email.toLowerCase().trim()) {
+      const prevTime = new Date(prev.loginTimestamp).getTime();
+      const currTime = new Date(current.loginTimestamp).getTime();
+      // If within 2 minutes (120,000 ms), it is an unwanted duplicate from double-logging
+      if (Math.abs(prevTime - currTime) < 120000) {
+        continue;
+      }
+    }
+    result.push(current);
+  }
+  return result;
+}
+
+/**
+ * Filter out any legacy synthetic/seed logs and collapse double-counts to guarantee authentic real statistics
  */
 function sanitizeAuthenticLogs(logs: any[]): LoginLogEntry[] {
   if (!Array.isArray(logs)) return [];
-  return logs.filter((log) => {
+  const valid = logs.filter((log) => {
     if (!log || typeof log !== 'object') return false;
     const id = String(log.id || '');
     if (id.startsWith('seed-') || id.includes('seed-log-')) return false;
@@ -49,6 +73,7 @@ function sanitizeAuthenticLogs(logs: any[]): LoginLogEntry[] {
     if (FAKE_SAMPLE_EMAILS.has(email)) return false;
     return Boolean(email && log.loginTimestamp);
   });
+  return deduplicateConsecutiveLogs(valid);
 }
 
 /**
@@ -62,7 +87,7 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         const authentic = sanitizeAuthenticLogs(parsed);
-        // Clean out any cached seeds immediately
+        // Clean out any cached seeds or duplicate logs immediately
         if (authentic.length !== parsed.length) {
           localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(authentic));
         }
@@ -81,9 +106,10 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
 export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(logs));
+    const sanitized = sanitizeAuthenticLogs(logs);
+    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(sanitized));
     if (broadcast) {
-      window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: logs }));
+      window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: sanitized }));
     }
   } catch (err) {
     console.warn('Could not save login logs to localStorage:', err);
@@ -111,8 +137,7 @@ function mergeLogs(primary: LoginLogEntry[], secondary: LoginLogEntry[]): LoginL
   });
 
   const merged = Array.from(map.values());
-  merged.sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
-  return merged;
+  return deduplicateConsecutiveLogs(merged);
 }
 
 /**
@@ -130,8 +155,8 @@ export async function logUserLogin(data: {
   const normEmail = data.email.toLowerCase().trim();
   const now = Date.now();
 
-  // Deduplication check: ignore duplicate calls within 5 seconds for the exact same email
-  if (normEmail === lastLogEmail && now - lastLogTime < 5000) {
+  // Deduplication check: ignore duplicate calls within 60 seconds for the exact same email
+  if (normEmail === lastLogEmail && now - lastLogTime < 60000) {
     return null;
   }
 
@@ -140,7 +165,7 @@ export async function logUserLogin(data: {
     if (typeof window !== 'undefined' && window.sessionStorage) {
       const sessEmail = sessionStorage.getItem('acu_last_login_logged_email');
       const sessTime = Number(sessionStorage.getItem('acu_last_login_logged_time') || 0);
-      if (sessEmail === normEmail && now - sessTime < 5000) {
+      if (sessEmail === normEmail && now - sessTime < 60000) {
         return null;
       }
       sessionStorage.setItem('acu_last_login_logged_email', normEmail);

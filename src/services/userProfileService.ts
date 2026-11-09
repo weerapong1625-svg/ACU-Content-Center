@@ -15,7 +15,6 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
-import { logUserLogin } from './auditService';
 
 export interface InnovationItem {
   id: number; // 1 to 5
@@ -449,20 +448,7 @@ export async function recordProfileVisit(profileEmail: string): Promise<void> {
     console.warn('Could not update cached profile totalViews:', err);
   }
 
-  // 2. Record visit log in auditService so verified visitor statistics increase
-  try {
-    const isAdmin = normEmail === 'weerapong1625@acu.ac.th';
-    await logUserLogin({
-      email: normEmail,
-      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : normEmail.split('@')[0],
-      role: isAdmin ? 'admin' : 'teacher',
-      loginMethod: 'Profile Visit',
-    });
-  } catch (err) {
-    // ignore
-  }
-
-  // 3. Update Firestore with setDoc merge
+  // 2. Update Firestore with setDoc merge
   try {
     const safeDocId = getSafeDocId(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
@@ -869,13 +855,22 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
   }
 
   try {
-    // 1. Fetch all documents across all 5 major collections
+    const safeGetDocs = async (colName: string) => {
+      try {
+        return await getDocs(collection(db, colName));
+      } catch (e) {
+        console.warn(`Could not getDocs for ${colName}:`, e);
+        return { docs: [], size: 0 } as any;
+      }
+    };
+
+    // 1. Fetch all documents across all 5 major collections safely
     const [profilesSnap, logsSnap, innovSnap, sysSnap, mediaSnap] = await Promise.all([
-      getDocs(collection(db, 'user_profiles')),
-      getDocs(collection(db, 'login_logs')),
-      getDocs(collection(db, 'teacher_innovations_submissions')),
-      getDocs(collection(db, 'system_test_submissions')),
-      getDocs(collection(db, 'teacher_media_repository')),
+      safeGetDocs('user_profiles'),
+      safeGetDocs('login_logs'),
+      safeGetDocs('teacher_innovations_submissions'),
+      safeGetDocs('system_test_submissions'),
+      safeGetDocs('teacher_media_repository'),
     ]);
 
     const discrepancies: EmailAuditDiscrepancy[] = [];

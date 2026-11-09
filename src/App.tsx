@@ -61,21 +61,34 @@ export default function App() {
     }
   });
 
+  // Unified single-point visit recorder to strictly guarantee 1 visit = 1 count
+  const recordLoginVisit = useCallback((email: string, method: string) => {
+    const norm = email.toLowerCase().trim();
+    if (!norm) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const sessionKey = `acu_visit_logged_${norm}_${todayStr}`;
+    
+    if (typeof window !== 'undefined') {
+      if (sessionStorage.getItem(sessionKey)) {
+        return; // Already logged today in this session
+      }
+      sessionStorage.setItem(sessionKey, '1');
+    }
+
+    const isAdmin = norm === 'weerapong1625@acu.ac.th';
+    logUserLogin({
+      email: norm,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : norm.split('@')[0],
+      role: isAdmin ? 'admin' : 'teacher',
+      loginMethod: method,
+    });
+  }, []);
+
   // Auto-record visit for active or returning session
   React.useEffect(() => {
     if (!loggedInUser) return;
-    const sessionKey = `acu_visit_logged_${loggedInUser}_${new Date().toISOString().slice(0, 13)}`;
-    if (typeof window !== 'undefined' && !sessionStorage.getItem(sessionKey)) {
-      sessionStorage.setItem(sessionKey, '1');
-      const isAdmin = loggedInUser.toLowerCase() === 'weerapong1625@acu.ac.th';
-      logUserLogin({
-        email: loggedInUser,
-        displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : loggedInUser.split('@')[0],
-        role: isAdmin ? 'admin' : 'teacher',
-        loginMethod: 'Session Visit',
-      });
-    }
-  }, [loggedInUser]);
+    recordLoginVisit(loggedInUser, 'Session Visit');
+  }, [loggedInUser, recordLoginVisit]);
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
@@ -101,13 +114,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    const isAdmin = email.toLowerCase() === 'weerapong1625@acu.ac.th';
-    logUserLogin({
-      email,
-      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : email.split('@')[0],
-      role: isAdmin ? 'admin' : 'teacher',
-      loginMethod: 'Direct Login',
-    });
+    recordLoginVisit(email, 'Direct Login');
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)
