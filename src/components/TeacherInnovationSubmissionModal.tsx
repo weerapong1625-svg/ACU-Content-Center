@@ -316,6 +316,11 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     }
     const res = await deleteInnovationSubmission(sub.id, userEmail);
     if (res.success) {
+      setUserSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+      setAllSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+      if (editingId === sub.id) {
+        handleCancelEdit();
+      }
       setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
       setTimeout(() => setActionNotice(null), 3000);
     } else {
@@ -495,13 +500,29 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                       </p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleCancelEdit}
-                    className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors"
-                  >
-                    ยกเลิกการแก้ไข
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const targetSub = userSubmissions.find((s) => s.id === editingId) || allSubmissions.find((s) => s.id === editingId);
+                        if (targetSub) {
+                          handleDeleteSubmission(targetSub);
+                        }
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-rose-600/30 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-bold transition-colors flex items-center gap-1 cursor-pointer"
+                      title="ลบสื่อชิ้นนี้ออกจากระบบ"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>ลบสื่อชิ้นนี้</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleCancelEdit}
+                      className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium transition-colors cursor-pointer"
+                    >
+                      ยกเลิกการแก้ไข
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1219,14 +1240,26 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                 )}
 
                                 {canUserModify(match.userEmail, userEmail) && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleStartEdit(match)}
-                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3" />
-                                    <span>แก้ไข</span>
-                                  </button>
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartEdit(match)}
+                                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      title="แก้ไขสื่อชิ้นนี้"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                      <span>แก้ไข</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteSubmission(match)}
+                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      title="ลบสื่อชิ้นนี้"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>ลบ</span>
+                                    </button>
+                                  </>
                                 )}
                               </div>
                             ) : (

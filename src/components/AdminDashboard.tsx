@@ -116,7 +116,9 @@ import {
   subscribeAllLoginLogs,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
-  resetAllLoginLogs
+  resetAllLoginLogs,
+  resetAdminLoginLogs,
+  resetOthersLoginLogs
 } from '../services/auditService';
 import {
   PopupBannerConfig,
@@ -255,6 +257,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Reset visitor logs modal state
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
+  const [resetTargetMode, setResetTargetMode] = useState<'admin_only' | 'others_only' | 'all'>('admin_only');
   const [isResettingLogs, setIsResettingLogs] = useState(false);
 
   // Image preview modal state
@@ -294,6 +297,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     );
 
     if (!confirmed) return;
+
+    // Immediately remove from Admin Dashboard state (0ms latency)
+    setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== norm));
+    setUserProfilesMap((prev) => {
+      const next = { ...prev };
+      delete next[norm];
+      return next;
+    });
+    setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
+    setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
 
     setIsDeletingUserDirect(true);
     try {
@@ -365,6 +378,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (cfg.sheetUrl) setGoogleSheetsUrl(cfg.sheetUrl);
     });
 
+    // Listen to real-time user deleted event
+    const handleUserDeletedEvent = (e: any) => {
+      const email = e.detail?.email;
+      if (email) {
+        const norm = String(email).trim().toLowerCase();
+        setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== norm));
+        setUserProfilesMap((prev) => {
+          const next = { ...prev };
+          delete next[norm];
+          return next;
+        });
+        setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
+        setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
+      }
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('acu_user_deleted', handleUserDeletedEvent);
+    }
+
     return () => {
       unsubInnovations();
       unsubFacilities();
@@ -375,6 +408,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubProfiles();
       unsubBanner();
       unsubPrivileges();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_user_deleted', handleUserDeletedEvent);
+      }
     };
   }, []);
 
@@ -1266,17 +1302,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Reset all visitor login logs to 0
-  const handleResetVisitorLogs = async () => {
+  // Reset visitor login logs based on target mode (Admin only, Others only, or All)
+  // Strictly preserves media and innovation databases
+  const handleExecuteResetVisitorLogs = async (mode: 'admin_only' | 'others_only' | 'all') => {
     setIsResettingLogs(true);
     try {
-      const res = await resetAllLoginLogs();
-      if (res.success) {
-        setLoginLogs([]);
-        setShowResetConfirmModal(false);
-        showToast(`รีเซ็ตสถิติผู้เข้าชมเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ เริ่มนับจริงทีละ 1 ตั้งแต่วันนี้)`);
+      const adminEmail = SUPER_ADMIN_EMAIL;
+      const normAdmin = adminEmail.toLowerCase().trim();
+
+      if (mode === 'admin_only') {
+        const res = await resetAdminLoginLogs(adminEmail);
+        if (res.success) {
+          // 0ms optimistic UI update: filter out Admin logs immediately
+          setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== normAdmin));
+          setShowResetConfirmModal(false);
+          showToast(`รีเซ็ตสถิติเข้าชมของ Admin เป็น 0 เรียบร้อยแล้ว (ลบประวัติ ${res.count} รายการ) สถิติรายเดือนเริ่มนับใหม่ตามจริง`);
+        } else {
+          alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        }
+      } else if (mode === 'others_only') {
+        const res = await resetOthersLoginLogs(adminEmail);
+        if (res.success) {
+          // 0ms optimistic UI update: keep only Admin logs immediately
+          setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() === normAdmin));
+          setShowResetConfirmModal(false);
+          showToast(`รีเซ็ตสถิติเข้าชมของผู้อื่นทั้งหมดเป็น 0 เรียบร้อยแล้ว (ลบประวัติ ${res.count} รายการ) สถิติรายเดือนเริ่มนับใหม่ตามจริง`);
+        } else {
+          alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        }
       } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        const res = await resetAllLoginLogs();
+        if (res.success) {
+          // 0ms optimistic UI update: clear all logs
+          setLoginLogs([]);
+          setShowResetConfirmModal(false);
+          showToast(`รีเซ็ตสถิติเข้าชมทั้งหมดทุกบัญชีเป็น 0 เรียบร้อยแล้ว (ลบประวัติ ${res.count} รายการ) สถิติรายเดือนทั้งหมดเริ่มนับ 1 ใหม่ตามจริง`);
+        } else {
+          alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        }
       }
     } catch (err: any) {
       alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
@@ -1732,7 +1795,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex items-center gap-2 flex-wrap">
                   <span className="text-xs text-slate-400 font-medium">เลือกปีที่เข้าชม:</span>
                   <select
                     value={selectedYear}
@@ -1745,6 +1808,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                       </option>
                     ))}
                   </select>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setResetTargetMode('admin_only');
+                      setShowResetConfirmModal(true);
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                    title="รีเซ็ตสถิติผู้เข้าชมเป็น 0 (เลือกของตนเองหรือของผู้อื่น)"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-red-400" />
+                    <span>รีเซ็ตสถิติเป็น 0</span>
+                  </button>
                 </div>
               </div>
 
@@ -4642,36 +4718,134 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       )}
 
       {/* =========================================================================
-          Reset All Visitor Logs Confirmation Modal
+          Reset Visitor Logs Confirmation Modal (Admin Self / Others / All)
          ========================================================================= */}
       {showResetConfirmModal && (
         <div
-          className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          className="fixed inset-0 z-[170] flex items-center justify-center p-3 sm:p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
           onClick={() => !isResettingLogs && setShowResetConfirmModal(false)}
         >
           <div
-            className="relative w-full max-w-md bg-slate-900 border border-red-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            className="relative w-full max-w-lg bg-slate-900 border border-red-500/40 rounded-3xl p-5 sm:p-6 shadow-2xl text-white space-y-4 max-h-[92vh] overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-3 pb-3 border-b border-slate-800">
               <div className="w-11 h-11 rounded-2xl bg-red-500/20 text-red-300 border border-red-500/30 flex items-center justify-center flex-shrink-0">
                 <RotateCcw className="w-6 h-6" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">รีเซ็ตสถิติผู้เข้าชมระบบเป็น 0</h3>
-                <p className="text-xs text-slate-400">เริ่มต้นนับสถิติใหม่ตามการ Login จริงเท่านั้น</p>
+                <h3 className="text-base font-bold text-white">จัดการรีเซ็ตสถิติผู้เข้าชมเป็น 0</h3>
+                <p className="text-xs text-slate-400">เลือกกลุ่มเป้าหมายเพื่อเริ่มต้นนับใหม่ตามการ Login จริง</p>
               </div>
             </div>
 
-            <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
-              <p className="font-semibold text-red-300 flex items-center gap-1.5">
-                <AlertTriangle className="w-4 h-4 text-amber-400" />
-                <span>คำเตือน: การกระทำนี้ไม่สามารถย้อนกลับได้</span>
+            {/* Target Mode Selection Cards */}
+            <div className="space-y-2.5">
+              <p className="text-xs font-semibold text-slate-300">กรุณาเลือกรูปแบบที่ต้องการรีเซ็ต:</p>
+
+              {/* Option 1: Admin Only */}
+              <div
+                onClick={() => !isResettingLogs && setResetTargetMode('admin_only')}
+                className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  resetTargetMode === 'admin_only'
+                    ? 'bg-red-500/15 border-red-500/60 shadow-md shadow-red-950/30'
+                    : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="reset_mode"
+                    checked={resetTargetMode === 'admin_only'}
+                    onChange={() => setResetTargetMode('admin_only')}
+                    className="mt-1 text-red-500 focus:ring-red-400 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-white">1. รีเซ็ตสถิติของ Admin เป็น 0 (เฉพาะตนเอง)</span>
+                      <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 text-[10px] font-semibold">
+                        บัญชี Admin ปัจจุบัน
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                      ล้างประวัติการเข้าชมเฉพาะของ Admin (<strong className="text-slate-300">{SUPER_ADMIN_EMAIL}</strong>) ให้เป็น 0 ครั้งทันที ยอดสถิติรายเดือนของแอดมินจะถูกรีเซ็ตเพื่อเริ่มนับใหม่ โดยไม่กระทบสถิติของครูหรือผู้ใช้อื่น
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Option 2: Others Only */}
+              <div
+                onClick={() => !isResettingLogs && setResetTargetMode('others_only')}
+                className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  resetTargetMode === 'others_only'
+                    ? 'bg-red-500/15 border-red-500/60 shadow-md shadow-red-950/30'
+                    : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="reset_mode"
+                    checked={resetTargetMode === 'others_only'}
+                    onChange={() => setResetTargetMode('others_only')}
+                    className="mt-1 text-red-500 focus:ring-red-400 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-white">2. รีเซ็ตสถิติของคนอื่นทั้งหมดเป็น 0 (ยกเว้น Admin)</span>
+                      <span className="px-2 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[10px] font-semibold">
+                        ครู / ผู้ใช้อื่นทุกคน
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                      ล้างประวัติการเข้าชมของครูและผู้ใช้งานคนอื่นทั้งหมดเป็น 0 ครั้งทันที ยอดรายเดือนของผู้ใช้งานจะถูกรีเซ็ตเพื่อนับใหม่ โดยคงสถิติและประวัติของ Admin ไว้ตามเดิม
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Option 3: All Accounts */}
+              <div
+                onClick={() => !isResettingLogs && setResetTargetMode('all')}
+                className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                  resetTargetMode === 'all'
+                    ? 'bg-red-500/15 border-red-500/60 shadow-md shadow-red-950/30'
+                    : 'bg-slate-800/60 border-slate-700/60 hover:bg-slate-800'
+                }`}
+              >
+                <div className="flex items-start gap-3">
+                  <input
+                    type="radio"
+                    name="reset_mode"
+                    checked={resetTargetMode === 'all'}
+                    onChange={() => setResetTargetMode('all')}
+                    className="mt-1 text-red-500 focus:ring-red-400 cursor-pointer"
+                  />
+                  <div className="flex-1">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-xs font-bold text-white">3. รีเซ็ตสถิติทั้งหมดทุกบัญชีเป็น 0 (รวมทุกคน)</span>
+                      <span className="px-2 py-0.5 rounded-full bg-red-500/20 text-red-300 border border-red-500/30 text-[10px] font-semibold">
+                        ทั้งระบบ
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                      ล้างประวัติการเข้าชมของทุกบัญชีในระบบ (ทั้ง Admin และผู้ใช้งานทั้งหมด) เป็น 0 ครั้งทันที ยอดรายเดือนทั้งหมดจะถูกรีเซ็ตเป็น 0 เพื่อเริ่มนับ 1 ใหม่ตามการ Login จริง
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Safety Guarantee Notice */}
+            <div className="p-3.5 rounded-2xl bg-slate-800/80 border border-slate-700/80 text-xs text-slate-300 space-y-1.5">
+              <p className="font-semibold text-emerald-400 flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+                <span>รับประกันความปลอดภัยฐานข้อมูลสื่อ</span>
               </p>
-              <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
-                <li>ข้อมูลสถิติผู้เข้าชมทั้งของ <strong>Admin</strong> และ <strong>ผู้ใช้งานทั้งหมด</strong> จะถูกรีเซ็ตเป็น 0</li>
-                <li>ระบบจะเริ่มนับสถิติใหม่อย่างแม่นยำ โดยเมื่อมีการ Login สำเร็จจะนับเป็นเข้าชม 1 ครั้ง และนับเพิ่มทีละ 1 ตามจริงเท่านั้น</li>
-              </ul>
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                การรีเซ็ตนี้จะจัดการเฉพาะข้อมูลประวัติการเข้าสู่ระบบ (Login Logs) และสถิติการเข้าชมเท่านั้น จะ<strong>ไม่มีการแตะต้อง</strong>ฐานข้อมูลการส่งสื่อ นวัตกรรม 5 ชิ้น คลังสื่อครู หรือการจองสถานที่ใดๆ ทั้งสิ้น ข้อมูลผลงานทั้งหมดจะยังคงอยู่ครบถ้วน 100%
+              </p>
             </div>
 
             <div className="pt-2 flex items-center justify-end gap-2.5">
@@ -4685,12 +4859,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </button>
               <button
                 type="button"
-                onClick={handleResetVisitorLogs}
+                onClick={() => handleExecuteResetVisitorLogs(resetTargetMode)}
                 disabled={isResettingLogs}
                 className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md shadow-red-900/30"
               >
                 <RotateCcw className={`w-4 h-4 ${isResettingLogs ? 'animate-spin' : ''}`} />
-                <span>{isResettingLogs ? 'กำลังรีเซ็ตสถิติ...' : 'ยืนยันรีเซ็ตเป็น 0'}</span>
+                <span>
+                  {isResettingLogs
+                    ? 'กำลังรีเซ็ตสถิติ...'
+                    : resetTargetMode === 'admin_only'
+                    ? 'ยืนยันรีเซ็ตเฉพาะ Admin เป็น 0'
+                    : resetTargetMode === 'others_only'
+                    ? 'ยืนยันรีเซ็ตผู้อื่นทั้งหมดเป็น 0'
+                    : 'ยืนยันรีเซ็ตทั้งหมดทุกบัญชีเป็น 0'}
+                </span>
               </button>
             </div>
           </div>
@@ -4733,6 +4915,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         facilities={facilities}
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
+          const norm = deletedEmail.trim().toLowerCase();
+          setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== norm));
+          setUserProfilesMap((prev) => {
+            const next = { ...prev };
+            delete next[norm];
+            return next;
+          });
+          setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
+          setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
         }}
         onOpenEmailAudit={() => {
@@ -4747,6 +4938,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         onClose={() => setShowEmailAuditModal(false)}
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
+          const norm = deletedEmail.trim().toLowerCase();
+          setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== norm));
+          setUserProfilesMap((prev) => {
+            const next = { ...prev };
+            delete next[norm];
+            return next;
+          });
+          setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
+          setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
         }}
       />
