@@ -13,7 +13,7 @@ import {
   query, 
   where 
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
 
 export interface InnovationItem {
@@ -156,6 +156,28 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
 }
 
 /**
+ * Helper to ensure innovation items are consistently formatted and that unsubmitted slots are pending
+ */
+function sanitizeInnovations(items: any): InnovationItem[] {
+  if (!Array.isArray(items) || items.length !== 5) {
+    return DEFAULT_INNOVATION_ITEMS;
+  }
+  return items.map((item, idx) => {
+    const hasTitle = item && typeof item.title === 'string' && item.title.trim().length > 0;
+    return {
+      id: idx + 1,
+      title: hasTitle ? item.title.trim() : '',
+      category: item?.category || '',
+      status: hasTitle ? (item.status === 'pending' ? 'submitted' : item.status || 'submitted') : 'pending',
+      submittedDate: hasTitle ? (item.submittedDate || 'ส่งแล้ว') : '-',
+      linkUrl: item?.linkUrl || '',
+      notes: item?.notes || '',
+      coverImageUrl: item?.coverImageUrl || '',
+    };
+  });
+}
+
+/**
  * Real-time subscription to full user profile in Firestore.
  * Automatically synchronizes profile data and avatar across all mobile and desktop devices.
  */
@@ -179,9 +201,7 @@ export function subscribeFullUserProfile(
             displayName: data.displayName || data.fullName || email.split('@')[0],
             avatarUrl: data.avatarUrl || '',
             role: data.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
-            innovations: Array.isArray(data.innovations) && data.innovations.length === 5 
-              ? data.innovations 
-              : DEFAULT_INNOVATION_ITEMS,
+            innovations: sanitizeInnovations(data.innovations),
             stats: {
               totalViews: typeof data.stats?.totalViews === 'number' ? data.stats.totalViews : 0,
               uniqueVisitors: typeof data.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 0,
@@ -199,13 +219,28 @@ export function subscribeFullUserProfile(
         }
       },
       (error) => {
-        console.warn('Realtime profile subscription warning:', error);
+        if (isQuotaExceededError(error)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for profile subscription; serving from cache.');
+          const cached = getCachedUserProfile(email);
+          if (cached) {
+            onUpdate(cached);
+            return;
+          }
+        } else {
+          console.warn('Realtime profile subscription warning:', error);
+        }
         fetchFullUserProfile(email).then(onUpdate);
       }
     );
     return unsubscribe;
   } catch (err) {
-    console.warn('Could not initialize profile subscription:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached while subscribing to profile; serving from local cache.');
+    } else {
+      console.warn('Could not initialize profile subscription:', err);
+    }
     fetchFullUserProfile(email).then(onUpdate);
     return () => {};
   }
@@ -223,6 +258,7 @@ export async function fetchFullUserProfile(
   const safeDocId = getSafeDocId(email);
   const profileRef = doc(db, 'user_profiles', safeDocId);
 
+  let isQuotaExceeded = false;
   try {
     const snapshot = await getDoc(profileRef);
     if (snapshot.exists()) {
@@ -235,9 +271,7 @@ export async function fetchFullUserProfile(
         displayName: data.displayName || initialDisplayName || email.split('@')[0],
         avatarUrl: data.avatarUrl || initialAvatar || '',
         role: data.role || 'ครูผู้สอน',
-        innovations: Array.isArray(data.innovations) && data.innovations.length === 5 
-          ? data.innovations 
-          : DEFAULT_INNOVATION_ITEMS,
+        innovations: sanitizeInnovations(data.innovations),
         stats: {
           totalViews: typeof data.stats?.totalViews === 'number' ? data.stats.totalViews : 0,
           uniqueVisitors: typeof data.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 0,
@@ -255,10 +289,16 @@ export async function fetchFullUserProfile(
       return loadedProfile;
     }
   } catch (err) {
-    console.error('Failed to load user profile from Firestore:', err);
+    if (isQuotaExceededError(err)) {
+      isQuotaExceeded = true;
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached for user profile; serving from local cache.');
+    } else {
+      console.warn('Notice loading user profile from Firestore:', err);
+    }
   }
 
-  // If not yet in Firestore, construct default and persist
+  // If not yet in Firestore or quota reached, construct default and persist locally
   const isMasterWeerapong = email.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
   const defaultProfile: FullUserProfile = cached || {
     email: email,
@@ -281,8 +321,16 @@ export async function fetchFullUserProfile(
   };
 
   setCachedUserProfile(defaultProfile);
-  // Asynchronously save initial document in background
-  saveFullUserProfile(defaultProfile).catch((e) => console.warn('Sync initial profile error:', e));
+  // Asynchronously save initial document in background only when quota is not exhausted
+  if (!isQuotaExceeded) {
+    saveFullUserProfile(defaultProfile).catch((e) => {
+      if (isQuotaExceededError(e)) {
+        notifyQuotaExceeded();
+      } else {
+        console.warn('Sync initial profile notice:', e);
+      }
+    });
+  }
 
   return defaultProfile;
 }
@@ -291,54 +339,62 @@ export async function fetchFullUserProfile(
  * Save Full User Profile to Firestore & Cache
  */
 export async function saveFullUserProfile(profile: FullUserProfile): Promise<boolean> {
-  setCachedUserProfile(profile);
+  const sanitizedProfile: FullUserProfile = {
+    ...profile,
+    innovations: sanitizeInnovations(profile.innovations),
+  };
+  setCachedUserProfile(sanitizedProfile);
+
+  const payload = {
+    email: sanitizedProfile.email,
+    fullName: sanitizedProfile.fullName || '',
+    nickname: sanitizedProfile.nickname || '',
+    school: sanitizedProfile.school || '',
+    displayName: sanitizedProfile.displayName || '',
+    avatarUrl: sanitizedProfile.avatarUrl || '',
+    role: sanitizedProfile.role || 'ครูผู้สอน',
+    innovations: sanitizedProfile.innovations,
+    stats: profile.stats || {
+      totalViews: 0,
+      uniqueVisitors: 0,
+      points: 0,
+      averageRating: 0,
+      totalRatings: 0,
+    },
+    praises: profile.praises || DEFAULT_INITIAL_PRAISES,
+    updatedAt: new Date().toISOString(),
+  };
+
+  // Sync current session display name if saving active user profile
+  if (typeof window !== 'undefined') {
+    try {
+      const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
+      if (currentEmail === profile.email.trim().toLowerCase()) {
+        if (profile.fullName) {
+          localStorage.setItem('acu_current_user_name', profile.fullName);
+          localStorage.setItem('acu_user_name', profile.fullName);
+        }
+      }
+      window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
+      window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: payload }));
+    } catch {
+      // ignore
+    }
+  }
 
   try {
     const safeDocId = getSafeDocId(profile.email);
     const profileRef = doc(db, 'user_profiles', safeDocId);
 
-    const payload = {
-      email: profile.email,
-      fullName: profile.fullName || '',
-      nickname: profile.nickname || '',
-      school: profile.school || '',
-      displayName: profile.displayName || '',
-      avatarUrl: profile.avatarUrl || '',
-      role: profile.role || 'ครูผู้สอน',
-      innovations: profile.innovations || DEFAULT_INNOVATION_ITEMS,
-      stats: profile.stats || {
-        totalViews: 0,
-        uniqueVisitors: 0,
-        points: 0,
-        averageRating: 0,
-        totalRatings: 0,
-      },
-      praises: profile.praises || DEFAULT_INITIAL_PRAISES,
-      updatedAt: new Date().toISOString(),
-    };
-
     await setDoc(profileRef, payload, { merge: true });
-
-    // Sync current session display name if saving active user profile
-    if (typeof window !== 'undefined') {
-      try {
-        const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
-        if (currentEmail === profile.email.trim().toLowerCase()) {
-          if (profile.fullName) {
-            localStorage.setItem('acu_current_user_name', profile.fullName);
-            localStorage.setItem('acu_user_name', profile.fullName);
-          }
-        }
-        window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
-        window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: payload }));
-      } catch {
-        // ignore
-      }
-    }
-
     return true;
   } catch (err) {
-    console.error('Failed to save full user profile to Firestore:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached while saving profile; cached in localStorage.');
+      return true; // Still return true because it is safely preserved in local cache
+    }
+    console.warn('Notice saving profile to Firestore:', err);
     return false;
   }
 }
@@ -496,7 +552,7 @@ export function subscribeAllUserProfiles(
               displayName: d.displayName || d.fullName || d.email.split('@')[0],
               avatarUrl: d.avatarUrl || '',
               role: d.role || 'ครูผู้สอน',
-              innovations: d.innovations || DEFAULT_INNOVATION_ITEMS,
+              innovations: sanitizeInnovations(d.innovations),
               stats: d.stats || {
                 totalViews: 0,
                 uniqueVisitors: 0,
@@ -512,6 +568,9 @@ export function subscribeAllUserProfiles(
         callback(map);
       },
       (err) => {
+        if (isQuotaExceededError(err)) {
+          notifyQuotaExceeded();
+        }
         console.warn('Realtime user profiles subscription fallback (quota/network):', err);
         callback(getAllLocalUserProfilesMap());
       }

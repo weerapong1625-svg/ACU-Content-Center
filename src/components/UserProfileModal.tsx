@@ -233,12 +233,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           // Map real submissions into the 5 slots
           const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
             const match = userInnos.find((u) => Number(u.itemNumber) === defItem.id);
-            if (match) {
+            if (match && match.mediaTitle && match.mediaTitle.trim()) {
               return {
                 id: defItem.id,
-                title: match.mediaTitle,
-                category: match.mediaType,
-                status: 'submitted' as const,
+                title: match.mediaTitle.trim(),
+                category: match.mediaType || 'สื่อการสอน',
+                status: (match.status as any) || 'submitted',
                 submittedDate: match.submittedAt
                   ? new Date(match.submittedAt).toLocaleDateString('th-TH', {
                       day: 'numeric',
@@ -252,13 +252,22 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               };
             }
 
-            // If prev had an item that was already submitted or edited, keep it
+            // If prev had an item that was already submitted with a real title, keep it
             const existing = prev.innovations?.find((ex) => ex.id === defItem.id);
-            if (existing && existing.title && existing.status !== 'pending') {
+            if (existing && existing.title && existing.title.trim().length > 0 && existing.status !== 'pending') {
               return existing;
             }
 
-            return defItem;
+            // Empty slot waiting for submission
+            return {
+              ...defItem,
+              status: 'pending' as const,
+              title: '',
+              linkUrl: '',
+              coverImageUrl: '',
+              notes: '',
+              submittedDate: '-',
+            };
           });
 
           return {
@@ -487,9 +496,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
-  // Calculate completed innovations
+  // Calculate completed innovations - strictly requiring a non-empty title AND not pending
   const completedInnovationsCount = profile.innovations.filter(
-    (i) => i.status === 'approved' || i.status === 'submitted' || i.status === 'under_review' || (i.title && i.status !== 'pending')
+    (i) => Boolean(i.title && i.title.trim().length > 0 && i.status !== 'pending')
   ).length;
   const progressPercent = Math.round((completedInnovationsCount / 5) * 100);
 
@@ -837,36 +846,41 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               <div className="space-y-3">
                 {profile.innovations.map((item, idx) => {
                   const isEditing = editingInnovationId === item.id;
+                  const hasRealSubmission = Boolean(item.title && item.title.trim().length > 0 && item.status !== 'pending');
+
                   let statusBadge = (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-medium">
-                      <Clock className="w-3 h-3" />
+                      <Clock className="w-3 h-3 text-amber-400" />
                       <span>รอส่งผลงาน</span>
                     </span>
                   );
 
-                  if (item.status === 'approved') {
-                    statusBadge = (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-400" />
-                        <span>{isAdmin ? 'ผ่านการอนุมัติแล้ว' : 'ส่งแล้ว'}</span>
-                      </span>
-                    );
-                  } else if (item.status === 'submitted') {
-                    statusBadge = (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
-                        <Check className="w-3 h-3 text-emerald-400" />
-                        <span>ส่งแล้ว</span>
-                      </span>
-                    );
-                  } else if (item.status === 'under_review') {
+                  if (hasRealSubmission) {
                     if (isAdmin) {
-                      statusBadge = (
-                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-medium">
-                          <RefreshCw className="w-3 h-3 text-purple-400" />
-                          <span>อยู่ระหว่างตรวจสอบ</span>
-                        </span>
-                      );
+                      if (item.status === 'approved') {
+                        statusBadge = (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            <span>ผ่านการอนุมัติแล้ว</span>
+                          </span>
+                        );
+                      } else if (item.status === 'under_review') {
+                        statusBadge = (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30 text-[11px] font-medium">
+                            <RefreshCw className="w-3 h-3 text-purple-400" />
+                            <span>อยู่ระหว่างตรวจสอบ</span>
+                          </span>
+                        );
+                      } else {
+                        statusBadge = (
+                          <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
+                            <Check className="w-3 h-3 text-emerald-400" />
+                            <span>ส่งแล้ว</span>
+                          </span>
+                        );
+                      }
                     } else {
+                      // For general users: always show 'ส่งแล้ว' when submitted!
                       statusBadge = (
                         <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[11px] font-medium">
                           <Check className="w-3 h-3 text-emerald-400" />
@@ -959,16 +973,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                     const statusEl = document.getElementById(`edit-item-status-${item.id}`) as HTMLSelectElement | null;
                                     const linkEl = document.getElementById(`edit-item-link-${item.id}`) as HTMLInputElement;
                                     
-                                    // Only admin can set custom status from dropdown; general users default to 'submitted' (ส่งแล้ว)
-                                    const newStatus = isAdmin && statusEl
-                                      ? (statusEl.value as any)
-                                      : 'submitted';
+                                    const updatedTitle = titleEl?.value?.trim() || '';
+                                    const hasTitle = updatedTitle.length > 0;
+                                    
+                                    // If title is empty, force status to pending; only admin can choose dropdown, general users get 'submitted'
+                                    const newStatus = !hasTitle
+                                      ? 'pending'
+                                      : (isAdmin && statusEl ? (statusEl.value as any) : 'submitted');
 
                                     handleUpdateInnovation(item.id, {
-                                      title: titleEl?.value || item.title,
+                                      title: updatedTitle,
                                       status: newStatus,
-                                      linkUrl: linkEl?.value || item.linkUrl,
-                                      submittedDate: new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }),
+                                      linkUrl: linkEl?.value?.trim() || item.linkUrl,
+                                      submittedDate: hasTitle
+                                        ? new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })
+                                        : '-',
                                     });
                                   }}
                                   className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"

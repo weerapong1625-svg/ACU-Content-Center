@@ -93,7 +93,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     const unsub = subscribeUserInnovations(
       userEmail,
       (list) => {
-        setUserInnovationsCount(list.length);
+        const distinctSlots = new Set(
+          list
+            .filter((item) => item.mediaTitle && item.mediaTitle.trim().length > 0)
+            .map((item) => Number(item.itemNumber))
+            .filter((num) => num >= 1 && num <= 5)
+        );
+        setUserInnovationsCount(distinctSlots.size);
       },
       profile?.fullName
     );

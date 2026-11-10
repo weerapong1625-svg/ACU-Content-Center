@@ -419,11 +419,7 @@ export function getStoredInnovations(): InnovationSubmission[] {
   } catch (err) {
     console.warn('Failed to read innovations cache:', err);
   }
-  // Initialize with restored default items
-  try {
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(DEFAULT_RESTORED_INNOVATIONS));
-  } catch {}
-  return DEFAULT_RESTORED_INNOVATIONS;
+  return [];
 }
 
 /**
@@ -849,21 +845,32 @@ export function subscribeUserInnovations(
   }
 
   const normTargetEmail = (userEmail || '').trim().toLowerCase();
-  const normTargetName = (teacherName || '').trim().toLowerCase();
+  const rawTargetName = (teacherName || '').trim();
+  const normTargetName = rawTargetName.toLowerCase();
+
+  // A teacher name is generic if missing or default placeholder
+  const isGenericName = !rawTargetName || 
+    normTargetName === 'คุณครูอัสสัมชัญ' || 
+    normTargetName === 'ครูผู้สอน' || 
+    normTargetName === 'ครูผู้สอน / ผู้พัฒนานวัตกรรม' ||
+    normTargetName.length < 4;
 
   const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
     return items.filter((item) => {
       const itemEmail = (item.userEmail || '').trim().toLowerCase();
       const itemName = (item.teacherName || '').trim().toLowerCase();
 
-      const matchEmail = normTargetEmail && itemEmail === normTargetEmail;
-      const matchName = normTargetName && (
-        itemName === normTargetName || 
-        (normTargetName.length > 3 && itemName.includes(normTargetName)) ||
-        (itemName.length > 3 && normTargetName.includes(itemName))
-      );
+      // Authoritative: Exact user email match
+      if (normTargetEmail && itemEmail) {
+        return itemEmail === normTargetEmail;
+      }
 
-      return matchEmail || matchName;
+      // Fallback only when itemEmail is completely missing, and teacher name is specific/non-generic
+      if (!itemEmail && !isGenericName && itemName) {
+        return itemName === normTargetName;
+      }
+
+      return false;
     }).sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   };
 
