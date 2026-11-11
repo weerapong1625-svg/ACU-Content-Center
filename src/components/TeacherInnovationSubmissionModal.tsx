@@ -118,27 +118,12 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     const normEmail = userEmail.trim().toLowerCase();
     const normName = (teacherName || defaultTeacherName || '').trim().toLowerCase();
 
-    const isGenericName = !normName || 
-      normName === 'คุณครูอัสสัมชัญ' || 
-      normName === 'ครูผู้สอน' || 
-      normName === 'ครูผู้สอน / ผู้พัฒนานวัตกรรม' ||
-      normName.length < 4;
-
     const fromAll = allSubmissions.filter((sub) => {
       const subEmail = (sub.userEmail || '').trim().toLowerCase();
       const subName = (sub.teacherName || '').trim().toLowerCase();
-
-      // Authoritative email match
-      if (normEmail && subEmail) {
-        return subEmail === normEmail;
-      }
-
-      // Fallback only if submission has no email, and user name is non-generic
-      if (!subEmail && !isGenericName && subName) {
-        return subName === normName;
-      }
-
-      return false;
+      const emailMatches = normEmail && subEmail === normEmail;
+      const nameMatches = normName && (subName === normName || (normName.length > 3 && subName.includes(normName)));
+      return emailMatches || nameMatches;
     });
 
     if (fromAll.length > 0) {

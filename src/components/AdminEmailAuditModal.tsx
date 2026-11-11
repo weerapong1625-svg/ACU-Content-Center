@@ -184,22 +184,7 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
             </div>
           )}
 
-          {!isLoading && auditResult?.error && (
-            <div className="p-4 rounded-xl bg-red-950/70 border border-red-500/50 text-red-200 text-xs flex items-center justify-between shadow-md">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="w-5 h-5 text-red-400 flex-shrink-0" />
-                <span>{auditResult.error}</span>
-              </div>
-              <button
-                onClick={handleRunAudit}
-                className="px-3 py-1 rounded-lg bg-red-800 hover:bg-red-700 text-white font-semibold text-xs cursor-pointer"
-              >
-                ลองใหม่อีกครั้ง
-              </button>
-            </div>
-          )}
-
-          {!isLoading && auditResult && auditResult.success && (
+          {!isLoading && auditResult && (
             <>
               {/* Top KPI Cards */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">

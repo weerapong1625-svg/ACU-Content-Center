@@ -15,6 +15,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
+import { logUserLogin } from './auditService';
 
 export interface InnovationItem {
   id: number; // 1 to 5
@@ -156,28 +157,6 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
 }
 
 /**
- * Helper to ensure innovation items are consistently formatted and that unsubmitted slots are pending
- */
-function sanitizeInnovations(items: any): InnovationItem[] {
-  if (!Array.isArray(items) || items.length !== 5) {
-    return DEFAULT_INNOVATION_ITEMS;
-  }
-  return items.map((item, idx) => {
-    const hasTitle = item && typeof item.title === 'string' && item.title.trim().length > 0;
-    return {
-      id: idx + 1,
-      title: hasTitle ? item.title.trim() : '',
-      category: item?.category || '',
-      status: hasTitle ? (item.status === 'pending' ? 'submitted' : item.status || 'submitted') : 'pending',
-      submittedDate: hasTitle ? (item.submittedDate || 'ส่งแล้ว') : '-',
-      linkUrl: item?.linkUrl || '',
-      notes: item?.notes || '',
-      coverImageUrl: item?.coverImageUrl || '',
-    };
-  });
-}
-
-/**
  * Real-time subscription to full user profile in Firestore.
  * Automatically synchronizes profile data and avatar across all mobile and desktop devices.
  */
@@ -201,7 +180,9 @@ export function subscribeFullUserProfile(
             displayName: data.displayName || data.fullName || email.split('@')[0],
             avatarUrl: data.avatarUrl || '',
             role: data.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
-            innovations: sanitizeInnovations(data.innovations),
+            innovations: Array.isArray(data.innovations) && data.innovations.length === 5 
+              ? data.innovations 
+              : DEFAULT_INNOVATION_ITEMS,
             stats: {
               totalViews: typeof data.stats?.totalViews === 'number' ? data.stats.totalViews : 0,
               uniqueVisitors: typeof data.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 0,
@@ -255,7 +236,9 @@ export async function fetchFullUserProfile(
         displayName: data.displayName || initialDisplayName || email.split('@')[0],
         avatarUrl: data.avatarUrl || initialAvatar || '',
         role: data.role || 'ครูผู้สอน',
-        innovations: sanitizeInnovations(data.innovations),
+        innovations: Array.isArray(data.innovations) && data.innovations.length === 5 
+          ? data.innovations 
+          : DEFAULT_INNOVATION_ITEMS,
         stats: {
           totalViews: typeof data.stats?.totalViews === 'number' ? data.stats.totalViews : 0,
           uniqueVisitors: typeof data.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 0,
@@ -309,25 +292,21 @@ export async function fetchFullUserProfile(
  * Save Full User Profile to Firestore & Cache
  */
 export async function saveFullUserProfile(profile: FullUserProfile): Promise<boolean> {
-  const sanitizedProfile: FullUserProfile = {
-    ...profile,
-    innovations: sanitizeInnovations(profile.innovations),
-  };
-  setCachedUserProfile(sanitizedProfile);
+  setCachedUserProfile(profile);
 
   try {
     const safeDocId = getSafeDocId(profile.email);
     const profileRef = doc(db, 'user_profiles', safeDocId);
 
     const payload = {
-      email: sanitizedProfile.email,
-      fullName: sanitizedProfile.fullName || '',
-      nickname: sanitizedProfile.nickname || '',
-      school: sanitizedProfile.school || '',
-      displayName: sanitizedProfile.displayName || '',
-      avatarUrl: sanitizedProfile.avatarUrl || '',
-      role: sanitizedProfile.role || 'ครูผู้สอน',
-      innovations: sanitizedProfile.innovations,
+      email: profile.email,
+      fullName: profile.fullName || '',
+      nickname: profile.nickname || '',
+      school: profile.school || '',
+      displayName: profile.displayName || '',
+      avatarUrl: profile.avatarUrl || '',
+      role: profile.role || 'ครูผู้สอน',
+      innovations: profile.innovations || DEFAULT_INNOVATION_ITEMS,
       stats: profile.stats || {
         totalViews: 0,
         uniqueVisitors: 0,
@@ -340,24 +319,6 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
     };
 
     await setDoc(profileRef, payload, { merge: true });
-
-    // Sync current session display name if saving active user profile
-    if (typeof window !== 'undefined') {
-      try {
-        const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
-        if (currentEmail === profile.email.trim().toLowerCase()) {
-          if (profile.fullName) {
-            localStorage.setItem('acu_current_user_name', profile.fullName);
-            localStorage.setItem('acu_user_name', profile.fullName);
-          }
-        }
-        window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
-        window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: payload }));
-      } catch {
-        // ignore
-      }
-    }
-
     return true;
   } catch (err) {
     console.error('Failed to save full user profile to Firestore:', err);
@@ -470,7 +431,20 @@ export async function recordProfileVisit(profileEmail: string): Promise<void> {
     console.warn('Could not update cached profile totalViews:', err);
   }
 
-  // 2. Update Firestore with setDoc merge
+  // 2. Record visit log in auditService so verified visitor statistics increase
+  try {
+    const isAdmin = normEmail === 'weerapong1625@acu.ac.th';
+    await logUserLogin({
+      email: normEmail,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : normEmail.split('@')[0],
+      role: isAdmin ? 'admin' : 'teacher',
+      loginMethod: 'Profile Visit',
+    });
+  } catch (err) {
+    // ignore
+  }
+
+  // 3. Update Firestore with setDoc merge
   try {
     const safeDocId = getSafeDocId(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
@@ -518,7 +492,7 @@ export function subscribeAllUserProfiles(
               displayName: d.displayName || d.fullName || d.email.split('@')[0],
               avatarUrl: d.avatarUrl || '',
               role: d.role || 'ครูผู้สอน',
-              innovations: sanitizeInnovations(d.innovations),
+              innovations: d.innovations || DEFAULT_INNOVATION_ITEMS,
               stats: d.stats || {
                 totalViews: 0,
                 uniqueVisitors: 0,
@@ -877,22 +851,13 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
   }
 
   try {
-    const safeGetDocs = async (colName: string) => {
-      try {
-        return await getDocs(collection(db, colName));
-      } catch (e) {
-        console.warn(`Could not getDocs for ${colName}:`, e);
-        return { docs: [], size: 0 } as any;
-      }
-    };
-
-    // 1. Fetch all documents across all 5 major collections safely
+    // 1. Fetch all documents across all 5 major collections
     const [profilesSnap, logsSnap, innovSnap, sysSnap, mediaSnap] = await Promise.all([
-      safeGetDocs('user_profiles'),
-      safeGetDocs('login_logs'),
-      safeGetDocs('teacher_innovations_submissions'),
-      safeGetDocs('system_test_submissions'),
-      safeGetDocs('teacher_media_repository'),
+      getDocs(collection(db, 'user_profiles')),
+      getDocs(collection(db, 'login_logs')),
+      getDocs(collection(db, 'teacher_innovations_submissions')),
+      getDocs(collection(db, 'system_test_submissions')),
+      getDocs(collection(db, 'teacher_media_repository')),
     ]);
 
     const discrepancies: EmailAuditDiscrepancy[] = [];
