@@ -243,17 +243,14 @@ export function aggregateTeacherSummary(list: InnovationSubmission[]): TeacherSu
       }
     }
 
-    // Assign items only if title exists
-    const itemNum = Number(sub.itemNumber);
-    const hasTitle = Boolean(sub.mediaTitle && sub.mediaTitle.trim().length > 0);
-    if (hasTitle) {
-      const title = `${sub.mediaTitle.trim()} (${sub.mediaType || 'สื่อการสอน'})`;
-      if (itemNum === 1) current.item1 = title;
-      else if (itemNum === 2) current.item2 = title;
-      else if (itemNum === 3) current.item3 = title;
-      else if (itemNum === 4) current.item4 = title;
-      else if (itemNum === 5) current.item5 = title;
-    }
+    // Assign items
+    const itemNum = sub.itemNumber;
+    const title = `${sub.mediaTitle} (${sub.mediaType})`;
+    if (itemNum === 1) current.item1 = title;
+    else if (itemNum === 2) current.item2 = title;
+    else if (itemNum === 3) current.item3 = title;
+    else if (itemNum === 4) current.item4 = title;
+    else if (itemNum === 5) current.item5 = title;
 
     if (new Date(sub.submittedAt).getTime() > new Date(current.lastSubmittedAt).getTime()) {
       current.lastSubmittedAt = sub.submittedAt;

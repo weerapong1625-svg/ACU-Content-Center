@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck, Fingerprint, Camera } from 'lucide-react';
-import { signInWithPopup } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../firebase';
-import { getCachedUserProfile, setCachedUserProfile } from '../services/userProfileService';
+import { logUserLogin } from '../services/auditService';
 import { validateRealGmailAccount } from '../utils/emailValidation';
 import { verifyEmailPassword } from '../services/authCredentialService';
 import { BiometricAuthModal } from './BiometricAuthModal';
@@ -50,6 +48,15 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       // ignore
     }
 
+    // Record audit log - Single accurate login record
+    const isAdmin = verifiedEmail.toLowerCase() === 'weerapong1625@acu.ac.th';
+    await logUserLogin({
+      email: verifiedEmail,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : verifiedEmail.split('@')[0],
+      loginMethod: method,
+      role: isAdmin ? 'admin' : 'teacher',
+    });
+
     setIsLoading(false);
     setIsSuccess(true);
     setActiveUser(verifiedEmail);
@@ -72,6 +79,8 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     if (!validation.isValid) {
       setError(validation.errorMessage);
       setSuggestedFix(validation.suggestedFix || null);
+      // Require user to re-enter if wrong ("หากผู้ใช้งานพิมพ์ผิดให้กรอกใหม่เท่านั้น")
+      setEmail('');
       return;
     }
 
@@ -97,67 +106,6 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       method: 'Email & Password Login',
     });
     setIsBiometricModalOpen(true);
-  };
-
-  // Launch native Google Account Chooser popup ("เด้งไปยังบัญชี Google ที่ผู้ใช้งานแต่ละคนใช้")
-  const handleGoogleSignInDirect = async () => {
-    setError(null);
-    setGoogleError(null);
-    setIsLoading(true);
-
-    try {
-      const result = await signInWithPopup(auth, googleAuthProvider);
-      const googleUser = result.user;
-      const userEmail = googleUser.email?.toLowerCase().trim();
-
-      if (!userEmail) {
-        setError('ไม่พบอีเมลจากบัญชี Google กรุณาลองใหม่อีกครั้ง');
-        setIsLoading(false);
-        return;
-      }
-
-      // Sync name & photo from Google profile into user profile cache
-      if (googleUser.displayName || googleUser.photoURL) {
-        try {
-          const cached = getCachedUserProfile(userEmail);
-          if (cached) {
-            if (googleUser.photoURL && !cached.avatarUrl) {
-              cached.avatarUrl = googleUser.photoURL;
-            }
-            if (googleUser.displayName && (!cached.fullName || cached.fullName === userEmail.split('@')[0])) {
-              cached.fullName = googleUser.displayName;
-              cached.displayName = googleUser.displayName;
-            }
-            setCachedUserProfile(cached);
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
-    } catch (err: any) {
-      console.warn('Google Sign-In notice:', err);
-      setIsLoading(false);
-
-      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
-        // User voluntarily closed the Google popup window
-        return;
-      }
-
-      // If popup was blocked by browser or iframe constraints, open fallback modal
-      if (
-        err?.code === 'auth/popup-blocked' ||
-        err?.code === 'auth/unauthorized-domain' ||
-        err?.code === 'auth/operation-not-allowed'
-      ) {
-        setError('หน้าต่างเลือกบัญชี Google ถูกบล็อกโดยเบราว์เซอร์ กำลังเปิดหน้าต่างเข้าสู่ระบบ...');
-        handleOpenGoogleSso();
-        return;
-      }
-
-      setError(err?.message || 'ไม่สามารถเชื่อมต่อบัญชี Google ได้ กรุณาลองใหม่อีกครั้ง');
-    }
   };
 
   // Open Google SSO Modal - Guaranteed fresh state every time, or loads remembered Gmail (NEVER Admin's)
@@ -201,6 +149,8 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     if (!validation.isValid) {
       setGoogleError(validation.errorMessage);
       setGoogleSuggestedFix(validation.suggestedFix || null);
+      // Require user to re-enter if wrong
+      setGoogleEmail('');
       return;
     }
 
@@ -379,36 +329,32 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       <button
         type="button"
         id="btn-google-sso"
-        onClick={handleGoogleSignInDirect}
+        onClick={handleOpenGoogleSso}
         disabled={isLoading}
         className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-xl bg-white border border-slate-300 hover:border-slate-400 text-slate-700 font-medium shadow-sm hover:shadow-md transition-all duration-200 active:scale-[0.99] disabled:opacity-60 mb-5 group cursor-pointer"
-        title="เข้าสู่ระบบด้วยบัญชี Google ที่คุณใช้งาน (เลือกบัญชี Google บนอุปกรณ์ของคุณ)"
+        title="เข้าสู่ระบบด้วยบัญชี Google (กรอก Gmail ใหม่ทุกครั้ง)"
       >
-        {isLoading ? (
-          <div className="w-5 h-5 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin flex-shrink-0" />
-        ) : (
-          /* Official Google G Logo SVG */
-          <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24">
-            <path
-              fill="#4285F4"
-              d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.26v3.15C3.25 21.36 7.33 24 12 24z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.26C.46 8.17 0 9.99 0 12s.46 3.83 1.26 5.42l4.02-3.15z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.25 2.64 1.26 6.58l4.02 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-            />
-          </svg>
-        )}
+        {/* Official Google G Logo SVG */}
+        <svg className="w-5 h-5 flex-shrink-0" viewBox="0 0 24 24">
+          <path
+            fill="#4285F4"
+            d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17z"
+          />
+          <path
+            fill="#34A853"
+            d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.26v3.15C3.25 21.36 7.33 24 12 24z"
+          />
+          <path
+            fill="#FBBC05"
+            d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.26C.46 8.17 0 9.99 0 12s.46 3.83 1.26 5.42l4.02-3.15z"
+          />
+          <path
+            fill="#EA4335"
+            d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.33 0 3.25 2.64 1.26 6.58l4.02 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
+          />
+        </svg>
         <span className="text-sm font-semibold group-hover:text-slate-900 transition-colors">
-          {isLoading ? 'กำลังเปิดหน้าต่างเลือกบัญชี Google...' : 'ลงชื่อเข้าใช้ด้วยบัญชี Google'}
+          ลงชื่อเข้าใช้ด้วยบัญชี Google
         </span>
       </button>
 

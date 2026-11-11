@@ -53,7 +53,6 @@ import { AdminUserManagementModal } from './AdminUserManagementModal';
 import { AdminEmailAuditModal } from './AdminEmailAuditModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
 import { AdminPrivilegeRewardModal } from './AdminPrivilegeRewardModal';
-import { UserProfileModal } from './UserProfileModal';
 import { 
   TeacherPrivilegeAdminItem, 
   subscribeAllTeachersPrivilegeStatus, 
@@ -249,9 +248,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Direct User Account Deletion Confirmation
   const [directDeleteTarget, setDirectDeleteTarget] = useState<{ email: string; name: string } | null>(null);
   const [isDeletingUserDirect, setIsDeletingUserDirect] = useState(false);
-
-  // Admin View User Profile Modal State
-  const [viewUserProfileTarget, setViewUserProfileTarget] = useState<{ email: string; name: string; avatarUrl: string } | null>(null);
 
   // Reset visitor logs modal state
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
@@ -1046,29 +1042,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       };
     });
 
-    // Compute total unique registered user accounts across system
-    const allSystemAccounts = new Set<string>();
-    loginLogs.forEach(l => {
-      if (l.email) allSystemAccounts.add(l.email.trim().toLowerCase());
-    });
-    Object.keys(userProfilesMap).forEach(e => {
-      if (e) allSystemAccounts.add(e.trim().toLowerCase());
-    });
-    teacherSummaries.forEach(t => {
-      if (t.email) allSystemAccounts.add(t.email.trim().toLowerCase());
-    });
-    const totalAccountsCount = allSystemAccounts.size;
-
     return {
       targetYear,
       totalVisits: yearLogs.length,
       uniqueVisitors: uniqueVisitorEmails,
-      totalAccounts: totalAccountsCount,
       totalMedia: yearInnovations.length,
       totalFacilities: yearFacilities.length,
       monthlyBreakdown,
     };
-  }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, selectedYear]);
+  }, [innovations, facilities, loginLogs, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
@@ -1763,13 +1745,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/60">
                   <div className="text-[11px] text-slate-400 flex items-center gap-1.5">
                     <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
-                    <span>บัญชีผู้เข้าใช้ทั้งหมด (ยอดจริง)</span>
+                    <span>ผู้เข้าชมไม่ซ้ำ (อีเมล)</span>
                   </div>
                   <div className="text-2xl font-black text-emerald-300 mt-1">
-                    {yearlyStats.totalAccounts} <span className="text-xs font-normal text-slate-400">บัญชี</span>
-                  </div>
-                  <div className="text-[10px] text-slate-400 mt-1 flex items-center gap-1">
-                    <span>ปี {selectedYear}: เข้าชม {yearlyStats.uniqueVisitors} บัญชี</span>
+                    {yearlyStats.uniqueVisitors} <span className="text-xs font-normal text-slate-400">บัญชี</span>
                   </div>
                 </div>
 
@@ -2023,7 +2002,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <thead className="bg-slate-800/90 text-slate-400 font-semibold border-b border-slate-700 sticky top-0 z-10 backdrop-blur-sm">
                     <tr>
                       <th className="py-3 px-3.5 text-center w-12">ลำดับ</th>
-                      <th className="py-3 px-3.5">รูปโปรไฟล์</th>
                       <th className="py-3 px-3.5">อีเมลผู้ใช้งาน (Google Account)</th>
                       <th className="py-3 px-3.5">ชื่อ-นามสกุล / ชื่อผู้ใช้</th>
                       <th className="py-3 px-3.5 text-center">บทบาท</th>
@@ -2053,59 +2031,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                         const isSuper = log.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
-                        const normEmail = log.email.trim().toLowerCase();
-                        const profileObj = userProfilesMap[normEmail];
-                        const userAvatar = profileObj?.avatarUrl || log.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(log.displayName || log.email.split('@')[0])}&background=1d4ed8&color=ffffff&size=128&bold=true`;
-
                         return (
                           <tr key={log.id || index} className="hover:bg-slate-800/40 transition-colors">
                             <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
-                            <td className="py-3 px-3.5 text-center">
-                              <button
-                                type="button"
-                                onClick={() => setViewUserProfileTarget({
-                                  email: log.email,
-                                  name: profileObj?.fullName || log.displayName,
-                                  avatarUrl: userAvatar,
-                                })}
-                                className="relative group inline-block focus:outline-none"
-                                title="คลิกเพื่อดูรูปโปรไฟล์และประวัติข้อมูลส่วนตัวของผู้ใช้งานนี้"
-                              >
-                                <img
-                                  src={userAvatar}
-                                  alt={log.displayName}
-                                  className="w-10 h-10 rounded-full object-cover border-2 border-slate-700 group-hover:border-sky-400 group-hover:scale-110 transition-all shadow-md bg-slate-800 cursor-pointer"
-                                  onError={(e) => {
-                                    (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(log.displayName || log.email.split('@')[0])}&background=1d4ed8&color=ffffff&size=128&bold=true`;
-                                  }}
-                                />
-                                <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-blue-600 border border-slate-900 flex items-center justify-center text-white text-[9px] group-hover:bg-sky-400">
-                                  <Eye className="w-2.5 h-2.5" />
-                                </span>
-                              </button>
-                            </td>
-                            <td className="py-3 px-3.5 font-mono text-sky-300 font-medium">
-                              <button
-                                type="button"
-                                onClick={() => setViewUserProfileTarget({
-                                  email: log.email,
-                                  name: profileObj?.fullName || log.displayName,
-                                  avatarUrl: userAvatar,
-                                })}
-                                className="hover:underline text-left cursor-pointer"
-                                title="คลิกเพื่อดูโปรไฟล์ผู้ใช้งาน"
-                              >
-                                {log.email}
-                              </button>
-                            </td>
-                            <td className="py-3 px-3.5 text-white font-medium">
-                              <div className="flex items-center gap-1.5">
-                                <span>{log.displayName}</span>
-                                {profileObj?.nickname && (
-                                  <span className="text-[11px] text-sky-300">({profileObj.nickname})</span>
-                                )}
-                              </div>
-                            </td>
+                            <td className="py-3 px-3.5 font-mono text-sky-300 font-medium">{log.email}</td>
+                            <td className="py-3 px-3.5 text-white font-medium">{log.displayName}</td>
                             <td className="py-3 px-3.5 text-center">
                               <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[11px]">
                                 {log.role === 'teacher' ? 'ครูผู้สอน' : log.role === 'student' ? 'นักเรียน' : 'ผู้ใช้งาน'}
@@ -4760,25 +4690,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           onSuccess={(msg) => {
             showToast(msg);
             setManagingPrivilegeTeacher(null);
-          }}
-        />
-      )}
-
-      {/* Admin View Full User Profile Modal (สามารถเข้าดูโปรไฟล์และรูปภาพของผู้ใช้งานทุกคนได้) */}
-      {viewUserProfileTarget && (
-        <UserProfileModal
-          isOpen={Boolean(viewUserProfileTarget)}
-          onClose={() => setViewUserProfileTarget(null)}
-          userEmail={viewUserProfileTarget.email}
-          userName={viewUserProfileTarget.name}
-          avatarUrl={viewUserProfileTarget.avatarUrl}
-          currentUserEmail={SUPER_ADMIN_EMAIL}
-          onAvatarUpdated={(newAvatar) => {
-            setViewUserProfileTarget(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
-          }}
-          onProfileUpdated={(updated) => {
-            setUserProfilesMap(prev => ({ ...prev, [updated.email.toLowerCase().trim()]: updated }));
-            showToast(`อัปเดตข้อมูลโปรไฟล์ของ ${updated.fullName || updated.email} สำเร็จ`);
           }}
         />
       )}
