@@ -189,14 +189,11 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     if (!window.confirm(`คุณต้องการลบสื่อ "${item.title}" ออกจากคลังสื่อใช่หรือไม่?`)) {
       return;
     }
-    const cleanId = item.id.replace(/^work_/, '');
-    // Immediately remove from UI state (0ms latency)
-    setMediaList(prev => prev.filter(m => m.id !== item.id && m.id !== cleanId && m.id !== `work_${cleanId}`));
-    setRawMediaList(prev => prev.filter(m => m.id !== item.id && m.id !== cleanId && m.id !== `work_${cleanId}`));
-
     const res = await deleteTeacherMedia(item.id, userEmail);
     if (res.success) {
       setVoteSuccessMsg(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+      setMediaList(prev => prev.filter(m => m.id !== item.id));
+      setRawMediaList(prev => prev.filter(m => m.id !== item.id));
       setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
       alert(res.error || 'ลบข้อมูลไม่สำเร็จ');

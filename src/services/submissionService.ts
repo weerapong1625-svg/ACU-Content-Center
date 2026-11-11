@@ -13,7 +13,6 @@ import {
   increment 
 } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
-import { getDeletedUserEmails } from './userProfileService';
 
 export const ADMIN_TARGET_EMAIL = 'weerapong1625@acu.ac.th';
 
@@ -204,57 +203,6 @@ export const INNOVATIONS_STORAGE_KEY = 'acu_cached_innovations_submissions';
 export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
 export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
-
-export const DELETED_INNOVATIONS_STORAGE_KEY = 'acu_deleted_innovations_ids';
-export const DELETED_MEDIA_STORAGE_KEY = 'acu_deleted_media_ids';
-
-export function getDeletedInnovationIds(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    const raw = localStorage.getItem(DELETED_INNOVATIONS_STORAGE_KEY);
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return new Set(arr);
-    }
-  } catch {}
-  return new Set();
-}
-
-export function addDeletedInnovationId(id: string): void {
-  if (typeof window === 'undefined' || !id) return;
-  try {
-    const set = getDeletedInnovationIds();
-    set.add(id);
-    const cleanId = id.replace(/^work_/, '');
-    set.add(cleanId);
-    set.add(`work_${cleanId}`);
-    localStorage.setItem(DELETED_INNOVATIONS_STORAGE_KEY, JSON.stringify(Array.from(set)));
-  } catch {}
-}
-
-export function getDeletedMediaIds(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    const raw = localStorage.getItem(DELETED_MEDIA_STORAGE_KEY);
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return new Set(arr);
-    }
-  } catch {}
-  return new Set();
-}
-
-export function addDeletedMediaId(id: string): void {
-  if (typeof window === 'undefined' || !id) return;
-  try {
-    const set = getDeletedMediaIds();
-    set.add(id);
-    const cleanId = id.replace(/^work_/, '');
-    set.add(cleanId);
-    set.add(`work_${cleanId}`);
-    localStorage.setItem(DELETED_MEDIA_STORAGE_KEY, JSON.stringify(Array.from(set)));
-  } catch {}
-}
 
 /**
  * 5 Restored Innovation Items for Master Weerapong & ACU Teachers
@@ -465,12 +413,7 @@ export function getStoredInnovations(): InnovationSubmission[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length > 0) {
-        const deletedIds = getDeletedInnovationIds();
-        const deletedUsers = getDeletedUserEmails();
-        return parsed.filter((item) => {
-          const email = (item.userEmail || '').trim().toLowerCase();
-          return !deletedIds.has(item.id) && !deletedUsers.has(email);
-        });
+        return parsed;
       }
     }
   } catch (err) {
@@ -484,13 +427,7 @@ export function getStoredInnovations(): InnovationSubmission[] {
  */
 export function saveStoredInnovations(list: InnovationSubmission[]): void {
   try {
-    const deletedIds = getDeletedInnovationIds();
-    const deletedUsers = getDeletedUserEmails();
-    const clean = list.filter((item) => {
-      const email = (item.userEmail || '').trim().toLowerCase();
-      return !deletedIds.has(item.id) && !deletedUsers.has(email);
-    });
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(clean));
+    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(list));
   } catch (err) {
     console.warn('Failed to save innovations cache:', err);
   }
@@ -505,17 +442,7 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const deletedIds = getDeletedMediaIds();
-        const deletedUsers = getDeletedUserEmails();
-        return parsed.filter((item) => {
-          const email = (item.submittedByEmail || '').trim().toLowerCase();
-          return (
-            !deletedIds.has(item.id) &&
-            !deletedIds.has(item.id.replace(/^work_/, '')) &&
-            !deletedIds.has(`work_${item.id}`) &&
-            !deletedUsers.has(email)
-          );
-        });
+        return parsed;
       }
     }
   } catch (err) {
@@ -847,41 +774,70 @@ export async function deleteInnovationSubmission(
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // 1. Record ID to deleted blocklists immediately
-    addDeletedInnovationId(id);
-    addDeletedMediaId(id);
+    const docRef = doc(db, INNOVATIONS_COLLECTION, id);
+    const snap = await getDoc(docRef);
+    let targetEmail = currentUserEmail;
+    let targetSlot = 0;
 
-    // 2. Remove immediately from local storage caches
-    const cleanId = id.replace(/^work_/, '');
-    const currentList = getStoredInnovations();
-    saveStoredInnovations(currentList.filter((item) => item.id !== id && item.id !== cleanId));
+    if (snap.exists()) {
+      const currentData = snap.data() as InnovationSubmission;
+      targetEmail = currentData.userEmail || currentUserEmail;
+      targetSlot = Number(currentData.itemNumber) || 0;
 
-    const currentMedia = getStoredTeacherMedia();
-    saveStoredTeacherMedia(
-      currentMedia.filter((m) => m.id !== id && m.id !== `work_${id}` && m.id !== cleanId && m.id !== `work_${cleanId}`)
-    );
+      if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+        return { success: false, error: 'คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
+      }
 
-    // 3. Dispatch events immediately for 0ms visual removal
+      await deleteDoc(docRef);
+    }
+
+    // Also delete from system_test_submissions
+    try {
+      await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`));
+    } catch {}
+
+    // Also delete from teacher_media_repository (work_${id} and id)
+    try {
+      await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${id}`));
+      await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, id));
+    } catch {}
+
+    // Delete from local cache
+    try {
+      const currentList = getStoredInnovations();
+      const removedItem = currentList.find((item) => item.id === id);
+      if (removedItem) {
+        targetEmail = removedItem.userEmail || targetEmail;
+        targetSlot = Number(removedItem.itemNumber) || targetSlot;
+      }
+      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+
+      const currentMedia = getStoredTeacherMedia();
+      saveStoredTeacherMedia(currentMedia.filter((m) => m.id !== id && m.id !== `work_${id}`));
+    } catch {}
+
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
       window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
     }
 
-    // 4. Delete from Firestore asynchronously
-    await Promise.allSettled([
-      deleteDoc(doc(db, INNOVATIONS_COLLECTION, cleanId)),
-      deleteDoc(doc(db, INNOVATIONS_COLLECTION, id)),
-      deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${cleanId}`)),
-      deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`)),
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${cleanId}`)),
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, cleanId)),
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, id)),
-    ]);
-
     return { success: true };
   } catch (err: any) {
-    console.warn('deleteInnovationSubmission notice:', err);
-    return { success: true };
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
+      const currentList = getStoredInnovations();
+      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      const currentMedia = getStoredTeacherMedia();
+      saveStoredTeacherMedia(currentMedia.filter((m) => m.id !== id && m.id !== `work_${id}`));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
+        window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
+      }
+      return { success: true };
+    }
+    console.error('Error deleting innovation submission:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
 }
 
@@ -898,14 +854,9 @@ export async function deleteInnovationBySlot(
 
     // 1. Remove from local innovations cache
     const currentList = getStoredInnovations();
-    const matched = currentList.filter(
+    const match = currentList.find(
       (item) => (item.userEmail || '').trim().toLowerCase() === normEmail && Number(item.itemNumber) === slotNumber
     );
-    matched.forEach((m) => {
-      addDeletedInnovationId(m.id);
-      addDeletedMediaId(m.id);
-    });
-
     saveStoredInnovations(
       currentList.filter(
         (item) => !((item.userEmail || '').trim().toLowerCase() === normEmail && Number(item.itemNumber) === slotNumber)
@@ -914,54 +865,44 @@ export async function deleteInnovationBySlot(
 
     // 2. Remove from teacher media cache
     const currentMedia = getStoredTeacherMedia();
-    const matchedMedia = currentMedia.filter(
-      (m) => (m.submittedByEmail || '').trim().toLowerCase() === normEmail && Number(m.itemNumber) === slotNumber
-    );
-    matchedMedia.forEach((m) => {
-      addDeletedMediaId(m.id);
-      addDeletedInnovationId(m.id);
-    });
-
     saveStoredTeacherMedia(
       currentMedia.filter(
         (m) => !((m.submittedByEmail || '').trim().toLowerCase() === normEmail && Number(m.itemNumber) === slotNumber)
       )
     );
 
-    // 3. Dispatch events immediately
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
-      window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
-    }
-
-    // 4. Delete matched IDs in Firestore
-    for (const m of matched) {
-      await Promise.allSettled([
-        deleteDoc(doc(db, INNOVATIONS_COLLECTION, m.id)),
-        deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${m.id}`)),
-        deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${m.id}`)),
-        deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, m.id)),
-      ]);
-    }
-
+    // 3. Delete from Firestore
     try {
+      if (match?.id) {
+        await deleteDoc(doc(db, INNOVATIONS_COLLECTION, match.id));
+        await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${match.id}`));
+        await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${match.id}`));
+        await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, match.id));
+      }
+
       const innovCol = collection(db, INNOVATIONS_COLLECTION);
       const q = query(innovCol, where('userEmail', '==', normEmail));
       const snap = await getDocs(q);
       for (const d of snap.docs) {
         const data = d.data();
         if (Number(data.itemNumber) === slotNumber) {
-          addDeletedInnovationId(d.id);
-          addDeletedMediaId(d.id);
-          await Promise.allSettled([
-            deleteDoc(d.ref),
-            deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${d.id}`)),
-            deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${d.id}`)),
-            deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, d.id)),
-          ]);
+          await deleteDoc(d.ref);
+          await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${d.id}`));
+          await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${d.id}`));
+          await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, d.id));
         }
       }
-    } catch {}
+    } catch (fsErr) {
+      if (isQuotaExceededError(fsErr)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('Firestore deletion notice (quota/offline):', fsErr);
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
+      window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
+    }
 
     return { success: true };
   } catch (err: any) {
@@ -996,12 +937,9 @@ export function subscribeUserInnovations(
     normTargetName.length < 4;
 
   const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
-    const deletedIds = getDeletedInnovationIds();
-    const deletedUsers = getDeletedUserEmails();
     return items.filter((item) => {
       const itemEmail = (item.userEmail || '').trim().toLowerCase();
       const itemName = (item.teacherName || '').trim().toLowerCase();
-      if (deletedIds.has(item.id) || deletedUsers.has(itemEmail)) return false;
 
       // Authoritative: Exact user email match
       if (normTargetEmail && itemEmail) {
@@ -1017,67 +955,56 @@ export function subscribeUserInnovations(
     }).sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   };
 
-  const emitLocal = () => {
-    const current = getStoredInnovations();
-    callback(filterUserItems(current));
-  };
-
   // 1. Instant load from local recovery cache (0ms delay, guarantees items are visible)
-  emitLocal();
+  const cachedAll = getStoredInnovations();
+  const initialUserItems = filterUserItems(cachedAll);
+  callback(initialUserItems);
 
-  // 2. Listen to custom events
-  const handleLocalChange = () => {
-    emitLocal();
-  };
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-    window.addEventListener('acu_user_deleted', handleLocalChange);
-  }
-
-  // 3. Real-time Firestore sync
-  let unsubscribeFirestore = () => {};
+  // 2. Real-time Firestore sync with resilient fallback
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
-    unsubscribeFirestore = onSnapshot(
+
+    const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        const deletedIds = getDeletedInnovationIds();
-        const deletedUsers = getDeletedUserEmails();
         const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
           liveList.push(docSnap.data() as InnovationSubmission);
         });
 
-        const validLive = liveList.filter((item) => {
-          const email = (item.userEmail || '').trim().toLowerCase();
-          return !deletedIds.has(item.id) && !deletedUsers.has(email);
-        });
-
-        saveStoredInnovations(validLive);
-        callback(filterUserItems(validLive));
+        if (liveList.length > 0) {
+          // Merge with cached list to prevent any loss
+          const map = new Map<string, InnovationSubmission>();
+          cachedAll.forEach((i) => map.set(i.id, i));
+          liveList.forEach((i) => map.set(i.id, i));
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+          );
+          saveStoredInnovations(merged);
+          callback(filterUserItems(merged));
+        } else {
+          callback(initialUserItems);
+        }
       },
       (err) => {
         if (isQuotaExceededError(err)) {
           notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for subscribeUserInnovations; serving from local recovery cache.');
+        } else {
+          console.warn('subscribeUserInnovations listener notice:', err);
         }
-        emitLocal();
+        // Always provide cached user items so list is NEVER empty
+        callback(filterUserItems(getStoredInnovations()));
       }
     );
+    return unsubscribe;
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
     }
-    emitLocal();
+    callback(initialUserItems);
+    return () => {};
   }
-
-  return () => {
-    unsubscribeFirestore();
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      window.removeEventListener('acu_user_deleted', handleLocalChange);
-    }
-  };
 }
 
 /**
@@ -1086,70 +1013,51 @@ export function subscribeUserInnovations(
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
 ): () => void {
-  const emitLocal = () => {
-    const deletedIds = getDeletedInnovationIds();
-    const deletedUsers = getDeletedUserEmails();
-    const current = getStoredInnovations().filter((item) => {
-      const email = (item.userEmail || '').trim().toLowerCase();
-      return !deletedIds.has(item.id) && !deletedUsers.has(email);
-    });
-    callback(current);
-  };
-
   // 1. Instant load from local recovery cache
-  emitLocal();
+  const cachedAll = getStoredInnovations();
+  callback(cachedAll);
 
-  const handleLocalChange = () => {
-    emitLocal();
-  };
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-    window.addEventListener('acu_user_deleted', handleLocalChange);
-  }
-
-  let unsubscribeFirestore = () => {};
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
-    unsubscribeFirestore = onSnapshot(
+    const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        const deletedIds = getDeletedInnovationIds();
-        const deletedUsers = getDeletedUserEmails();
         const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
           liveList.push(docSnap.data() as InnovationSubmission);
         });
 
-        const validLive = liveList.filter((item) => {
-          const email = (item.userEmail || '').trim().toLowerCase();
-          return !deletedIds.has(item.id) && !deletedUsers.has(email);
-        });
-
-        saveStoredInnovations(validLive);
-        callback(validLive);
+        if (liveList.length > 0) {
+          const map = new Map<string, InnovationSubmission>();
+          cachedAll.forEach((i) => map.set(i.id, i));
+          liveList.forEach((i) => map.set(i.id, i));
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+          );
+          saveStoredInnovations(merged);
+          callback(merged);
+        } else {
+          callback(cachedAll);
+        }
       },
       (err) => {
         if (isQuotaExceededError(err)) {
           notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
+        } else {
+          console.warn('subscribeAllInnovations listener notice:', err);
         }
-        emitLocal();
+        callback(getStoredInnovations());
       }
     );
+    return unsubscribe;
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
     }
-    emitLocal();
+    callback(cachedAll);
+    return () => {};
   }
-
-  return () => {
-    unsubscribeFirestore();
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      window.removeEventListener('acu_user_deleted', handleLocalChange);
-    }
-  };
 }
 
 /**
@@ -1453,83 +1361,36 @@ export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
 ): () => void {
-  // 1. Instant load from local storage
-  const emitLocal = () => {
-    const deletedIds = getDeletedMediaIds();
-    const deletedUsers = getDeletedUserEmails();
-    const local = getStoredTeacherMedia().filter((w) => {
-      const email = (w.submittedByEmail || '').trim().toLowerCase();
-      return (
-        !w.id.startsWith('seed-') &&
-        w.title?.trim().length > 0 &&
-        !deletedIds.has(w.id) &&
-        !deletedIds.has(w.id.replace(/^work_/, '')) &&
-        !deletedIds.has(`work_${w.id}`) &&
-        !deletedUsers.has(email)
-      );
-    });
-    callback(local);
-  };
-
-  emitLocal();
-
-  // 2. Listen to custom change events
-  const handleLocalChange = () => {
-    emitLocal();
-  };
-
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_teacher_media_changed', handleLocalChange);
-    window.addEventListener('acu_user_deleted', handleLocalChange);
-  }
-
-  // 3. Attach Firestore onSnapshot
-  let unsubscribeFirestore = () => {};
   try {
     const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
-    unsubscribeFirestore = onSnapshot(
+    const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        const deletedIds = getDeletedMediaIds();
-        const deletedUsers = getDeletedUserEmails();
         const liveList: TeacherMediaWork[] = [];
         snapshot.forEach((docSnap) => {
           liveList.push(docSnap.data() as TeacherMediaWork);
         });
 
-        const realWorks = liveList.filter((w) => {
-          const email = (w.submittedByEmail || '').trim().toLowerCase();
-          return (
-            !w.id.startsWith('seed-') &&
-            w.title?.trim().length > 0 &&
-            !deletedIds.has(w.id) &&
-            !deletedIds.has(w.id.replace(/^work_/, '')) &&
-            !deletedIds.has(`work_${w.id}`) &&
-            !deletedUsers.has(email)
-          );
-        });
+        // Filter out any legacy seed items if any exist in collection
+        const realWorks = liveList.filter(
+          (w) => !w.id.startsWith('seed-') && w.title?.trim().length > 0
+        );
 
+        // Sort newest first so real teacher submissions appear at top
         realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        saveStoredTeacherMedia(realWorks);
         callback(realWorks);
       },
       (err) => {
         console.warn('subscribeTeacherMedia fallback:', err);
-        emitLocal();
+        callback([]);
       }
     );
+    return unsubscribe;
   } catch (err) {
     console.error('subscribeTeacherMedia failed:', err);
-    emitLocal();
+    callback([]);
+    return () => {};
   }
-
-  return () => {
-    unsubscribeFirestore();
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
-      window.removeEventListener('acu_user_deleted', handleLocalChange);
-    }
-  };
 }
 
 /**
@@ -1570,44 +1431,50 @@ export async function deleteTeacherMedia(
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const cleanId = id.replace(/^work_/, '');
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
+    const snap = await getDoc(docRef);
 
-    // 1. Record ID to deleted blocklists immediately
-    addDeletedMediaId(id);
-    addDeletedMediaId(cleanId);
-    addDeletedInnovationId(id);
-    addDeletedInnovationId(cleanId);
+    if (snap.exists()) {
+      const currentData = snap.data() as TeacherMediaWork;
+      if (!canUserModify(currentData.submittedByEmail, currentUserEmail)) {
+        return { success: false, error: 'คุณไม่มีสิทธิ์ลบสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
+      }
+      await deleteDoc(docRef);
+    }
 
-    // 2. Remove immediately from local storage cache
+    // Always remove from local storage cache immediately so item never lingers
     const currentMedia = getStoredTeacherMedia();
-    saveStoredTeacherMedia(
-      currentMedia.filter((m) => m.id !== id && m.id !== cleanId && m.id !== `work_${cleanId}`)
-    );
+    saveStoredTeacherMedia(currentMedia.filter((m) => m.id !== id));
 
-    const currentInnos = getStoredInnovations();
-    saveStoredInnovations(currentInnos.filter((i) => i.id !== cleanId && i.id !== id));
+    // Also delete any linked innovation submission
+    try {
+      const cleanId = id.replace(/^work_/, '');
+      await deleteDoc(doc(db, INNOVATIONS_COLLECTION, cleanId));
+      await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${cleanId}`));
+      const currentInnos = getStoredInnovations();
+      saveStoredInnovations(currentInnos.filter((i) => i.id !== cleanId && i.id !== id));
+    } catch {}
 
-    // 3. Dispatch events immediately
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
       window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
     }
 
-    // 4. Delete from Firestore asynchronously
-    await Promise.allSettled([
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, id)),
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${cleanId}`)),
-      deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, cleanId)),
-      deleteDoc(doc(db, INNOVATIONS_COLLECTION, cleanId)),
-      deleteDoc(doc(db, INNOVATIONS_COLLECTION, id)),
-      deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${cleanId}`)),
-      deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`)),
-    ]);
-
     return { success: true };
   } catch (err: any) {
-    console.warn('deleteTeacherMedia notice:', err);
-    return { success: true };
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached during media delete: removed from local cache.');
+      const currentMedia = getStoredTeacherMedia();
+      saveStoredTeacherMedia(currentMedia.filter((m) => m.id !== id));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
+        window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
+      }
+      return { success: true };
+    }
+    console.error('Error deleting teacher media:', err);
+    return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
 }
 

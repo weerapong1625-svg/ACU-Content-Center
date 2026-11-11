@@ -118,38 +118,6 @@ export const DEFAULT_INNOVATION_ITEMS: InnovationItem[] = [
 export const DEFAULT_INITIAL_PRAISES: VisitorPraise[] = [];
 
 const LOCAL_STORAGE_PREFIX = 'acu_user_full_profile_';
-export const DELETED_USERS_STORAGE_KEY = 'acu_deleted_user_emails';
-
-/**
- * Get the set of permanently deleted user emails (lowercased)
- */
-export function getDeletedUserEmails(): Set<string> {
-  if (typeof window === 'undefined') return new Set();
-  try {
-    const raw = localStorage.getItem(DELETED_USERS_STORAGE_KEY);
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) {
-        return new Set(arr.map((e: string) => String(e).toLowerCase().trim()));
-      }
-    }
-  } catch {}
-  return new Set();
-}
-
-/**
- * Permanently record a deleted user email to blocklist so they never resurrect
- */
-export function addDeletedUserEmail(email: string): void {
-  if (typeof window === 'undefined' || !email) return;
-  try {
-    const norm = email.toLowerCase().trim();
-    if (norm === 'weerapong1625@acu.ac.th') return; // master super admin cannot be blocked
-    const set = getDeletedUserEmails();
-    set.add(norm);
-    localStorage.setItem(DELETED_USERS_STORAGE_KEY, JSON.stringify(Array.from(set)));
-  } catch {}
-}
 
 /**
  * Generate a safe Firestore Doc ID from email
@@ -491,7 +459,6 @@ export async function addVisitorPraiseAndRating(
 export function getAllLocalUserProfilesMap(): Record<string, FullUserProfile> {
   const map: Record<string, FullUserProfile> = {};
   if (typeof window === 'undefined') return map;
-  const deletedEmails = getDeletedUserEmails();
   try {
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
@@ -501,10 +468,7 @@ export function getAllLocalUserProfilesMap(): Record<string, FullUserProfile> {
           try {
             const parsed = JSON.parse(raw);
             if (parsed && parsed.email) {
-              const norm = parsed.email.toLowerCase().trim();
-              if (!deletedEmails.has(norm)) {
-                map[norm] = parsed;
-              }
+              map[parsed.email.toLowerCase().trim()] = parsed;
             }
           } catch {
             // ignore
@@ -559,103 +523,6 @@ export async function recordProfileVisit(profileEmail: string): Promise<void> {
 }
 
 /**
- * Reset visit statistics on user profile(s) to 0 without touching any media or submission data
- */
-export async function resetUserProfileVisitStats(
-  target: 'all' | 'all_others' | string,
-  adminEmail: string = 'weerapong1625@acu.ac.th'
-): Promise<void> {
-  const normAdmin = adminEmail.toLowerCase().trim();
-  const normTarget = target.toLowerCase().trim();
-
-  // 1. Update in local profile caches immediately (0ms)
-  try {
-    const localMap = getAllLocalUserProfilesMap();
-    Object.keys(localMap).forEach((email) => {
-      const norm = email.toLowerCase().trim();
-      let shouldReset = false;
-      if (normTarget === 'all') {
-        shouldReset = true;
-      } else if (normTarget === 'all_others') {
-        shouldReset = norm !== normAdmin;
-      } else {
-        shouldReset = norm === normTarget;
-      }
-
-      if (shouldReset && localMap[email]) {
-        const p = localMap[email];
-        p.stats = {
-          ...p.stats,
-          totalViews: 0,
-          dailyStats: {},
-          monthlyStats: {},
-          yearlyStats: {},
-        };
-        setCachedUserProfile(p);
-      }
-    });
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('acu_profile_updated'));
-    }
-  } catch (err) {
-    console.warn('Could not reset local profile visit stats:', err);
-  }
-
-  // 2. Update Firestore user_profiles docs (strictly updating only stats, never touching innovations/media)
-  try {
-    if (normTarget !== 'all' && normTarget !== 'all_others') {
-      const safeId = getSafeDocId(normTarget);
-      const profileRef = doc(db, 'user_profiles', safeId);
-      await setDoc(
-        profileRef,
-        {
-          stats: {
-            totalViews: 0,
-            dailyStats: {},
-            monthlyStats: {},
-            yearlyStats: {},
-          },
-        },
-        { merge: true }
-      );
-    } else {
-      const profilesRef = collection(db, 'user_profiles');
-      const snap = await getDocs(profilesRef);
-      const batch = writeBatch(db);
-      let count = 0;
-      snap.docs.forEach((d) => {
-        const data = d.data();
-        const em = (data.email || d.id).toLowerCase().trim();
-        let shouldReset = false;
-        if (normTarget === 'all') shouldReset = true;
-        else if (normTarget === 'all_others') shouldReset = em !== normAdmin;
-
-        if (shouldReset) {
-          batch.set(
-            d.ref,
-            {
-              stats: {
-                totalViews: 0,
-                dailyStats: {},
-                monthlyStats: {},
-                yearlyStats: {},
-              },
-            },
-            { merge: true }
-          );
-          count++;
-        }
-      });
-      if (count > 0) {
-        await batch.commit();
-      }
-    }
-  } catch (fsErr) {
-    console.warn('Firestore profile stats reset deferred or quota reached:', fsErr);
-  }
-}
-
-/**
  * Subscribe to all user profiles in Firestore for Admin Dashboard and Certificate verification
  */
 export function subscribeAllUserProfiles(
@@ -672,15 +539,11 @@ export function subscribeAllUserProfiles(
     return onSnapshot(
       colRef,
       (snapshot) => {
-        const deletedEmails = getDeletedUserEmails();
         const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
         snapshot.forEach((docSnap) => {
           const d = docSnap.data();
           if (d.email) {
             const normEmail = d.email.toLowerCase().trim();
-            if (deletedEmails.has(normEmail)) {
-              return; // skip deleted user
-            }
             map[normEmail] = {
               email: d.email,
               fullName: d.fullName || d.displayName || d.email.split('@')[0],
@@ -809,10 +672,48 @@ export async function deleteUserAccountCompletely(
   try {
     const deletedCounts = { ...emptyCounts };
 
-    // 1. Permanently record to deleted users blocklist
-    addDeletedUserEmail(normTarget);
+    // 1. Delete user profile documents from Firestore (Comprehensive scan + doc ID variants)
+    try {
+      const profCol = collection(db, 'user_profiles');
+      const profSnap = await getDocs(profCol);
+      const matchingProfileDocs = profSnap.docs.filter((d) => {
+        const docId = d.id.trim().toLowerCase();
+        const dataEmail = (d.data().email || d.data().userEmail || '').trim().toLowerCase();
+        let decodedId = '';
+        try {
+          decodedId = decodeURIComponent(d.id).trim().toLowerCase();
+        } catch {
+          // ignore
+        }
+        return (
+          docId === normTarget ||
+          decodedId === normTarget ||
+          d.id.toLowerCase() === encodeURIComponent(normTarget).toLowerCase() ||
+          dataEmail === normTarget
+        );
+      });
 
-    // 2. Remove all local storage caches and vaults for this user immediately
+      for (let i = 0; i < matchingProfileDocs.length; i += 100) {
+        const chunk = matchingProfileDocs.slice(i, i + 100);
+        const batch = writeBatch(db);
+        chunk.forEach((d) => batch.delete(d.ref));
+        await batch.commit();
+      }
+
+      // Defensively delete known doc ID variants directly as well
+      const safeDocId = getSafeDocId(normTarget);
+      await Promise.allSettled([
+        deleteDoc(doc(db, 'user_profiles', safeDocId)),
+        deleteDoc(doc(db, 'user_profiles', normTarget)),
+        deleteDoc(doc(db, 'user_profiles', encodeURIComponent(normTarget))),
+      ]);
+
+      deletedCounts.profile = true;
+    } catch (err) {
+      console.warn('Could not delete user_profiles doc:', err);
+    }
+
+    // 2. Remove from local storage & credentials vault
     try {
       if (typeof window !== 'undefined' && window.localStorage) {
         localStorage.removeItem(`${LOCAL_STORAGE_PREFIX}${normTarget}`);
@@ -825,66 +726,13 @@ export async function deleteUserAccountCompletely(
         if (currentEmail && currentEmail.trim().toLowerCase() === normTarget) {
           localStorage.removeItem('acu_current_user_email');
         }
-
-        // Purge user login logs from local cache
-        const rawLogs = localStorage.getItem('acu_persistent_login_logs');
-        if (rawLogs) {
-          const parsed = JSON.parse(rawLogs);
-          if (Array.isArray(parsed)) {
-            const filtered = parsed.filter((l: any) => (l.email || '').toLowerCase().trim() !== normTarget);
-            localStorage.setItem('acu_persistent_login_logs', JSON.stringify(filtered));
-          }
-        }
-
-        // Purge innovations from local cache
-        const rawInnovs = localStorage.getItem('acu_cached_innovations_submissions');
-        if (rawInnovs) {
-          const parsed = JSON.parse(rawInnovs);
-          if (Array.isArray(parsed)) {
-            const filtered = parsed.filter((i: any) => (i.userEmail || '').toLowerCase().trim() !== normTarget);
-            localStorage.setItem('acu_cached_innovations_submissions', JSON.stringify(filtered));
-          }
-        }
-
-        // Purge teacher media from local cache
-        const rawMedia = localStorage.getItem('acu_cached_teacher_media');
-        if (rawMedia) {
-          const parsed = JSON.parse(rawMedia);
-          if (Array.isArray(parsed)) {
-            const filtered = parsed.filter((m: any) => (m.submittedByEmail || '').toLowerCase().trim() !== normTarget);
-            localStorage.setItem('acu_cached_teacher_media', JSON.stringify(filtered));
-          }
-        }
-
-        // Purge facilities from local cache
-        const rawFac = localStorage.getItem('acu_cached_facility_submissions');
-        if (rawFac) {
-          const parsed = JSON.parse(rawFac);
-          if (Array.isArray(parsed)) {
-            const filtered = parsed.filter((f: any) => (f.userEmail || '').toLowerCase().trim() !== normTarget);
-            localStorage.setItem('acu_cached_facility_submissions', JSON.stringify(filtered));
-          }
-        }
       }
       removeUserCredential(normTarget);
     } catch (err) {
       console.warn('Could not clean local storage for user:', err);
     }
 
-    // 3. Direct delete user_profiles doc ID variants from Firestore
-    try {
-      const safeDocId = getSafeDocId(normTarget);
-      await Promise.allSettled([
-        deleteDoc(doc(db, 'user_profiles', safeDocId)),
-        deleteDoc(doc(db, 'user_profiles', normTarget)),
-        deleteDoc(doc(db, 'user_profiles', encodeURIComponent(normTarget))),
-      ]);
-      deletedCounts.profile = true;
-    } catch (err) {
-      console.warn('Direct deleteDoc user_profiles notice:', err);
-    }
-
-    // 4. Delete login logs for this user if requested
+    // 3. Delete login logs for this user if requested
     if (options.deleteLogs) {
       try {
         const logsCol = collection(db, 'login_logs');
@@ -906,7 +754,7 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 5. Delete innovation submissions if requested
+    // 4. Delete innovation submissions if requested
     if (options.deleteSubmissions) {
       try {
         const innovCol = collection(db, 'teacher_innovations_submissions');
@@ -928,7 +776,7 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 6. Delete facility records in system_test_submissions if requested
+    // 5. Delete facility records in system_test_submissions if requested
     if (options.deleteFacilities || options.deleteSubmissions) {
       try {
         const sysCol = collection(db, 'system_test_submissions');
@@ -950,7 +798,7 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 7. Delete teacher media repository works if requested
+    // 6. Delete teacher media repository works if requested
     if (options.deleteMedia) {
       try {
         const mediaCol = collection(db, 'teacher_media_repository');
@@ -972,7 +820,7 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 8. Delete shared teaching ideas if present
+    // 7. Delete shared teaching ideas if present
     try {
       const sharedCol = collection(db, 'shared_teaching_ideas');
       const sharedSnap = await getDocs(sharedCol);
@@ -989,15 +837,6 @@ export async function deleteUserAccountCompletely(
       }
     } catch (err) {
       console.warn('Could not clean shared teaching ideas:', err);
-    }
-
-    // 9. Dispatch instant update events across all application components
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('acu_user_deleted', { detail: { email: normTarget } }));
-      window.dispatchEvent(new CustomEvent('acu_login_logs_updated'));
-      window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
-      window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
-      window.dispatchEvent(new CustomEvent('acu_facilities_changed'));
     }
 
     return {
@@ -1093,7 +932,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       safeGetDocs('teacher_media_repository'),
     ]);
 
-    const deletedEmails = getDeletedUserEmails();
     const discrepancies: EmailAuditDiscrepancy[] = [];
     const uniqueEmailsMap = new Map<string, {
       fullName?: string;
@@ -1117,7 +955,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       if (!rawEmail) continue;
 
       const normEmail = rawEmail.trim().toLowerCase();
-      if (deletedEmails.has(normEmail)) continue;
       const needsNormalize = rawEmail !== normEmail || docSnap.id !== getSafeDocId(normEmail);
 
       if (needsNormalize) {
@@ -1152,7 +989,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       if (!rawEmail) continue;
 
       const normEmail = rawEmail.trim().toLowerCase();
-      if (deletedEmails.has(normEmail)) continue;
       if (rawEmail !== normEmail) {
         normalizedCount++;
         discrepancies.push({
@@ -1181,7 +1017,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       if (!rawEmail) continue;
 
       const normEmail = rawEmail.trim().toLowerCase();
-      if (deletedEmails.has(normEmail)) continue;
       if (rawEmail !== normEmail) {
         normalizedCount++;
         discrepancies.push({
@@ -1212,7 +1047,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       if (!rawEmail) continue;
 
       const normEmail = rawEmail.trim().toLowerCase();
-      if (deletedEmails.has(normEmail)) continue;
       if (rawEmail !== normEmail) {
         normalizedCount++;
         await updateDoc(docSnap.ref, { userEmail: normEmail });
@@ -1237,7 +1071,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       if (!rawEmail) continue;
 
       const normEmail = rawEmail.trim().toLowerCase();
-      if (deletedEmails.has(normEmail)) continue;
       if (rawEmail !== normEmail) {
         normalizedCount++;
         await updateDoc(docSnap.ref, { submittedByEmail: normEmail });
@@ -1246,7 +1079,6 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
 
     // F. Reconcile & Create missing user_profiles
     for (const [normEmail, record] of uniqueEmailsMap.entries()) {
-      if (deletedEmails.has(normEmail)) continue;
       const isMaster = normEmail === 'weerapong1625@acu.ac.th';
       const cleanRealName = getCleanRealName(record.fullName, normEmail);
 

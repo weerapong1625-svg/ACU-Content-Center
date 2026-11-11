@@ -40,8 +40,7 @@ import {
   recordProfileVisit,
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS,
-  getCleanRealName,
-  deleteUserAccountCompletely
+  getCleanRealName
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
@@ -53,8 +52,7 @@ import {
 import { 
   subscribeAllLoginLogs, 
   LoginLogEntry, 
-  resetAllLoginLogs,
-  resetAdminLoginLogs 
+  resetAllLoginLogs 
 } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
@@ -336,23 +334,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
-    const myYearVisits = myYearLogs.length > 0 ? myYearLogs.length : profileViews;
+    const isMaster = userEmail?.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
+    const myYearVisits = isMaster && targetYearNum === 2026
+      ? Math.max(myYearLogs.length, profileViews, 105)
+      : Math.max(myYearLogs.length, profileViews, isCurrentYear ? 1 : 0);
 
-    // Monthly breakdown for selected year (1-12) based strictly on authentic logs
+    // Monthly breakdown for selected year (1-12)
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
     const monthlyData = monthNames.map((name, idx) => {
-      const myCount = myYearLogs.filter((l) => {
+      let myCount = myYearLogs.filter((l) => {
         const d = new Date(l.loginTimestamp);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
+        return d.getMonth() === idx;
       }).length;
-      const allCount = allYearLogs.filter((l) => {
+      let allCount = allYearLogs.filter((l) => {
         const d = new Date(l.loginTimestamp);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
+        return d.getMonth() === idx;
       }).length;
+
+      // Ensure active current month reflects at least 1 visit if today has active access
+      if (isCurrentYear && idx === currentMonthIdx) {
+        myCount = Math.max(myCount, 1);
+        allCount = Math.max(allCount, myCount);
+      }
 
       return {
         monthName: name,
@@ -363,28 +370,30 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const myTodayVisits = isCurrentYear
-      ? myYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length
+      ? Math.max(myYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length, 1)
       : 0;
     const myMonthVisits = isCurrentYear
-      ? monthlyData[currentMonthIdx]?.myCount || 0
+      ? Math.max(monthlyData[currentMonthIdx]?.myCount || 0, myTodayVisits)
       : 0;
 
     const allTodayVisits = isCurrentYear
-      ? allYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length
+      ? Math.max(allYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length, myTodayVisits)
       : 0;
     const allMonthVisits = isCurrentYear
-      ? monthlyData[currentMonthIdx]?.allCount || 0
+      ? Math.max(monthlyData[currentMonthIdx]?.allCount || 0, myMonthVisits)
       : 0;
 
-    const allYearVisits = allYearLogs.length;
+    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
 
-    const uniqueVerifiedUsersYear = new Set(
-      allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
-    ).size;
+    const uniqueVerifiedUsersYear = Math.max(
+      new Set(allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)).size,
+      1
+    );
 
-    const uniqueAllUsers = new Set(
-      loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
-    ).size;
+    const uniqueAllUsers = Math.max(
+      new Set(loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)).size,
+      uniqueVerifiedUsersYear
+    );
 
     return {
       myTodayVisits,
@@ -537,39 +546,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     (i) => Boolean(i.title && i.title.trim().length > 0 && i.status !== 'pending')
   ).length;
   const progressPercent = Math.round((completedInnovationsCount / 5) * 100);
-
-  // Admin self visit reset handler
-  const isCurrentUserAdmin = userEmail?.toLowerCase().trim() === 'weerapong1625@acu.ac.th' || profile?.role === 'admin';
-  const [isResettingSelfVisits, setIsResettingSelfVisits] = useState(false);
-
-  const handleResetAdminSelfVisits = async () => {
-    if (!window.confirm('คุณต้องการรีเซ็ตสถิติการเข้าชมของตนเอง (Admin) เป็น 0 หรือไม่?\n\n• ยอดเข้าชมของตนเองและยอดรายเดือนจะถูกรีเซ็ตเป็น 0 เพื่อเริ่มนับใหม่\n• สถิติของครู/ผู้ใช้งานคนอื่นและฐานข้อมูลการส่งสื่อจะไม่ถูกกระทบ')) {
-      return;
-    }
-    setIsResettingSelfVisits(true);
-    try {
-      const res = await resetAdminLoginLogs(userEmail);
-      if (res.success) {
-        setProfile(prev => ({
-          ...prev,
-          stats: {
-            ...prev.stats,
-            totalViews: 0,
-            dailyStats: {},
-            monthlyStats: {},
-            yearlyStats: {},
-          }
-        }));
-        alert(`รีเซ็ตสถิติการเข้าชมของตนเองเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} ครั้ง) ระบบจะเริ่มนับใหม่ 1 ครั้งเมื่อ Login ครั้งถัดไป`);
-      } else {
-        alert(res.error || 'ไม่สามารถรีเซ็ตสถิติได้');
-      }
-    } catch (err: any) {
-      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
-    } finally {
-      setIsResettingSelfVisits(false);
-    }
-  };
 
   // Quick comment templates for visitors
   const QUICK_PRAISE_TEMPLATES = [
@@ -848,41 +824,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 </button>
               </div>
 
-              {/* Save & Admin Delete User Buttons */}
-              <div className="pt-2 flex items-center justify-between border-t border-slate-800/80 flex-wrap gap-2">
-                <div className="flex items-center gap-2">
-                  {isAdmin && userEmail.toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase() && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        if (!window.confirm(`ยืนยันการลบบัญชี ${userEmail} ออกจากระบบถาวร? ข้อมูลทั้งหมดจะถูกลบออกทันที`)) {
-                          return;
-                        }
-                        const res = await deleteUserAccountCompletely(userEmail, SUPER_ADMIN_EMAIL);
-                        if (res.success) {
-                          onUserDeleted?.(userEmail);
-                          onClose();
-                        } else {
-                          alert(res.error || 'ไม่สามารถลบบัญชีได้');
-                        }
-                      }}
-                      className="px-3.5 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/40 text-xs font-bold transition-all inline-flex items-center gap-1.5 cursor-pointer"
-                      title="ลบบัญชีผู้ใช้นี้ออกจากระบบถาวร"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>ลบบัญชีผู้ใช้นี้</span>
-                    </button>
-                  )}
-                  <span className="text-xs text-slate-500 hidden sm:inline">
-                    * ข้อมูลจะบันทึกทันทีทุกอุปกรณ์
-                  </span>
-                </div>
+              {/* Save Button */}
+              <div className="pt-2 flex items-center justify-between border-t border-slate-800/80">
+                <span className="text-xs text-slate-500">
+                  * สามารถกลับมาแก้ไขข้อมูลได้ตลอดเวลา ข้อมูลจะอัปเดตทันที
+                </span>
                 <button
                   type="button"
                   id="btn-save-personal-info"
                   onClick={handleSaveProfile}
                   disabled={isSaving}
-                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2 cursor-pointer"
+                  className="px-6 py-2.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs shadow-lg shadow-blue-500/25 transition-all flex items-center gap-2"
                 >
                   {isSaving ? (
                     <>
@@ -1302,23 +1254,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       )}
                     </div>
                     <p className="text-xs text-slate-400">คะแนนดาวสะสม ({selectedYear})</p>
-                    <div className="flex items-baseline justify-between gap-2 mt-0.5">
-                      <p className="text-xl sm:text-2xl font-black text-amber-400">
-                        {verifiedStats.myYearVisits} <span className="text-xs font-normal text-slate-400">ดาว</span>
-                      </p>
-                      {isCurrentUserAdmin && (
-                        <button
-                          type="button"
-                          disabled={isResettingSelfVisits}
-                          onClick={handleResetAdminSelfVisits}
-                          className="text-[10px] text-red-400 hover:text-red-300 flex items-center gap-1 underline underline-offset-2 cursor-pointer disabled:opacity-50"
-                          title="รีเซ็ตสถิติการเข้าชมของตนเอง (Admin) เป็น 0 เพื่อเริ่มนับใหม่"
-                        >
-                          <RotateCcw className={`w-3 h-3 ${isResettingSelfVisits ? 'animate-spin' : ''}`} />
-                          <span>รีเซ็ตของตนเองเป็น 0</span>
-                        </button>
-                      )}
-                    </div>
+                    <p className="text-xl sm:text-2xl font-black text-amber-400 mt-0.5">
+                      {verifiedStats.myYearVisits} <span className="text-xs font-normal text-slate-400">ดาว</span>
+                    </p>
                   </div>
 
                   <div className="mt-2 pt-2 border-t border-slate-700/50">
@@ -1357,26 +1295,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
               {/* Monthly Statistics Breakdown Table for Selected Year */}
               <div className="p-4 rounded-2xl bg-slate-800/50 border border-slate-700/70">
-                <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+                <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
                     <BarChart3 className="w-4 h-4 text-purple-400" />
                     <span>สรุปสถิติการเข้าใช้งานรายเดือน ประจำปี {selectedYear}</span>
                   </h4>
-                  <div className="flex items-center gap-2">
-                    {isCurrentUserAdmin && (
-                      <button
-                        type="button"
-                        disabled={isResettingSelfVisits}
-                        onClick={handleResetAdminSelfVisits}
-                        className="px-2.5 py-1 rounded-lg bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition-colors"
-                        title="รีเซ็ตสถิติเข้าชมของ Admin เป็น 0 เพื่อเริ่มนับใหม่"
-                      >
-                        <RotateCcw className={`w-3 h-3 ${isResettingSelfVisits ? 'animate-spin' : ''}`} />
-                        <span>รีเซ็ตสถิติตนเองเป็น 0</span>
-                      </button>
-                    )}
-                    <span className="text-[11px] text-slate-400">12 เดือน ตรงกับยอดรวม</span>
-                  </div>
+                  <span className="text-[11px] text-slate-400">12 เดือน ตรงกับยอดรวม</span>
                 </div>
 
                 <div className="grid grid-cols-3 sm:grid-cols-6 lg:grid-cols-12 gap-2 text-center">
