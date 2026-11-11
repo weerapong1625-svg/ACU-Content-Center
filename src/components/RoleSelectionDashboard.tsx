@@ -140,7 +140,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       now.toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' })
     );
     setDbStatus('saved');
-  }, [userEmail, userName]);
+  }, [userEmail, userName, profileName]);
 
   // Handle Role Selection (View selection only - does not duplicate login visit count)
   const handleSelectRole = (role: 'teacher' | 'student') => {

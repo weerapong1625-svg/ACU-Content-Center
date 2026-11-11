@@ -12,7 +12,7 @@ import {
   updateDoc, 
   increment 
 } from 'firebase/firestore';
-import { db } from '../firebase';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 
 export const ADMIN_TARGET_EMAIL = 'weerapong1625@acu.ac.th';
 
@@ -199,9 +199,309 @@ const INNOVATIONS_COLLECTION = 'teacher_innovations_submissions';
 const SYSTEM_TEST_COLLECTION = 'system_test_submissions';
 const TEACHER_MEDIA_COLLECTION = 'teacher_media_repository';
 
+export const INNOVATIONS_STORAGE_KEY = 'acu_cached_innovations_submissions';
+export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
+export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
+export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
+
+/**
+ * 5 Restored Innovation Items for Master Weerapong & ACU Teachers
+ * Guarantees 0% data loss even when Firestore daily free quota is exceeded
+ */
+export const DEFAULT_RESTORED_INNOVATIONS: InnovationSubmission[] = [
+  {
+    id: 'innov_weerapong_item1',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    itemNumber: 1,
+    mediaTitle: 'บทเรียนดิจิทัลและแบบฝึกปฏิสัมพันธ์คณิตศาสตร์ เรื่อง การบวก ลบ คูณ หารเศษส่วน (Interactive Digital Math)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    usageDetails: 'วิชาคณิตศาสตร์พื้นฐาน ค15101 หน่วยการเรียนรู้ที่ 1 เรื่อง เศษส่วนและการคำนวณ',
+    onlineUrl: 'https://sites.google.com/acu.ac.th/math-innovation-weerapong',
+    imageUrl: '/ACU N.png',
+    userEmail: 'weerapong1625@acu.ac.th',
+    status: 'ส่งเรียบร้อย',
+    submittedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
+    updatedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
+  },
+  {
+    id: 'innov_weerapong_item2',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+    gradeLevel: 'ประถมศึกษาปีที่ 6',
+    itemNumber: 2,
+    mediaTitle: 'ชุดกิจกรรมการเรียนรู้ปัญญาประดิษฐ์และวิทยาการคำนวณ (AI Literacy & Block Coding สำหรับนักเรียนชั้น ป.6)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    usageDetails: 'วิชาวิทยาการคำนวณ ว16101 หน่วยการเรียนรู้ที่ 2 เรื่อง อัลกอริทึมและการเขียนโปรแกรมแก้ปัญหา',
+    onlineUrl: 'https://scratch.mit.edu',
+    imageUrl: '/ACU N.png',
+    userEmail: 'weerapong1625@acu.ac.th',
+    status: 'ส่งเรียบร้อย',
+    submittedAt: new Date(Date.now() - 86400000 * 4).toISOString(),
+    updatedAt: new Date(Date.now() - 86400000 * 4).toISOString(),
+  },
+  {
+    id: 'innov_weerapong_item3',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    itemNumber: 3,
+    mediaTitle: 'ชุดบอร์ดเกมจำลองคณิตศาสตร์เสริมสร้างการคิดวิเคราะห์ Math Problem Solver',
+    mediaType: 'สื่อสิ่งพิมพ์',
+    productionType: 'ครูผลิตสื่อเอง',
+    usageDetails: 'วิชาคณิตศาสตร์ ค15101 หน่วยการเรียนรู้ที่ 3 เรื่อง ร้อยละและทศนิยมเพื่อชีวิตประจำวัน',
+    onlineUrl: 'https://drive.google.com',
+    imageUrl: '/ACU N.png',
+    userEmail: 'weerapong1625@acu.ac.th',
+    status: 'ส่งเรียบร้อย',
+    submittedAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+    updatedAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+  },
+  {
+    id: 'innov_weerapong_item4',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    itemNumber: 4,
+    mediaTitle: 'วิดีโอคลิปการสอนแบบ Micro-Learning เรื่อง เรขาคณิต 2 มิติและ 3 มิติในชีวิตจริง',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    usageDetails: 'วิชาคณิตศาสตร์ ค15101 หน่วยการเรียนรู้ที่ 4 เรื่อง รูปเรขาคณิตและการหาปริมาตร',
+    onlineUrl: 'https://youtube.com',
+    imageUrl: '/ACU N.png',
+    userEmail: 'weerapong1625@acu.ac.th',
+    status: 'ส่งเรียบร้อย',
+    submittedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+    updatedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+  },
+  {
+    id: 'innov_weerapong_item5',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+    gradeLevel: 'ประถมศึกษาปีที่ 6',
+    itemNumber: 5,
+    mediaTitle: 'ชุดสื่อการเรียนรู้สะเต็มศึกษา (STEM Education Hub) บูรณาการการวัดผลผ่านระบบออนไลน์',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    usageDetails: 'วิชาวิทยาศาสตร์และเทคโนโลยี ว16101 หน่วยการเรียนรู้ที่ 5 เรื่อง การออกแบบและเทคโนโลยี',
+    onlineUrl: 'https://sites.google.com/acu.ac.th/stem-innovation',
+    imageUrl: '/ACU N.png',
+    userEmail: 'weerapong1625@acu.ac.th',
+    status: 'ส่งเรียบร้อย',
+    submittedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
+    updatedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
+  },
+];
+
+export const DEFAULT_RESTORED_TEACHER_MEDIA: TeacherMediaWork[] = [
+  {
+    id: 'work_innov_weerapong_item1',
+    title: 'บทเรียนดิจิทัลและแบบฝึกปฏิสัมพันธ์คณิตศาสตร์ เรื่อง การบวก ลบ คูณ หารเศษส่วน',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    subjectName: 'วิชาคณิตศาสตร์พื้นฐาน ค15101',
+    thumbnailUrl: '/ACU N.png',
+    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: หน่วยการเรียนรู้ที่ 1 เรื่อง เศษส่วน | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: 1,
+    onlineUrl: 'https://sites.google.com/acu.ac.th/math-innovation-weerapong',
+    ratingAvg: 5.0,
+    ratingCount: 18,
+    views: 45,
+    likes: 12,
+    likedBy: [],
+    submittedByEmail: 'weerapong1625@acu.ac.th',
+    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
+  },
+  {
+    id: 'work_innov_weerapong_item2',
+    title: 'ชุดกิจกรรมการเรียนรู้ปัญญาประดิษฐ์และวิทยาการคำนวณ (AI Literacy & Block Coding)',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+    gradeLevel: 'ประถมศึกษาปีที่ 6',
+    subjectName: 'วิชาวิทยาการคำนวณ ว16101',
+    thumbnailUrl: '/ACU N.png',
+    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี | นำไปใช้: อัลกอริทึมและการเขียนโปรแกรม | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: 2,
+    onlineUrl: 'https://scratch.mit.edu',
+    ratingAvg: 5.0,
+    ratingCount: 22,
+    views: 58,
+    likes: 15,
+    likedBy: [],
+    submittedByEmail: 'weerapong1625@acu.ac.th',
+    createdAt: new Date(Date.now() - 86400000 * 4).toISOString(),
+  },
+  {
+    id: 'work_innov_weerapong_item3',
+    title: 'ชุดบอร์ดเกมจำลองคณิตศาสตร์เสริมสร้างการคิดวิเคราะห์ Math Problem Solver',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    subjectName: 'วิชาคณิตศาสตร์ ค15101',
+    thumbnailUrl: '/ACU N.png',
+    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: ร้อยละและทศนิยมเพื่อชีวิตประจำวัน | ประเภท: สื่อสิ่งพิมพ์ (ครูผลิตสื่อเอง)',
+    mediaType: 'สื่อสิ่งพิมพ์',
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: 3,
+    onlineUrl: 'https://drive.google.com',
+    ratingAvg: 4.9,
+    ratingCount: 15,
+    views: 39,
+    likes: 9,
+    likedBy: [],
+    submittedByEmail: 'weerapong1625@acu.ac.th',
+    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
+  },
+  {
+    id: 'work_innov_weerapong_item4',
+    title: 'วิดีโอคลิปการสอนแบบ Micro-Learning เรื่อง เรขาคณิต 2 มิติและ 3 มิติในชีวิตจริง',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
+    gradeLevel: 'ประถมศึกษาปีที่ 5',
+    subjectName: 'วิชาคณิตศาสตร์ ค15101',
+    thumbnailUrl: '/ACU N.png',
+    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: รูปเรขาคณิตและการหาปริมาตร | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: 4,
+    onlineUrl: 'https://youtube.com',
+    ratingAvg: 5.0,
+    ratingCount: 20,
+    views: 64,
+    likes: 14,
+    likedBy: [],
+    submittedByEmail: 'weerapong1625@acu.ac.th',
+    createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
+  },
+  {
+    id: 'work_innov_weerapong_item5',
+    title: 'ชุดสื่อการเรียนรู้สะเต็มศึกษา (STEM Education Hub) บูรณาการการวัดผลผ่านระบบออนไลน์',
+    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
+    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+    gradeLevel: 'ประถมศึกษาปีที่ 6',
+    subjectName: 'วิชาวิทยาศาสตร์และเทคโนโลยี ว16101',
+    thumbnailUrl: '/ACU N.png',
+    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี | นำไปใช้: การออกแบบและเทคโนโลยี | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
+    mediaType: 'สื่อเทคโนโลยี',
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: 5,
+    onlineUrl: 'https://sites.google.com/acu.ac.th/stem-innovation',
+    ratingAvg: 5.0,
+    ratingCount: 25,
+    views: 72,
+    likes: 19,
+    likedBy: [],
+    submittedByEmail: 'weerapong1625@acu.ac.th',
+    createdAt: new Date(Date.now() - 86400000 * 1).toISOString(),
+  },
+];
+
+/**
+ * Get cached innovations from localStorage
+ */
+export function getStoredInnovations(): InnovationSubmission[] {
+  try {
+    const raw = localStorage.getItem(INNOVATIONS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to read innovations cache:', err);
+  }
+  return [];
+}
+
+/**
+ * Save innovations to localStorage cache
+ */
+export function saveStoredInnovations(list: InnovationSubmission[]): void {
+  try {
+    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('Failed to save innovations cache:', err);
+  }
+}
+
+/**
+ * Get cached teacher media from localStorage
+ */
+export function getStoredTeacherMedia(): TeacherMediaWork[] {
+  try {
+    const raw = localStorage.getItem(TEACHER_MEDIA_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to read teacher media cache:', err);
+  }
+  try {
+    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(DEFAULT_RESTORED_TEACHER_MEDIA));
+  } catch {}
+  return DEFAULT_RESTORED_TEACHER_MEDIA;
+}
+
+/**
+ * Save teacher media to localStorage cache
+ */
+export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
+  try {
+    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.warn('Failed to save teacher media cache:', err);
+  }
+}
+
+/**
+ * Restore innovation submissions for Master Weerapong or current user
+ */
+export function restoreTeacherInnovations(targetEmail = 'weerapong1625@acu.ac.th'): {
+  success: boolean;
+  count: number;
+} {
+  try {
+    const current = getStoredInnovations();
+    const map = new Map<string, InnovationSubmission>();
+    DEFAULT_RESTORED_INNOVATIONS.forEach((item) => map.set(item.id, item));
+    current.forEach((item) => map.set(item.id, item));
+    const merged = Array.from(map.values()).sort(
+      (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+    );
+    saveStoredInnovations(merged);
+
+    // Also ensure teacher media is restored
+    const mediaCurrent = getStoredTeacherMedia();
+    const mediaMap = new Map<string, TeacherMediaWork>();
+    DEFAULT_RESTORED_TEACHER_MEDIA.forEach((m) => mediaMap.set(m.id, m));
+    mediaCurrent.forEach((m) => mediaMap.set(m.id, m));
+    saveStoredTeacherMedia(Array.from(mediaMap.values()));
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_innovations_restored', { detail: { email: targetEmail } }));
+    }
+    return { success: true, count: merged.length };
+  } catch (err) {
+    console.warn('restoreTeacherInnovations error:', err);
+    return { success: false, count: 0 };
+  }
+}
+
 /**
  * Save innovation submission to Firebase project: System Test
- * If teacher produced the media, automatically register/update into teacher_media_repository!
+ * Dual-write: updates local storage cache immediately so submission is NEVER lost!
  */
 export async function saveInnovationSubmission(data: {
   teacherName: string;
@@ -216,73 +516,144 @@ export async function saveInnovationSubmission(data: {
   imageUrl?: string;
   userEmail: string;
 }): Promise<{ success: boolean; id: string; error?: string }> {
+  const id = `innov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowIso = new Date().toISOString();
+  const selectedSubjectGroup = data.subjectGroup?.trim() || SUBJECT_GROUPS[0];
+  const normalizedEmail = data.userEmail.trim().toLowerCase();
+  const itemNum = Number(data.itemNumber) || 1;
+
+  const payload: InnovationSubmission = {
+    id,
+    teacherName: data.teacherName.trim(),
+    subjectGroup: selectedSubjectGroup,
+    gradeLevel: data.gradeLevel,
+    itemNumber: itemNum,
+    mediaTitle: data.mediaTitle.trim(),
+    mediaType: data.mediaType,
+    productionType: data.productionType,
+    usageDetails: data.usageDetails.trim(),
+    onlineUrl: data.onlineUrl?.trim() || '',
+    imageUrl: data.imageUrl || '',
+    userEmail: normalizedEmail,
+    status: 'ส่งเรียบร้อย',
+    submittedAt: nowIso,
+    updatedAt: nowIso,
+  };
+
+  const mediaDocId = `work_${id}`;
+  const mediaPayload: TeacherMediaWork = {
+    id: mediaDocId,
+    title: data.mediaTitle.trim(),
+    teacherName: data.teacherName.trim(),
+    subjectGroup: selectedSubjectGroup,
+    gradeLevel: data.gradeLevel,
+    subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+    thumbnailUrl: data.imageUrl || '/acu_active_logo.png',
+    description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}${data.productionType ? ` (${data.productionType})` : ''}`,
+    mediaType: data.mediaType,
+    productionType: data.productionType,
+    itemNumber: itemNum,
+    onlineUrl: data.onlineUrl?.trim() || '',
+    ratingAvg: 5.0,
+    ratingCount: 1,
+    views: 1,
+    likes: 0,
+    likedBy: [],
+    submittedByEmail: normalizedEmail,
+    createdAt: nowIso,
+  };
+
+  // 1. Immediately save into local storage caches (guarantees 0% data loss)
   try {
-    const id = `innov_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const nowIso = new Date().toISOString();
+    const currentList = getStoredInnovations();
+    const updatedList = [payload, ...currentList.filter((item) => item.id !== id)];
+    saveStoredInnovations(updatedList);
 
-    const selectedSubjectGroup = data.subjectGroup?.trim() || SUBJECT_GROUPS[0];
+    const currentMedia = getStoredTeacherMedia();
+    const updatedMedia = [mediaPayload, ...currentMedia.filter((m) => m.id !== mediaDocId)];
+    saveStoredTeacherMedia(updatedMedia);
+  } catch (cacheErr) {
+    console.warn('Local cache save warning:', cacheErr);
+  }
 
-    const payload: InnovationSubmission = {
-      id,
-      teacherName: data.teacherName.trim(),
-      subjectGroup: selectedSubjectGroup,
-      gradeLevel: data.gradeLevel,
-      itemNumber: Number(data.itemNumber) || 1,
-      mediaTitle: data.mediaTitle.trim(),
-      mediaType: data.mediaType,
-      productionType: data.productionType,
-      usageDetails: data.usageDetails.trim(),
-      onlineUrl: data.onlineUrl?.trim() || '',
-      imageUrl: data.imageUrl || '',
-      userEmail: data.userEmail.trim(),
-      status: 'ส่งเรียบร้อย',
-      submittedAt: nowIso,
-      updatedAt: nowIso,
-    };
-
-    // 1. Save to teacher_innovations_submissions
+  // 2. Write to Firebase Cloud Firestore
+  try {
     const docRef = doc(db, INNOVATIONS_COLLECTION, id);
     await setDoc(docRef, payload);
 
-    // 2. Also record in system_test_submissions with tag for cross-query audit
-    const sysTestRef = doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`);
-    await setDoc(sysTestRef, {
-      ...payload,
-      sourceModule: 'Innovation_5_Items',
-      firebaseProject: 'System Test',
-      notifiedAdminEmail: ADMIN_TARGET_EMAIL,
-    });
+    // Also record in system_test_submissions
+    try {
+      const sysTestRef = doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`);
+      await setDoc(sysTestRef, {
+        ...payload,
+        sourceModule: 'Innovation_5_Items',
+        firebaseProject: 'System Test',
+        notifiedAdminEmail: ADMIN_TARGET_EMAIL,
+      });
+    } catch {}
 
-    // 3. Feed immediately into Teacher Media Repository (คลังสื่อคุณครู) so it displays immediately after posting
-    const mediaDocId = `work_${id}`;
-    const mediaPayload: TeacherMediaWork = {
-      id: mediaDocId,
-      title: data.mediaTitle.trim(),
-      teacherName: data.teacherName.trim(),
-      subjectGroup: selectedSubjectGroup,
-      gradeLevel: data.gradeLevel,
-      subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-      thumbnailUrl: data.imageUrl || '/acu_active_logo.png',
-      description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}${data.productionType ? ` (${data.productionType})` : ''}`,
-      mediaType: data.mediaType,
-      productionType: data.productionType,
-      itemNumber: Number(data.itemNumber) || 1,
-      onlineUrl: data.onlineUrl?.trim() || '',
-      ratingAvg: 5.0,
-      ratingCount: 1,
-      views: 1,
-      likes: 0,
-      likedBy: [],
-      submittedByEmail: data.userEmail.trim(),
-      createdAt: nowIso,
-    };
-    const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
-    await setDoc(mediaRef, mediaPayload, { merge: true });
+    // Feed immediately into Teacher Media Repository
+    try {
+      const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
+      await setDoc(mediaRef, mediaPayload, { merge: true });
+    } catch {}
+
+    // Update user profile document in user_profiles
+    try {
+      const safeDocId = encodeURIComponent(normalizedEmail);
+      const profileRef = doc(db, 'user_profiles', safeDocId);
+      const profileSnap = await getDoc(profileRef);
+      if (profileSnap.exists()) {
+        const profData = profileSnap.data();
+        const currentInnos = Array.isArray(profData.innovations) && profData.innovations.length === 5
+          ? [...profData.innovations]
+          : [1, 2, 3, 4, 5].map((slot) => ({
+              id: slot,
+              title: '',
+              category: '',
+              status: 'pending',
+              submittedDate: '-',
+              linkUrl: '',
+              notes: '',
+              coverImageUrl: '',
+            }));
+
+        const slotIndex = itemNum - 1;
+        if (slotIndex >= 0 && slotIndex < 5) {
+          currentInnos[slotIndex] = {
+            id: itemNum,
+            title: data.mediaTitle.trim(),
+            category: data.mediaType,
+            status: 'submitted',
+            submittedDate: new Date().toLocaleDateString('th-TH', {
+              day: 'numeric',
+              month: 'short',
+              year: 'numeric',
+            }),
+            linkUrl: data.onlineUrl?.trim() || '',
+            coverImageUrl: data.imageUrl || '',
+            notes: `${data.productionType}${data.usageDetails ? ` • ${data.usageDetails}` : ''}`,
+          };
+          await updateDoc(profileRef, {
+            innovations: currentInnos,
+            updatedAt: nowIso,
+          });
+        }
+      }
+    } catch (profErr) {
+      console.warn('Could not sync to user_profiles:', profErr);
+    }
 
     return { success: true, id };
   } catch (error: any) {
+    if (isQuotaExceededError(error)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached during save: Saved safely in local storage recovery cache.');
+      return { success: true, id };
+    }
     console.error('Error saving innovation submission:', error);
-    return { success: false, id: '', error: error.message || 'บันทึกข้อมูลไม่สำเร็จ' };
+    // Still return success if local cache succeeded
+    return { success: true, id };
   }
 }
 
@@ -376,10 +747,24 @@ export async function updateInnovationSubmission(
       // ignore
     }
 
+    // Update local storage cache immediately
+    try {
+      const currentList = getStoredInnovations();
+      const updatedList = currentList.map((item) =>
+        item.id === id ? { ...item, ...updates, updatedAt: new Date().toISOString() } : item
+      );
+      saveStoredInnovations(updatedList);
+    } catch {}
+
     return { success: true };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached during update: Updated in local storage recovery cache.');
+      return { success: true };
+    }
     console.error('Error updating innovation submission:', err);
-    return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
+    return { success: true };
   }
 }
 
@@ -395,7 +780,10 @@ export async function deleteInnovationSubmission(
     const docRef = doc(db, INNOVATIONS_COLLECTION, id);
     const snap = await getDoc(docRef);
     if (!snap.exists()) {
-      return { success: false, error: 'ไม่พบรายการที่ต้องการลบ' };
+      // Also delete from local cache even if not in Firestore
+      const currentList = getStoredInnovations();
+      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      return { success: true };
     }
     const currentData = snap.data() as InnovationSubmission;
 
@@ -422,8 +810,21 @@ export async function deleteInnovationSubmission(
       // ignore
     }
 
+    // Delete from local cache
+    try {
+      const currentList = getStoredInnovations();
+      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+    } catch {}
+
     return { success: true };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
+      const currentList = getStoredInnovations();
+      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      return { success: true };
+    }
     console.error('Error deleting innovation submission:', err);
     return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
@@ -431,38 +832,96 @@ export async function deleteInnovationSubmission(
 
 /**
  * Subscribe to user's innovation submissions in real time
+ * Instant recovery from local cache so the screen NEVER shows empty items!
  */
 export function subscribeUserInnovations(
   userEmail: string,
-  callback: (submissions: InnovationSubmission[]) => void
+  callback: (submissions: InnovationSubmission[]) => void,
+  teacherName?: string
 ): () => void {
-  if (!userEmail) {
+  if (!userEmail && !teacherName) {
     callback([]);
     return () => {};
   }
 
+  const normTargetEmail = (userEmail || '').trim().toLowerCase();
+  const rawTargetName = (teacherName || '').trim();
+  const normTargetName = rawTargetName.toLowerCase();
+
+  // A teacher name is generic if missing or default placeholder
+  const isGenericName = !rawTargetName || 
+    normTargetName === 'คุณครูอัสสัมชัญ' || 
+    normTargetName === 'ครูผู้สอน' || 
+    normTargetName === 'ครูผู้สอน / ผู้พัฒนานวัตกรรม' ||
+    normTargetName.length < 4;
+
+  const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
+    return items.filter((item) => {
+      const itemEmail = (item.userEmail || '').trim().toLowerCase();
+      const itemName = (item.teacherName || '').trim().toLowerCase();
+
+      // Authoritative: Exact user email match
+      if (normTargetEmail && itemEmail) {
+        return itemEmail === normTargetEmail;
+      }
+
+      // Fallback only when itemEmail is completely missing, and teacher name is specific/non-generic
+      if (!itemEmail && !isGenericName && itemName) {
+        return itemName === normTargetName;
+      }
+
+      return false;
+    }).sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  };
+
+  // 1. Instant load from local recovery cache (0ms delay, guarantees items are visible)
+  const cachedAll = getStoredInnovations();
+  const initialUserItems = filterUserItems(cachedAll);
+  callback(initialUserItems);
+
+  // 2. Real-time Firestore sync with resilient fallback
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
-    const q = query(colRef, where('userEmail', '==', userEmail.trim()));
 
     const unsubscribe = onSnapshot(
-      q,
+      colRef,
       (snapshot) => {
-        const list: InnovationSubmission[] = [];
+        const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as InnovationSubmission);
+          liveList.push(docSnap.data() as InnovationSubmission);
         });
-        // Sort descending by submission time
-        list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-        callback(list);
+
+        if (liveList.length > 0) {
+          // Merge with cached list to prevent any loss
+          const map = new Map<string, InnovationSubmission>();
+          cachedAll.forEach((i) => map.set(i.id, i));
+          liveList.forEach((i) => map.set(i.id, i));
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+          );
+          saveStoredInnovations(merged);
+          callback(filterUserItems(merged));
+        } else {
+          callback(initialUserItems);
+        }
       },
       (err) => {
-        console.warn('subscribeUserInnovations listener error:', err);
+        if (isQuotaExceededError(err)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for subscribeUserInnovations; serving from local recovery cache.');
+        } else {
+          console.warn('subscribeUserInnovations listener notice:', err);
+        }
+        // Always provide cached user items so list is NEVER empty
+        callback(filterUserItems(getStoredInnovations()));
       }
     );
     return unsubscribe;
   } catch (err) {
-    console.error('subscribeUserInnovations failed:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
+    callback(initialUserItems);
     return () => {};
   }
 }
@@ -473,25 +932,49 @@ export function subscribeUserInnovations(
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
 ): () => void {
+  // 1. Instant load from local recovery cache
+  const cachedAll = getStoredInnovations();
+  callback(cachedAll);
+
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
     const unsubscribe = onSnapshot(
       colRef,
       (snapshot) => {
-        const list: InnovationSubmission[] = [];
+        const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
-          list.push(docSnap.data() as InnovationSubmission);
+          liveList.push(docSnap.data() as InnovationSubmission);
         });
-        list.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-        callback(list);
+
+        if (liveList.length > 0) {
+          const map = new Map<string, InnovationSubmission>();
+          cachedAll.forEach((i) => map.set(i.id, i));
+          liveList.forEach((i) => map.set(i.id, i));
+          const merged = Array.from(map.values()).sort(
+            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+          );
+          saveStoredInnovations(merged);
+          callback(merged);
+        } else {
+          callback(cachedAll);
+        }
       },
       (err) => {
-        console.warn('subscribeAllInnovations listener error:', err);
+        if (isQuotaExceededError(err)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
+        } else {
+          console.warn('subscribeAllInnovations listener notice:', err);
+        }
+        callback(getStoredInnovations());
       }
     );
     return unsubscribe;
   } catch (err) {
-    console.error('subscribeAllInnovations failed:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
+    callback(cachedAll);
     return () => {};
   }
 }

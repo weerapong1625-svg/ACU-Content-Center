@@ -50,7 +50,7 @@ import {
   Camera,
   Gift
 } from 'lucide-react';
-import { ADMIN_TARGET_EMAIL } from '../services/submissionService';
+import { ADMIN_TARGET_EMAIL, subscribeUserInnovations } from '../services/submissionService';
 
 interface TeacherDashboardProps {
   userEmail: string;
@@ -85,6 +85,26 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
+  const [innovationInitialTab, setInnovationInitialTab] = useState<'form' | 'status'>('form');
+  const [userInnovationsCount, setUserInnovationsCount] = useState<number>(0);
+
+  // Real-time subscribe to user's 5-item submission count for dynamic badge
+  useEffect(() => {
+    const unsub = subscribeUserInnovations(
+      userEmail,
+      (list) => {
+        const distinctSlots = new Set(
+          list
+            .filter((item) => item.mediaTitle && item.mediaTitle.trim().length > 0)
+            .map((item) => Number(item.itemNumber))
+            .filter((num) => num >= 1 && num <= 5)
+        );
+        setUserInnovationsCount(distinctSlots.size);
+      },
+      profile?.fullName
+    );
+    return () => unsub();
+  }, [userEmail, profile?.fullName]);
 
   // Search & Filter state for Media Repository
   const [searchMedia, setSearchMedia] = useState('');
@@ -136,7 +156,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       id: 'btn-1',
       number: '1',
       title: 'ส่งสื่อ/นวัตกรรม 5 ชิ้น',
-      badge: 'เป้าหมายประจำปี 5 รายการ',
+      badge: userInnovationsCount >= 5 
+        ? 'ส่งครบ 5 ชิ้นแล้ว ✔' 
+        : userInnovationsCount > 0 
+          ? `ส่งแล้ว ${userInnovationsCount}/5 ชิ้น` 
+          : 'เป้าหมาย 5 ชิ้น',
       description: 'ระบบอัปโหลดและติดตามสถานะการส่งสื่อนวัตกรรมการจัดการเรียนรู้ตามเกณฑ์ 5 ชิ้น',
       icon: UploadCloud,
       gradient: 'from-blue-600 via-indigo-600 to-indigo-700',
@@ -442,16 +466,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
-            <button
-              type="button"
-              onClick={() => setActiveModalId('btn-1')}
-              className="px-3.5 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold shadow-md transition-transform hover:scale-105 flex items-center gap-1.5 cursor-pointer"
-            >
-              <UploadCloud className="w-3.5 h-3.5" />
-              <span>ส่งสื่อนวัตกรรม 5 ชิ้น</span>
-            </button>
-          </div>
+          {/* Welcome header without extra upload button */}
         </section>
 
         {/* Special Privileges Activity Banner: โพสต์แชร์แหล่งเรียนรู้ 20 ครั้งขึ้นไป ลุ้นรับ 1.ตุ๊กตา 2.ขนม 3.ลูกอม */}
@@ -559,9 +574,25 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                   </p>
 
                   <div className="mt-3 pt-2.5 border-t border-slate-800/80 flex items-center justify-between text-xs font-medium text-slate-400 group-hover:text-white transition-colors">
-                    <span className="flex items-center gap-1 text-[11px] text-blue-400 group-hover:underline">
-                      เปิดหน้ารายการ
-                    </span>
+                    {btn.id === 'btn-1' ? (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setInnovationInitialTab('status');
+                          setActiveModalId('btn-1');
+                        }}
+                        className="px-2.5 py-1 rounded-lg bg-blue-600/30 hover:bg-blue-600 text-blue-200 hover:text-white border border-blue-500/40 text-[11px] font-bold transition-all flex items-center gap-1 cursor-pointer"
+                        title="คลิกเพื่อตรวจสอบสถานะการส่งสื่อ 5 ชิ้นทันที"
+                      >
+                        <Clock className="w-3 h-3" />
+                        <span>เช็คสถานะ 5 ชิ้น</span>
+                      </button>
+                    ) : (
+                      <span className="flex items-center gap-1 text-[11px] text-blue-400 group-hover:underline">
+                        เปิดหน้ารายการ
+                      </span>
+                    )}
                     <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-white transition-transform group-hover:translate-x-1" />
                   </div>
                 </div>
@@ -588,7 +619,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         <TeacherInnovationSubmissionModal
           userEmail={userEmail}
           defaultTeacherName={profile?.fullName}
-          onClose={() => setActiveModalId(null)}
+          initialTab={innovationInitialTab}
+          onClose={() => {
+            setActiveModalId(null);
+            setInnovationInitialTab('form');
+          }}
         />
       )}
 

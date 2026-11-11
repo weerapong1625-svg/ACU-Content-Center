@@ -17,6 +17,7 @@ import {
   WARNING_BEFORE_TIMEOUT_MS,
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
+import { logUserLogin } from './services/auditService';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -60,6 +61,35 @@ export default function App() {
     }
   });
 
+  // Unified single-point visit recorder to strictly guarantee 1 visit = 1 count
+  const recordLoginVisit = useCallback((email: string, method: string) => {
+    const norm = email.toLowerCase().trim();
+    if (!norm) return;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const sessionKey = `acu_visit_logged_${norm}_${todayStr}`;
+    
+    if (typeof window !== 'undefined') {
+      if (sessionStorage.getItem(sessionKey)) {
+        return; // Already logged today in this session
+      }
+      sessionStorage.setItem(sessionKey, '1');
+    }
+
+    const isAdmin = norm === 'weerapong1625@acu.ac.th';
+    logUserLogin({
+      email: norm,
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : norm.split('@')[0],
+      role: isAdmin ? 'admin' : 'teacher',
+      loginMethod: method,
+    });
+  }, []);
+
+  // Auto-record visit for active or returning session
+  React.useEffect(() => {
+    if (!loggedInUser) return;
+    recordLoginVisit(loggedInUser, 'Session Visit');
+  }, [loggedInUser, recordLoginVisit]);
+
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
     try {
@@ -84,6 +114,7 @@ export default function App() {
     } catch {
       // ignore
     }
+    recordLoginVisit(email, 'Direct Login');
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)
