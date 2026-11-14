@@ -45,6 +45,8 @@ import {
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
   subscribeUserInnovations, 
+  deleteInnovationSubmission,
+  InnovationSubmission,
   subscribeTeacherMedia, 
   TeacherMediaWork 
 } from '../services/submissionService';
@@ -140,6 +142,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
+  const [liveUserSubmissions, setLiveUserSubmissions] = useState<InnovationSubmission[]>([]);
+  const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
@@ -232,7 +236,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     const unsubscribe = subscribeUserInnovations(
       userEmail,
       (userInnos) => {
+        setLiveUserSubmissions(userInnos);
         setProfile((prev) => {
+          let hadStaleSlotForMaster = false;
+
           // Map real submissions into the 5 slots
           const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
             const match = userInnos.find((u) => Number(u.itemNumber) === defItem.id);
@@ -255,8 +262,16 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               };
             }
 
-            // If prev had an item that was already submitted or edited, keep it
             const existing = prev.innovations?.find((ex) => ex.id === defItem.id);
+            if (isMasterWeerapong) {
+              // Strictly clear stale/fake slots for weerapong1625@acu.ac.th when no real submission exists
+              if (existing && (existing.title || existing.status !== 'pending')) {
+                hadStaleSlotForMaster = true;
+              }
+              return defItem;
+            }
+
+            // Preserve other users' existing profile slot state untouched
             if (existing && existing.title && existing.status !== 'pending') {
               return existing;
             }
@@ -264,17 +279,26 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             return defItem;
           });
 
-          return {
+          const nextProfile: FullUserProfile = {
             ...prev,
             innovations: updatedInnovations,
           };
+
+          if (isMasterWeerapong && hadStaleSlotForMaster) {
+            saveFullUserProfile({
+              ...nextProfile,
+              updatedAt: new Date().toISOString(),
+            }).catch((err) => console.warn('Sync master admin empty slots:', err));
+          }
+
+          return nextProfile;
         });
       },
       teacherNameLookup
     );
 
     return () => unsubscribe();
-  }, [isOpen, userEmail, userName, profile?.fullName]);
+  }, [isOpen, userEmail, userName, profile?.fullName, isMasterWeerapong]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear) || new Date().getFullYear();
@@ -459,6 +483,64 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     setProfile(updatedProfile);
     await saveFullUserProfile(updatedProfile);
     setEditingInnovationId(null);
+  };
+
+  // Handle deleting a specific innovation slot item (Admin or profile owner)
+  const handleDeleteInnovationSlot = async (slotId: number, itemTitle?: string) => {
+    const isOwnerOrAdmin = isAdmin || activeViewerEmail === userEmail.toLowerCase().trim();
+    if (!isOwnerOrAdmin) {
+      alert('คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น');
+      return;
+    }
+
+    const displayTitle = itemTitle?.trim() || `ชิ้นที่ ${slotId}`;
+    if (!window.confirm(`ยืนยันการลบสื่อ "${displayTitle}" (ชิ้นที่ ${slotId}) ออกจากระบบใช่หรือไม่?`)) {
+      return;
+    }
+
+    setDeletingSlotId(slotId);
+    try {
+      const matchingSubs = liveUserSubmissions.filter((s) => Number(s.itemNumber) === slotId);
+      const actorEmail = activeViewerEmail || userEmail;
+      for (const sub of matchingSubs) {
+        const res = await deleteInnovationSubmission(sub.id, actorEmail);
+        if (!res.success) {
+          alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
+          return;
+        }
+      }
+
+      const defaultSlot = DEFAULT_INNOVATION_ITEMS.find((d) => d.id === slotId) || {
+        id: slotId,
+        title: '',
+        category: '',
+        status: 'pending' as const,
+        submittedDate: '-',
+        linkUrl: '',
+        notes: '',
+        coverImageUrl: '',
+      };
+
+      const updatedInnovations = profile.innovations.map((item) =>
+        item.id === slotId ? defaultSlot : item
+      );
+
+      const updatedProfile: FullUserProfile = {
+        ...profile,
+        innovations: updatedInnovations,
+        updatedAt: new Date().toISOString(),
+      };
+
+      setProfile(updatedProfile);
+      await saveFullUserProfile(updatedProfile);
+      if (editingInnovationId === slotId) {
+        setEditingInnovationId(null);
+      }
+    } catch (err: any) {
+      alert('ไม่สามารถลบสื่อได้: ' + (err?.message || 'โปรดลองใหม่'));
+    } finally {
+      setDeletingSlotId(null);
+    }
   };
 
   // Handle Visitor Praise and Star Rating Submission
@@ -1024,16 +1106,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                         </div>
                       </div>
 
-                      {/* Action edit button */}
+                      {/* Action buttons (edit & delete) */}
                       {!isEditing && (
-                        <button
-                          type="button"
-                          onClick={() => setEditingInnovationId(item.id)}
-                          className="px-3 py-1.5 rounded-xl bg-slate-700/70 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium inline-flex items-center gap-1 transition-colors self-end sm:self-center"
-                        >
-                          <Edit3 className="w-3.5 h-3.5 text-sky-400" />
-                          <span>อัปเดตชิ้นงาน</span>
-                        </button>
+                        <div className="flex items-center gap-2 self-end sm:self-center">
+                          <button
+                            type="button"
+                            onClick={() => setEditingInnovationId(item.id)}
+                            className="px-3 py-1.5 rounded-xl bg-slate-700/70 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-medium inline-flex items-center gap-1 transition-colors cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-sky-400" />
+                            <span>อัปเดตชิ้นงาน</span>
+                          </button>
+
+                          {(item.status !== 'pending' || Boolean(item.title)) &&
+                            (isAdmin || activeViewerEmail === userEmail.toLowerCase().trim()) && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteInnovationSlot(item.id, item.title)}
+                                disabled={deletingSlotId === item.id}
+                                className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-semibold inline-flex items-center gap-1 transition-colors cursor-pointer disabled:opacity-50"
+                                title={`ลบสื่อชิ้นที่ ${item.id}`}
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>{deletingSlotId === item.id ? 'กำลังลบ...' : 'ลบสื่อ'}</span>
+                              </button>
+                            )}
+                        </div>
                       )}
                     </div>
                   );

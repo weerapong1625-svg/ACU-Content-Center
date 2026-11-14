@@ -113,30 +113,27 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     };
   }, [userEmail, defaultTeacherName, editingId]);
 
-  // Combined user submissions to ensure 0% missing items due to casing or name variations
+  // Match user submissions strictly by email when userEmail is present (prevents cross-user or stale resurrection)
   const effectiveUserSubmissions = React.useMemo(() => {
+    if (userSubmissions.length > 0) {
+      return userSubmissions;
+    }
+
     const normEmail = userEmail.trim().toLowerCase();
     const normName = (teacherName || defaultTeacherName || '').trim().toLowerCase();
 
-    const fromAll = allSubmissions.filter((sub) => {
-      const subEmail = (sub.userEmail || '').trim().toLowerCase();
-      const subName = (sub.teacherName || '').trim().toLowerCase();
-      const emailMatches = normEmail && subEmail === normEmail;
-      const nameMatches = normName && (subName === normName || (normName.length > 3 && subName.includes(normName)));
-      return emailMatches || nameMatches;
-    });
-
-    if (fromAll.length > 0) {
-      // Merge unique by id
-      const map = new Map<string, InnovationSubmission>();
-      userSubmissions.forEach(s => map.set(s.id, s));
-      fromAll.forEach(s => map.set(s.id, s));
-      const merged = Array.from(map.values());
-      merged.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-      return merged;
-    }
-
-    return userSubmissions;
+    return allSubmissions
+      .filter((sub) => {
+        const subEmail = (sub.userEmail || '').trim().toLowerCase();
+        const subName = (sub.teacherName || '').trim().toLowerCase();
+        if (subEmail) {
+          return Boolean(normEmail && subEmail === normEmail);
+        }
+        return Boolean(
+          normName && (subName === normName || (normName.length > 3 && subName.includes(normName)))
+        );
+      })
+      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   }, [allSubmissions, userSubmissions, userEmail, teacherName, defaultTeacherName]);
 
   // Calculate next unsubmitted item slot (1 to 5)
@@ -1204,14 +1201,26 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                 )}
 
                                 {canUserModify(match.userEmail, userEmail) && (
-                                  <button
-                                    type="button"
-                                    onClick={() => handleStartEdit(match)}
-                                    className="px-2.5 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3" />
-                                    <span>แก้ไข</span>
-                                  </button>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => handleStartEdit(match)}
+                                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      title="แก้ไขข้อมูลสื่อ"
+                                    >
+                                      <Edit3 className="w-3 h-3" />
+                                      <span>แก้ไข</span>
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleDeleteSubmission(match)}
+                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      title="ลบสื่อนี้"
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>ลบ</span>
+                                    </button>
+                                  </div>
                                 )}
                               </div>
                             ) : (

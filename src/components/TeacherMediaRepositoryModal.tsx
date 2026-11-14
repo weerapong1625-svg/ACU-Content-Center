@@ -194,6 +194,9 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       setVoteSuccessMsg(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
       setMediaList(prev => prev.filter(m => m.id !== item.id));
       setRawMediaList(prev => prev.filter(m => m.id !== item.id));
+      if (activeViewItem && activeViewItem.id === item.id) {
+        setActiveViewItem(null);
+      }
       setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
       alert(res.error || 'ลบข้อมูลไม่สำเร็จ');
@@ -254,8 +257,9 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       (item.gradeLevel && item.gradeLevel.toLowerCase().includes(searchTerm.toLowerCase()));
     const matchesGroup = selectedGroup === 'all' || item.subjectGroup === selectedGroup;
     const matchesMyPosts = !onlyMyPosts || (
-      (item.submittedByEmail && item.submittedByEmail.toLowerCase().trim() === userEmail.toLowerCase().trim()) ||
-      item.teacherName.toLowerCase().includes(userEmail.split('@')[0].toLowerCase())
+      item.submittedByEmail
+        ? item.submittedByEmail.toLowerCase().trim() === userEmail.toLowerCase().trim()
+        : item.teacherName.toLowerCase().includes(userEmail.split('@')[0].toLowerCase())
     );
     return matchesSearch && matchesGroup && matchesMyPosts;
   });
@@ -867,7 +871,19 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               <span className="text-xs text-slate-400">
                 เข้าสู่ระบบด้วย: {userEmail}
               </span>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 flex-wrap">
+                {canUserModify(activeViewItem.submittedByEmail, userEmail) && (
+                  <button
+                    type="button"
+                    onClick={() => handleDelete(activeViewItem)}
+                    className="px-3 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    title="ลบสื่อนี้"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    <span>ลบสื่อนี้</span>
+                  </button>
+                )}
+
                 <button
                   type="button"
                   onClick={() => handleToggleLike(activeViewItem)}

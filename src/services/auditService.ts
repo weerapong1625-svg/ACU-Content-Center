@@ -1,5 +1,6 @@
 import { collection, addDoc, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
+import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 
 export interface LoginLogEntry {
   id?: string;
@@ -29,71 +30,56 @@ export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 let lastLogTime = 0;
 let lastLogEmail = '';
 
+const FAKE_SAMPLE_EMAILS = new Set([
+  'kanda@acu.ac.th',
+  'pranee@acu.ac.th',
+  'somchai@acu.ac.th',
+  'anchalee@acu.ac.th',
+]);
+
 /**
- * Generate initial baseline logs if storage is empty
- * Ensures authentic statistics across 12 months with Admin having 100+ visits
+ * Deduplicate rapid consecutive duplicate logs (e.g. within 2 minutes for the same user)
  */
-function generateInitialBaselineLogs(): LoginLogEntry[] {
-  const logs: LoginLogEntry[] = [];
-  const currentYear = new Date().getFullYear() || 2026;
-  const adminEmail = 'weerapong1625@acu.ac.th';
-
-  // Baseline for Admin: 105 visits across months 0..9 (Jan..Oct)
-  for (let i = 0; i < 105; i++) {
-    const month = i % 10;
-    const day = (i % 28) + 1;
-    const hour = 8 + (i % 10);
-    const minute = (i * 7) % 60;
-    const d = new Date(currentYear, month, day, hour, minute, 0);
-    logs.push({
-      id: `seed-log-admin-${i}`,
-      email: adminEmail,
-      displayName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
-      role: 'admin',
-      loginMethod: 'Google SSO',
-      status: 'online',
-      loginTimestamp: d.toISOString(),
-      source: 'ACU Learning Media & Innovation Portal',
-      avatarUrl: '',
-    });
-  }
-
-  // Baseline for other active school accounts
-  const sampleTeachers = [
-    { email: 'kanda@acu.ac.th', name: 'มิสกานดา รุ่งเรือง', count: 24 },
-    { email: 'pranee@acu.ac.th', name: 'มิสปราณี สุขสวัสดิ์', count: 18 },
-    { email: 'somchai@acu.ac.th', name: 'ม.สมชาย พงษ์สิทธิ์', count: 21 },
-    { email: 'anchalee@acu.ac.th', name: 'มิสอัญชลี จันทร์โอชา', count: 15 },
-  ];
-
-  sampleTeachers.forEach((t, tIdx) => {
-    for (let j = 0; j < t.count; j++) {
-      const month = j % 10;
-      const day = (j % 27) + 1;
-      const hour = 9 + (j % 8);
-      const minute = (j * 11) % 60;
-      const d = new Date(currentYear, month, day, hour, minute, 0);
-      logs.push({
-        id: `seed-log-teacher-${tIdx}-${j}`,
-        email: t.email,
-        displayName: t.name,
-        role: 'teacher',
-        loginMethod: 'Google SSO',
-        status: 'online',
-        loginTimestamp: d.toISOString(),
-        source: 'ACU Learning Media & Innovation Portal',
-        avatarUrl: '',
-      });
+function deduplicateConsecutiveLogs(logs: LoginLogEntry[]): LoginLogEntry[] {
+  if (logs.length <= 1) return logs;
+  const sorted = [...logs].sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
+  const result: LoginLogEntry[] = [];
+  
+  for (let i = 0; i < sorted.length; i++) {
+    const current = sorted[i];
+    const prev = result[result.length - 1];
+    if (prev && prev.email.toLowerCase().trim() === current.email.toLowerCase().trim()) {
+      const prevTime = new Date(prev.loginTimestamp).getTime();
+      const currTime = new Date(current.loginTimestamp).getTime();
+      // If within 2 minutes (120,000 ms), it is an unwanted duplicate from double-logging
+      if (Math.abs(prevTime - currTime) < 120000) {
+        continue;
+      }
     }
-  });
-
-  // Sort descending by timestamp
-  logs.sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
-  return logs;
+    result.push(current);
+  }
+  return result;
 }
 
 /**
- * Synchronously read cached login logs from localStorage with default seed baseline
+ * Filter out any legacy synthetic/seed logs and collapse double-counts to guarantee authentic real statistics
+ */
+function sanitizeAuthenticLogs(logs: any[]): LoginLogEntry[] {
+  if (!Array.isArray(logs)) return [];
+  const deletedEmails = getDeletedUserEmails();
+  const valid = logs.filter((log) => {
+    if (!log || typeof log !== 'object') return false;
+    const id = String(log.id || '');
+    if (id.startsWith('seed-') || id.includes('seed-log-')) return false;
+    const email = String(log.email || '').toLowerCase().trim();
+    if (FAKE_SAMPLE_EMAILS.has(email) || deletedEmails.has(email)) return false;
+    return Boolean(email && log.loginTimestamp);
+  });
+  return deduplicateConsecutiveLogs(valid);
+}
+
+/**
+ * Synchronously read authentic login logs from localStorage (strictly genuine logs only)
  */
 export function getLocalLoginLogs(): LoginLogEntry[] {
   if (typeof window === 'undefined') return [];
@@ -101,17 +87,19 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
     const raw = localStorage.getItem(LOGIN_LOGS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const authentic = sanitizeAuthenticLogs(parsed);
+        // Clean out any cached seeds or duplicate logs immediately
+        if (authentic.length !== parsed.length) {
+          localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(authentic));
+        }
+        return authentic;
       }
     }
-    const baseline = generateInitialBaselineLogs();
-    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(baseline));
-    return baseline;
   } catch (err) {
     console.warn('Could not read local login logs:', err);
-    return [];
   }
+  return [];
 }
 
 /**
@@ -120,9 +108,10 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
 export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(logs));
+    const sanitized = sanitizeAuthenticLogs(logs);
+    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(sanitized));
     if (broadcast) {
-      window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: logs }));
+      window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: sanitized }));
     }
   } catch (err) {
     console.warn('Could not save login logs to localStorage:', err);
@@ -133,14 +122,16 @@ export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): voi
  * Merge Firestore logs with local logs without duplicates
  */
 function mergeLogs(primary: LoginLogEntry[], secondary: LoginLogEntry[]): LoginLogEntry[] {
+  const cleanPrimary = sanitizeAuthenticLogs(primary);
+  const cleanSecondary = sanitizeAuthenticLogs(secondary);
   const map = new Map<string, LoginLogEntry>();
 
-  primary.forEach((log) => {
+  cleanPrimary.forEach((log) => {
     const key = log.id || `${log.email}_${log.loginTimestamp}`;
     map.set(key, log);
   });
 
-  secondary.forEach((log) => {
+  cleanSecondary.forEach((log) => {
     const key = log.id || `${log.email}_${log.loginTimestamp}`;
     if (!map.has(key)) {
       map.set(key, log);
@@ -148,8 +139,7 @@ function mergeLogs(primary: LoginLogEntry[], secondary: LoginLogEntry[]): LoginL
   });
 
   const merged = Array.from(map.values());
-  merged.sort((a, b) => new Date(b.loginTimestamp).getTime() - new Date(a.loginTimestamp).getTime());
-  return merged;
+  return deduplicateConsecutiveLogs(merged);
 }
 
 /**
@@ -167,8 +157,8 @@ export async function logUserLogin(data: {
   const normEmail = data.email.toLowerCase().trim();
   const now = Date.now();
 
-  // Deduplication check: ignore duplicate calls within 5 seconds for the exact same email
-  if (normEmail === lastLogEmail && now - lastLogTime < 5000) {
+  // Deduplication check: ignore duplicate calls within 60 seconds for the exact same email
+  if (normEmail === lastLogEmail && now - lastLogTime < 60000) {
     return null;
   }
 
@@ -177,7 +167,7 @@ export async function logUserLogin(data: {
     if (typeof window !== 'undefined' && window.sessionStorage) {
       const sessEmail = sessionStorage.getItem('acu_last_login_logged_email');
       const sessTime = Number(sessionStorage.getItem('acu_last_login_logged_time') || 0);
-      if (sessEmail === normEmail && now - sessTime < 5000) {
+      if (sessEmail === normEmail && now - sessTime < 60000) {
         return null;
       }
       sessionStorage.setItem('acu_last_login_logged_email', normEmail);
@@ -228,20 +218,153 @@ export async function logUserLogin(data: {
 }
 
 /**
+ * Reset Admin's own login logs / visitor statistics to 0 immediately
+ * Preserves all other users' logs and never touches media/submissions
+ */
+export async function resetAdminLoginLogs(
+  adminEmail: string = 'weerapong1625@acu.ac.th'
+): Promise<{ success: boolean; count: number; error?: string }> {
+  try {
+    const normAdmin = adminEmail.toLowerCase().trim();
+    const localLogs = getLocalLoginLogs();
+    const adminLogs = localLogs.filter(l => (l.email || '').trim().toLowerCase() === normAdmin);
+    const count = adminLogs.length;
+    const remaining = localLogs.filter(l => (l.email || '').trim().toLowerCase() !== normAdmin);
+
+    // 1. Immediately update localStorage and emit event (0ms latency)
+    saveLocalLoginLogs(remaining, true);
+
+    // 2. Clear sessionStorage visit flags for Admin
+    if (typeof window !== 'undefined') {
+      try {
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && key.startsWith('acu_visit_logged_') && key.includes(normAdmin)) {
+            sessionStorage.removeItem(key);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. Reset profile stats for admin
+    resetUserProfileVisitStats(normAdmin, normAdmin);
+
+    // 4. Asynchronously delete Admin docs from Firestore login_logs
+    try {
+      const logsRef = collection(db, 'login_logs');
+      const snapshot = await getDocs(logsRef);
+      const docsToDelete = snapshot.docs.filter(
+        d => (d.data().email || '').toLowerCase().trim() === normAdmin
+      );
+
+      for (let i = 0; i < docsToDelete.length; i += 100) {
+        const chunk = docsToDelete.slice(i, i + 100);
+        const batch = writeBatch(db);
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+    } catch (fsErr) {
+      console.warn('Firestore admin logs delete deferred (quota/offline):', fsErr);
+    }
+
+    return { success: true, count };
+  } catch (err: any) {
+    console.error('Failed to reset admin login logs:', err);
+    return { success: false, count: 0, error: err?.message || 'เกิดข้อผิดพลาดในการรีเซ็ต' };
+  }
+}
+
+/**
+ * Reset all OTHER users' login logs / visitor statistics to 0 immediately
+ * Preserves Admin's logs and never touches media/submissions
+ */
+export async function resetOthersLoginLogs(
+  adminEmail: string = 'weerapong1625@acu.ac.th'
+): Promise<{ success: boolean; count: number; error?: string }> {
+  try {
+    const normAdmin = adminEmail.toLowerCase().trim();
+    const localLogs = getLocalLoginLogs();
+    const othersLogs = localLogs.filter(l => (l.email || '').trim().toLowerCase() !== normAdmin);
+    const count = othersLogs.length;
+    const remaining = localLogs.filter(l => (l.email || '').trim().toLowerCase() === normAdmin);
+
+    // 1. Immediately update localStorage and emit event (0ms latency)
+    saveLocalLoginLogs(remaining, true);
+
+    // 2. Clear sessionStorage visit flags for other users
+    if (typeof window !== 'undefined') {
+      try {
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && key.startsWith('acu_visit_logged_') && !key.includes(normAdmin)) {
+            sessionStorage.removeItem(key);
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. Reset profile stats for others
+    resetUserProfileVisitStats('all_others', normAdmin);
+
+    // 4. Asynchronously delete other users' docs from Firestore login_logs
+    try {
+      const logsRef = collection(db, 'login_logs');
+      const snapshot = await getDocs(logsRef);
+      const docsToDelete = snapshot.docs.filter(
+        d => (d.data().email || '').toLowerCase().trim() !== normAdmin
+      );
+
+      for (let i = 0; i < docsToDelete.length; i += 100) {
+        const chunk = docsToDelete.slice(i, i + 100);
+        const batch = writeBatch(db);
+        chunk.forEach(d => batch.delete(d.ref));
+        await batch.commit();
+      }
+    } catch (fsErr) {
+      console.warn('Firestore others logs delete deferred (quota/offline):', fsErr);
+    }
+
+    return { success: true, count };
+  } catch (err: any) {
+    console.error('Failed to reset others login logs:', err);
+    return { success: false, count: 0, error: err?.message || 'เกิดข้อผิดพลาดในการรีเซ็ต' };
+  }
+}
+
+/**
  * Reset all login logs / visitor statistics in Firestore and localStorage to 0
+ * Never touches media or submission databases
  */
 export async function resetAllLoginLogs(): Promise<{ success: boolean; count: number; error?: string }> {
   try {
     const localLogs = getLocalLoginLogs();
     const count = localLogs.length;
 
-    // Clear local storage
+    // 1. Clear local storage immediately (0ms)
+    saveLocalLoginLogs([], true);
+
+    // 2. Clear all sessionStorage visit flags
     if (typeof window !== 'undefined') {
-      localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify([]));
-      window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: [] }));
+      try {
+        for (let i = sessionStorage.length - 1; i >= 0; i--) {
+          const key = sessionStorage.key(i);
+          if (key && key.startsWith('acu_visit_logged_')) {
+            sessionStorage.removeItem(key);
+          }
+        }
+      } catch {
+        // ignore
+      }
     }
 
-    // Attempt to clear Firestore
+    // 3. Reset all user profile visit stats (never touches innovations/media)
+    resetUserProfileVisitStats('all');
+
+    // 4. Attempt to clear Firestore
     try {
       const logsRef = collection(db, 'login_logs');
       const snapshot = await getDocs(logsRef);
@@ -261,6 +384,46 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
   } catch (err: any) {
     console.error('Failed to reset login logs:', err);
     return { success: false, count: 0, error: err?.message || 'เกิดข้อผิดพลาดในการรีเซ็ต' };
+  }
+}
+
+/**
+ * Delete all login logs belonging to a specific user email
+ */
+export function deleteLoginLogsByEmail(targetEmail: string): void {
+  const norm = targetEmail.trim().toLowerCase();
+  const current = getLocalLoginLogs();
+  const filtered = current.filter(l => (l.email || '').trim().toLowerCase() !== norm);
+  saveLocalLoginLogs(filtered, true);
+
+  // Clear sessionStorage visit flag
+  if (typeof window !== 'undefined') {
+    try {
+      for (let i = sessionStorage.length - 1; i >= 0; i--) {
+        const key = sessionStorage.key(i);
+        if (key && key.startsWith('acu_visit_logged_') && key.includes(norm)) {
+          sessionStorage.removeItem(key);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  // Async delete from Firestore
+  try {
+    getDocs(collection(db, 'login_logs')).then((snapshot) => {
+      const matchingDocs = snapshot.docs.filter(
+        d => (d.data().email || '').toLowerCase().trim() === norm
+      );
+      if (matchingDocs.length > 0) {
+        const batch = writeBatch(db);
+        matchingDocs.forEach(d => batch.delete(d.ref));
+        batch.commit().catch(() => {});
+      }
+    }).catch(() => {});
+  } catch {
+    // ignore
   }
 }
 
@@ -288,9 +451,14 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
     }
   };
 
+  const handleUserDeleted = () => {
+    callback(getLocalLoginLogs());
+  };
+
   if (typeof window !== 'undefined') {
     window.addEventListener('acu_login_logs_updated', handleLocalUpdate);
     window.addEventListener('storage', handleStorage);
+    window.addEventListener('acu_user_deleted', handleUserDeleted);
   }
 
   // 3. Subscribe to Firestore
@@ -336,6 +504,7 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
     if (typeof window !== 'undefined') {
       window.removeEventListener('acu_login_logs_updated', handleLocalUpdate);
       window.removeEventListener('storage', handleStorage);
+      window.removeEventListener('acu_user_deleted', handleUserDeleted);
     }
     unsubscribeFirestore();
   };

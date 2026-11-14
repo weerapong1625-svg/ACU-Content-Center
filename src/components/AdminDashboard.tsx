@@ -90,6 +90,7 @@ import {
   SUBJECT_GROUPS,
   updateInnovationSubmission,
   deleteInnovationSubmission,
+  clearAdminOwnMedia,
   updateFacilitySubmission,
   deleteFacilitySubmission,
   MEDIA_ITEM_NUMBERS,
@@ -265,6 +266,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [selectedGradeFilter, setSelectedGradeFilter] = useState('all');
   const [selectedMediaTypeFilter, setSelectedMediaTypeFilter] = useState('all');
   const [selectedSubjectGroupFilter, setSelectedSubjectGroupFilter] = useState('all');
+  const [onlyMyAdminInnovations, setOnlyMyAdminInnovations] = useState(false);
+  const [isClearingAdminMedia, setIsClearingAdminMedia] = useState(false);
 
   // Search & Filters for Teachers Summary (Tab 3)
   const [teacherSearchTerm, setTeacherSearchTerm] = useState('');
@@ -313,6 +316,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       alert('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'));
     } finally {
       setIsDeletingUserDirect(false);
+    }
+  };
+
+  // Delete ONLY Admin's (weerapong1625@acu.ac.th) own media submissions (never touches other users)
+  const handleClearAdminOwnMedia = async () => {
+    const confirmed = window.confirm(
+      `ยืนยันการลบสื่อทั้งหมดของบัญชี Admin (${SUPER_ADMIN_EMAIL}) ใช่หรือไม่?\n\nระบบจะลบเฉพาะสื่อของ Admin และรีเซ็ตสถานะการส่งสื่อของ ${SUPER_ADMIN_EMAIL} ให้เป็น "ยังไม่ได้ส่งสื่อ (0/5)" โดยจะไม่แก้ไขหรือลบข้อมูลของครูท่านอื่นเด็ดขาด`
+    );
+    if (!confirmed) return;
+
+    setIsClearingAdminMedia(true);
+    try {
+      const res = await clearAdminOwnMedia(SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        showToast(`ลบสื่อของ Admin (${SUPER_ADMIN_EMAIL}) เรียบร้อยแล้ว (${res.deletedCount} รายการ)`);
+      } else {
+        alert(res.error || 'ไม่สามารถลบสื่อของ Admin ได้');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'โปรดลองใหม่'));
+    } finally {
+      setIsClearingAdminMedia(false);
     }
   };
 
@@ -397,6 +422,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Filtered innovations list
   const filteredInnovations = useMemo(() => {
     return innovations.filter((item) => {
+      if (onlyMyAdminInnovations) {
+        if ((item.userEmail || '').trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()) {
+          return false;
+        }
+      }
+
       // Filter by Innovation Year
       if (innovationYear !== 'all') {
         const d = new Date(item.submittedAt);
@@ -416,7 +447,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
       return matchSearch && matchGrade && matchType && matchSubjectGroup;
     });
-  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear]);
+  }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear, onlyMyAdminInnovations]);
 
   // Statistics calculation
   const stats = useMemo(() => {
@@ -3037,6 +3068,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <option value="สื่อเทคโนโลยี">สื่อเทคโนโลยี</option>
                   <option value="สื่ออื่น ๆ">สื่ออื่น ๆ</option>
                 </select>
+
+                <button
+                  type="button"
+                  onClick={() => setOnlyMyAdminInnovations((prev) => !prev)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 border transition-colors cursor-pointer ${
+                    onlyMyAdminInnovations
+                      ? 'bg-rose-600 text-white border-rose-500 shadow-sm'
+                      : 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700'
+                  }`}
+                  title={`กรองเฉพาะสื่อของ Admin (${SUPER_ADMIN_EMAIL})`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>
+                    สื่อของฉัน (Admin:{' '}
+                    {innovations.filter((i) => (i.userEmail || '').trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()).length})
+                  </span>
+                </button>
               </div>
 
               {/* Export buttons for this table */}
@@ -3432,7 +3480,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item5}>{teacher.item5}</td>
                           <td className="py-3 px-3.5 text-center whitespace-nowrap">
                             {isSuper ? (
-                              <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
+                              <div className="inline-flex items-center gap-2">
+                                <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
+                                {teacher.submittedCount > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={handleClearAdminOwnMedia}
+                                    disabled={isClearingAdminMedia}
+                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-rose-600/20 hover:bg-rose-600 border border-rose-500/40 text-rose-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                    title={`ลบเฉพาะสื่อของ Admin (${SUPER_ADMIN_EMAIL})`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>{isClearingAdminMedia ? 'กำลังลบ...' : 'ลบสื่อของฉัน'}</span>
+                                  </button>
+                                )}
+                              </div>
                             ) : (
                               <button
                                 type="button"

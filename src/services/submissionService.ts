@@ -205,225 +205,66 @@ export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
 
 /**
- * 5 Restored Innovation Items for Master Weerapong & ACU Teachers
- * Guarantees 0% data loss even when Firestore daily free quota is exceeded
+ * Legacy hardcoded seed IDs that previously caused false "submitted" status
+ * for weerapong1625@acu.ac.th — stripped cleanly without touching other users' data.
  */
-export const DEFAULT_RESTORED_INNOVATIONS: InnovationSubmission[] = [
-  {
-    id: 'innov_weerapong_item1',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    itemNumber: 1,
-    mediaTitle: 'บทเรียนดิจิทัลและแบบฝึกปฏิสัมพันธ์คณิตศาสตร์ เรื่อง การบวก ลบ คูณ หารเศษส่วน (Interactive Digital Math)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    usageDetails: 'วิชาคณิตศาสตร์พื้นฐาน ค15101 หน่วยการเรียนรู้ที่ 1 เรื่อง เศษส่วนและการคำนวณ',
-    onlineUrl: 'https://sites.google.com/acu.ac.th/math-innovation-weerapong',
-    imageUrl: '/ACU N.png',
-    userEmail: 'weerapong1625@acu.ac.th',
-    status: 'ส่งเรียบร้อย',
-    submittedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-  },
-  {
-    id: 'innov_weerapong_item2',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'ประถมศึกษาปีที่ 6',
-    itemNumber: 2,
-    mediaTitle: 'ชุดกิจกรรมการเรียนรู้ปัญญาประดิษฐ์และวิทยาการคำนวณ (AI Literacy & Block Coding สำหรับนักเรียนชั้น ป.6)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    usageDetails: 'วิชาวิทยาการคำนวณ ว16101 หน่วยการเรียนรู้ที่ 2 เรื่อง อัลกอริทึมและการเขียนโปรแกรมแก้ปัญหา',
-    onlineUrl: 'https://scratch.mit.edu',
-    imageUrl: '/ACU N.png',
-    userEmail: 'weerapong1625@acu.ac.th',
-    status: 'ส่งเรียบร้อย',
-    submittedAt: new Date(Date.now() - 86400000 * 4).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 4).toISOString(),
-  },
-  {
-    id: 'innov_weerapong_item3',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    itemNumber: 3,
-    mediaTitle: 'ชุดบอร์ดเกมจำลองคณิตศาสตร์เสริมสร้างการคิดวิเคราะห์ Math Problem Solver',
-    mediaType: 'สื่อสิ่งพิมพ์',
-    productionType: 'ครูผลิตสื่อเอง',
-    usageDetails: 'วิชาคณิตศาสตร์ ค15101 หน่วยการเรียนรู้ที่ 3 เรื่อง ร้อยละและทศนิยมเพื่อชีวิตประจำวัน',
-    onlineUrl: 'https://drive.google.com',
-    imageUrl: '/ACU N.png',
-    userEmail: 'weerapong1625@acu.ac.th',
-    status: 'ส่งเรียบร้อย',
-    submittedAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-  },
-  {
-    id: 'innov_weerapong_item4',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    itemNumber: 4,
-    mediaTitle: 'วิดีโอคลิปการสอนแบบ Micro-Learning เรื่อง เรขาคณิต 2 มิติและ 3 มิติในชีวิตจริง',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    usageDetails: 'วิชาคณิตศาสตร์ ค15101 หน่วยการเรียนรู้ที่ 4 เรื่อง รูปเรขาคณิตและการหาปริมาตร',
-    onlineUrl: 'https://youtube.com',
-    imageUrl: '/ACU N.png',
-    userEmail: 'weerapong1625@acu.ac.th',
-    status: 'ส่งเรียบร้อย',
-    submittedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-  },
-  {
-    id: 'innov_weerapong_item5',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'ประถมศึกษาปีที่ 6',
-    itemNumber: 5,
-    mediaTitle: 'ชุดสื่อการเรียนรู้สะเต็มศึกษา (STEM Education Hub) บูรณาการการวัดผลผ่านระบบออนไลน์',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    usageDetails: 'วิชาวิทยาศาสตร์และเทคโนโลยี ว16101 หน่วยการเรียนรู้ที่ 5 เรื่อง การออกแบบและเทคโนโลยี',
-    onlineUrl: 'https://sites.google.com/acu.ac.th/stem-innovation',
-    imageUrl: '/ACU N.png',
-    userEmail: 'weerapong1625@acu.ac.th',
-    status: 'ส่งเรียบร้อย',
-    submittedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-    updatedAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-  },
-];
+export const LEGACY_FAKE_SEED_IDS = new Set<string>([
+  'innov_weerapong_item1',
+  'innov_weerapong_item2',
+  'innov_weerapong_item3',
+  'innov_weerapong_item4',
+  'innov_weerapong_item5',
+  'work_innov_weerapong_item1',
+  'work_innov_weerapong_item2',
+  'work_innov_weerapong_item3',
+  'work_innov_weerapong_item4',
+  'work_innov_weerapong_item5',
+]);
 
-export const DEFAULT_RESTORED_TEACHER_MEDIA: TeacherMediaWork[] = [
-  {
-    id: 'work_innov_weerapong_item1',
-    title: 'บทเรียนดิจิทัลและแบบฝึกปฏิสัมพันธ์คณิตศาสตร์ เรื่อง การบวก ลบ คูณ หารเศษส่วน',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    subjectName: 'วิชาคณิตศาสตร์พื้นฐาน ค15101',
-    thumbnailUrl: '/ACU N.png',
-    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: หน่วยการเรียนรู้ที่ 1 เรื่อง เศษส่วน | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    itemNumber: 1,
-    onlineUrl: 'https://sites.google.com/acu.ac.th/math-innovation-weerapong',
-    ratingAvg: 5.0,
-    ratingCount: 18,
-    views: 45,
-    likes: 12,
-    likedBy: [],
-    submittedByEmail: 'weerapong1625@acu.ac.th',
-    createdAt: new Date(Date.now() - 86400000 * 5).toISOString(),
-  },
-  {
-    id: 'work_innov_weerapong_item2',
-    title: 'ชุดกิจกรรมการเรียนรู้ปัญญาประดิษฐ์และวิทยาการคำนวณ (AI Literacy & Block Coding)',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'ประถมศึกษาปีที่ 6',
-    subjectName: 'วิชาวิทยาการคำนวณ ว16101',
-    thumbnailUrl: '/ACU N.png',
-    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี | นำไปใช้: อัลกอริทึมและการเขียนโปรแกรม | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    itemNumber: 2,
-    onlineUrl: 'https://scratch.mit.edu',
-    ratingAvg: 5.0,
-    ratingCount: 22,
-    views: 58,
-    likes: 15,
-    likedBy: [],
-    submittedByEmail: 'weerapong1625@acu.ac.th',
-    createdAt: new Date(Date.now() - 86400000 * 4).toISOString(),
-  },
-  {
-    id: 'work_innov_weerapong_item3',
-    title: 'ชุดบอร์ดเกมจำลองคณิตศาสตร์เสริมสร้างการคิดวิเคราะห์ Math Problem Solver',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    subjectName: 'วิชาคณิตศาสตร์ ค15101',
-    thumbnailUrl: '/ACU N.png',
-    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: ร้อยละและทศนิยมเพื่อชีวิตประจำวัน | ประเภท: สื่อสิ่งพิมพ์ (ครูผลิตสื่อเอง)',
-    mediaType: 'สื่อสิ่งพิมพ์',
-    productionType: 'ครูผลิตสื่อเอง',
-    itemNumber: 3,
-    onlineUrl: 'https://drive.google.com',
-    ratingAvg: 4.9,
-    ratingCount: 15,
-    views: 39,
-    likes: 9,
-    likedBy: [],
-    submittedByEmail: 'weerapong1625@acu.ac.th',
-    createdAt: new Date(Date.now() - 86400000 * 3).toISOString(),
-  },
-  {
-    id: 'work_innov_weerapong_item4',
-    title: 'วิดีโอคลิปการสอนแบบ Micro-Learning เรื่อง เรขาคณิต 2 มิติและ 3 มิติในชีวิตจริง',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้คณิตศาสตร์',
-    gradeLevel: 'ประถมศึกษาปีที่ 5',
-    subjectName: 'วิชาคณิตศาสตร์ ค15101',
-    thumbnailUrl: '/ACU N.png',
-    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้คณิตศาสตร์ | นำไปใช้: รูปเรขาคณิตและการหาปริมาตร | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    itemNumber: 4,
-    onlineUrl: 'https://youtube.com',
-    ratingAvg: 5.0,
-    ratingCount: 20,
-    views: 64,
-    likes: 14,
-    likedBy: [],
-    submittedByEmail: 'weerapong1625@acu.ac.th',
-    createdAt: new Date(Date.now() - 86400000 * 2).toISOString(),
-  },
-  {
-    id: 'work_innov_weerapong_item5',
-    title: 'ชุดสื่อการเรียนรู้สะเต็มศึกษา (STEM Education Hub) บูรณาการการวัดผลผ่านระบบออนไลน์',
-    teacherName: 'ม.วีระพงษ์ มีทรัพย์',
-    subjectGroup: 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-    gradeLevel: 'ประถมศึกษาปีที่ 6',
-    subjectName: 'วิชาวิทยาศาสตร์และเทคโนโลยี ว16101',
-    thumbnailUrl: '/ACU N.png',
-    description: 'กลุ่มสาระ: กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี | นำไปใช้: การออกแบบและเทคโนโลยี | ประเภท: สื่อเทคโนโลยี (ครูผลิตสื่อเอง)',
-    mediaType: 'สื่อเทคโนโลยี',
-    productionType: 'ครูผลิตสื่อเอง',
-    itemNumber: 5,
-    onlineUrl: 'https://sites.google.com/acu.ac.th/stem-innovation',
-    ratingAvg: 5.0,
-    ratingCount: 25,
-    views: 72,
-    likes: 19,
-    likedBy: [],
-    submittedByEmail: 'weerapong1625@acu.ac.th',
-    createdAt: new Date(Date.now() - 86400000 * 1).toISOString(),
-  },
-];
+export const DEFAULT_RESTORED_INNOVATIONS: InnovationSubmission[] = [];
+
+export const DEFAULT_RESTORED_TEACHER_MEDIA: TeacherMediaWork[] = [];
+
+function notifyInnovationsChanged(): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function notifyTeacherMediaChanged(): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
+    }
+  } catch {
+    // ignore
+  }
+}
 
 /**
- * Get cached innovations from localStorage
+ * Get cached innovations from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredInnovations(): InnovationSubmission[] {
   try {
     const raw = localStorage.getItem(INNOVATIONS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed.filter((item: InnovationSubmission) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+        if (cleaned.length !== parsed.length) {
+          saveStoredInnovations(cleaned);
+        }
+        return cleaned;
       }
     }
   } catch (err) {
     console.warn('Failed to read innovations cache:', err);
   }
-  // Initialize with restored default items
-  try {
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(DEFAULT_RESTORED_INNOVATIONS));
-  } catch {}
-  return DEFAULT_RESTORED_INNOVATIONS;
+  return [];
 }
 
 /**
@@ -431,31 +272,33 @@ export function getStoredInnovations(): InnovationSubmission[] {
  */
 export function saveStoredInnovations(list: InnovationSubmission[]): void {
   try {
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(list));
+    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
   } catch (err) {
     console.warn('Failed to save innovations cache:', err);
   }
 }
 
 /**
- * Get cached teacher media from localStorage
+ * Get cached teacher media from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredTeacherMedia(): TeacherMediaWork[] {
   try {
     const raw = localStorage.getItem(TEACHER_MEDIA_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed;
+      if (Array.isArray(parsed)) {
+        const cleaned = parsed.filter((item: TeacherMediaWork) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+        if (cleaned.length !== parsed.length) {
+          saveStoredTeacherMedia(cleaned);
+        }
+        return cleaned;
       }
     }
   } catch (err) {
     console.warn('Failed to read teacher media cache:', err);
   }
-  try {
-    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(DEFAULT_RESTORED_TEACHER_MEDIA));
-  } catch {}
-  return DEFAULT_RESTORED_TEACHER_MEDIA;
+  return [];
 }
 
 /**
@@ -463,14 +306,15 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
  */
 export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
   try {
-    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(list));
+    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
   } catch (err) {
     console.warn('Failed to save teacher media cache:', err);
   }
 }
 
 /**
- * Restore innovation submissions for Master Weerapong or current user
+ * Keep restore API for backwards compatibility without injecting fake submissions
  */
 export function restoreTeacherInnovations(targetEmail = 'weerapong1625@acu.ac.th'): {
   success: boolean;
@@ -478,25 +322,10 @@ export function restoreTeacherInnovations(targetEmail = 'weerapong1625@acu.ac.th
 } {
   try {
     const current = getStoredInnovations();
-    const map = new Map<string, InnovationSubmission>();
-    DEFAULT_RESTORED_INNOVATIONS.forEach((item) => map.set(item.id, item));
-    current.forEach((item) => map.set(item.id, item));
-    const merged = Array.from(map.values()).sort(
-      (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-    );
-    saveStoredInnovations(merged);
-
-    // Also ensure teacher media is restored
-    const mediaCurrent = getStoredTeacherMedia();
-    const mediaMap = new Map<string, TeacherMediaWork>();
-    DEFAULT_RESTORED_TEACHER_MEDIA.forEach((m) => mediaMap.set(m.id, m));
-    mediaCurrent.forEach((m) => mediaMap.set(m.id, m));
-    saveStoredTeacherMedia(Array.from(mediaMap.values()));
-
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_innovations_restored', { detail: { email: targetEmail } }));
     }
-    return { success: true, count: merged.length };
+    return { success: true, count: current.length };
   } catch (err) {
     console.warn('restoreTeacherInnovations error:', err);
     return { success: false, count: 0 };
@@ -648,8 +477,13 @@ export async function saveInnovationSubmission(data: {
       console.warn('Could not sync to user_profiles:', profErr);
     }
 
+    notifyInnovationsChanged();
+    notifyTeacherMediaChanged();
+
     return { success: true, id };
   } catch (error: any) {
+    notifyInnovationsChanged();
+    notifyTeacherMediaChanged();
     if (isQuotaExceededError(error)) {
       notifyQuotaExceeded();
       console.warn('[Firestore] Quota reached during save: Saved safely in local storage recovery cache.');
@@ -758,6 +592,8 @@ export async function updateInnovationSubmission(
         item.id === id ? { ...item, ...updates, updatedAt: new Date().toISOString() } : item
       );
       saveStoredInnovations(updatedList);
+      notifyInnovationsChanged();
+      notifyTeacherMediaChanged();
     } catch {}
 
     return { success: true };
@@ -773,22 +609,133 @@ export async function updateInnovationSubmission(
 }
 
 /**
+ * Sync ONLY the deleted item's owner user_profiles innovation slot back to 'pending'
+ * if no other remaining submission exists for that slot. Never modifies other users' data.
+ */
+async function syncUserProfileSlotOnDelete(
+  ownerEmail?: string,
+  itemNumber?: number
+): Promise<void> {
+  if (!ownerEmail || !itemNumber) return;
+  const normEmail = ownerEmail.trim().toLowerCase();
+  const slotNum = Number(itemNumber);
+  if (!normEmail || slotNum < 1 || slotNum > 5) return;
+
+  try {
+    // Check if owner still has another live submission for this slot
+    let hasOtherForSlot = false;
+    try {
+      const q = query(
+        collection(db, INNOVATIONS_COLLECTION),
+        where('userEmail', '==', normEmail)
+      );
+      const snap = await getDocs(q);
+      snap.forEach((d) => {
+        const data = d.data() as InnovationSubmission;
+        if (Number(data.itemNumber) === slotNum && !LEGACY_FAKE_SEED_IDS.has(d.id)) {
+          hasOtherForSlot = true;
+        }
+      });
+    } catch {
+      // Fallback check in local cache if Firestore query fails
+      const cached = getStoredInnovations();
+      hasOtherForSlot = cached.some(
+        (i) => (i.userEmail || '').trim().toLowerCase() === normEmail && Number(i.itemNumber) === slotNum
+      );
+    }
+
+    if (hasOtherForSlot) return;
+
+    const resetSlot = {
+      id: slotNum,
+      title: '',
+      category: '',
+      status: 'pending',
+      submittedDate: '-',
+      linkUrl: '',
+      notes: '',
+      coverImageUrl: '',
+    };
+
+    // Update local profile cache if present
+    try {
+      const cacheKey = `acu_user_full_profile_${normEmail}`;
+      const rawProf = localStorage.getItem(cacheKey);
+      if (rawProf) {
+        const parsed = JSON.parse(rawProf);
+        if (parsed && Array.isArray(parsed.innovations)) {
+          parsed.innovations = parsed.innovations.map((slot: any) =>
+            Number(slot.id) === slotNum ? resetSlot : slot
+          );
+          parsed.updatedAt = new Date().toISOString();
+          localStorage.setItem(cacheKey, JSON.stringify(parsed));
+        }
+      }
+    } catch {
+      // ignore
+    }
+
+    // Update Firestore user_profiles doc for this specific owner only
+    const safeDocId = encodeURIComponent(normEmail);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    const profileSnap = await getDoc(profileRef);
+    if (profileSnap.exists()) {
+      const profData = profileSnap.data();
+      if (Array.isArray(profData.innovations) && profData.innovations.length === 5) {
+        const updatedSlots = profData.innovations.map((slot: any) =>
+          Number(slot.id) === slotNum ? resetSlot : slot
+        );
+        await updateDoc(profileRef, {
+          innovations: updatedSlots,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+  } catch (err) {
+    console.warn('Could not sync user_profiles slot on delete:', err);
+  }
+}
+
+/**
  * Delete an innovation submission.
- * Admin can delete any submission; teachers can only delete their own.
+ * Admin can delete any submission (including their own); teachers can only delete their own.
  */
 export async function deleteInnovationSubmission(
   id: string,
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
+  const cachedList = getStoredInnovations();
+  const cachedItem = cachedList.find((item) => item.id === id);
+
   try {
     const docRef = doc(db, INNOVATIONS_COLLECTION, id);
     const snap = await getDoc(docRef);
+
     if (!snap.exists()) {
-      // Also delete from local cache even if not in Firestore
-      const currentList = getStoredInnovations();
-      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      if (cachedItem && !canUserModify(cachedItem.userEmail, currentUserEmail)) {
+        return { success: false, error: 'คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
+      }
+
+      // Clean up paired collections defensively if authorized
+      if (canUserModify(cachedItem?.userEmail, currentUserEmail)) {
+        try {
+          await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`));
+        } catch {}
+        try {
+          await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${id}`));
+        } catch {}
+      }
+
+      saveStoredInnovations(cachedList.filter((item) => item.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
+      if (cachedItem) {
+        await syncUserProfileSlotOnDelete(cachedItem.userEmail, cachedItem.itemNumber);
+      }
+      notifyInnovationsChanged();
+      notifyTeacherMediaChanged();
       return { success: true };
     }
+
     const currentData = snap.data() as InnovationSubmission;
 
     if (!canUserModify(currentData.userEmail, currentUserEmail)) {
@@ -814,19 +761,27 @@ export async function deleteInnovationSubmission(
       // ignore
     }
 
-    // Delete from local cache
+    // Delete from local caches immediately
     try {
-      const currentList = getStoredInnovations();
-      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
     } catch {}
+
+    // Reset the owner's slot in user_profiles back to pending if no other item exists for that slot
+    await syncUserProfileSlotOnDelete(currentData.userEmail, currentData.itemNumber);
+
+    notifyInnovationsChanged();
+    notifyTeacherMediaChanged();
 
     return { success: true };
   } catch (err: any) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
       console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
-      const currentList = getStoredInnovations();
-      saveStoredInnovations(currentList.filter((item) => item.id !== id));
+      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
+      notifyInnovationsChanged();
+      notifyTeacherMediaChanged();
       return { success: true };
     }
     console.error('Error deleting innovation submission:', err);
@@ -835,8 +790,8 @@ export async function deleteInnovationSubmission(
 }
 
 /**
- * Subscribe to user's innovation submissions in real time
- * Instant recovery from local cache so the screen NEVER shows empty items!
+ * Subscribe to user's innovation submissions in real time.
+ * Uses Firestore live snapshot as authoritative source when online (no stale cache resurrection).
  */
 export function subscribeUserInnovations(
   userEmail: string,
@@ -852,27 +807,39 @@ export function subscribeUserInnovations(
   const normTargetName = (teacherName || '').trim().toLowerCase();
 
   const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
-    return items.filter((item) => {
-      const itemEmail = (item.userEmail || '').trim().toLowerCase();
-      const itemName = (item.teacherName || '').trim().toLowerCase();
+    return items
+      .filter((item) => {
+        if (!item || LEGACY_FAKE_SEED_IDS.has(item.id)) return false;
+        const itemEmail = (item.userEmail || '').trim().toLowerCase();
+        const itemName = (item.teacherName || '').trim().toLowerCase();
 
-      const matchEmail = normTargetEmail && itemEmail === normTargetEmail;
-      const matchName = normTargetName && (
-        itemName === normTargetName || 
-        (normTargetName.length > 3 && itemName.includes(normTargetName)) ||
-        (itemName.length > 3 && normTargetName.includes(itemName))
-      );
+        // When userEmail is present on the record, strictly match by email so another user's items never bleed in
+        if (itemEmail) {
+          return Boolean(normTargetEmail && itemEmail === normTargetEmail);
+        }
 
-      return matchEmail || matchName;
-    }).sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+        // Fallback to name only if record lacks userEmail
+        return Boolean(
+          normTargetName &&
+            (itemName === normTargetName ||
+              (normTargetName.length > 3 && itemName.includes(normTargetName)) ||
+              (itemName.length > 3 && normTargetName.includes(itemName)))
+        );
+      })
+      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   };
 
-  // 1. Instant load from local recovery cache (0ms delay, guarantees items are visible)
-  const cachedAll = getStoredInnovations();
-  const initialUserItems = filterUserItems(cachedAll);
-  callback(initialUserItems);
+  // 1. Instant initial render from local cache (already stripped of legacy fake seed IDs)
+  callback(filterUserItems(getStoredInnovations()));
 
-  // 2. Real-time Firestore sync with resilient fallback
+  const handleLocalChange = () => {
+    callback(filterUserItems(getStoredInnovations()));
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_innovations_changed', handleLocalChange);
+  }
+
+  // 2. Real-time Firestore sync (authoritative when onSnapshot succeeds)
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
 
@@ -881,22 +848,17 @@ export function subscribeUserInnovations(
       (snapshot) => {
         const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
-          liveList.push(docSnap.data() as InnovationSubmission);
+          const data = docSnap.data() as InnovationSubmission;
+          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
+            liveList.push({ ...data, id: data?.id || docSnap.id });
+          }
         });
 
-        if (liveList.length > 0) {
-          // Merge with cached list to prevent any loss
-          const map = new Map<string, InnovationSubmission>();
-          cachedAll.forEach((i) => map.set(i.id, i));
-          liveList.forEach((i) => map.set(i.id, i));
-          const merged = Array.from(map.values()).sort(
-            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-          );
-          saveStoredInnovations(merged);
-          callback(filterUserItems(merged));
-        } else {
-          callback(initialUserItems);
-        }
+        liveList.sort(
+          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+        );
+        saveStoredInnovations(liveList);
+        callback(filterUserItems(liveList));
       },
       (err) => {
         if (isQuotaExceededError(err)) {
@@ -905,29 +867,44 @@ export function subscribeUserInnovations(
         } else {
           console.warn('subscribeUserInnovations listener notice:', err);
         }
-        // Always provide cached user items so list is NEVER empty
         callback(filterUserItems(getStoredInnovations()));
       }
     );
-    return unsubscribe;
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_innovations_changed', handleLocalChange);
+      }
+      unsubscribe();
+    };
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
     }
-    callback(initialUserItems);
-    return () => {};
+    callback(filterUserItems(getStoredInnovations()));
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_innovations_changed', handleLocalChange);
+      }
+    };
   }
 }
 
 /**
- * Subscribe to ALL innovation submissions (for Google Sheets summary and admin overview)
+ * Subscribe to ALL innovation submissions (for Google Sheets summary and admin overview).
+ * Uses Firestore live snapshot as authoritative source when online (prevents deleted items from reappearing).
  */
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
 ): () => void {
-  // 1. Instant load from local recovery cache
-  const cachedAll = getStoredInnovations();
-  callback(cachedAll);
+  // 1. Instant initial load from local cache (already stripped of legacy fake seed IDs)
+  callback(getStoredInnovations());
+
+  const handleLocalChange = () => {
+    callback(getStoredInnovations());
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_innovations_changed', handleLocalChange);
+  }
 
   try {
     const colRef = collection(db, INNOVATIONS_COLLECTION);
@@ -936,21 +913,17 @@ export function subscribeAllInnovations(
       (snapshot) => {
         const liveList: InnovationSubmission[] = [];
         snapshot.forEach((docSnap) => {
-          liveList.push(docSnap.data() as InnovationSubmission);
+          const data = docSnap.data() as InnovationSubmission;
+          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
+            liveList.push({ ...data, id: data?.id || docSnap.id });
+          }
         });
 
-        if (liveList.length > 0) {
-          const map = new Map<string, InnovationSubmission>();
-          cachedAll.forEach((i) => map.set(i.id, i));
-          liveList.forEach((i) => map.set(i.id, i));
-          const merged = Array.from(map.values()).sort(
-            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-          );
-          saveStoredInnovations(merged);
-          callback(merged);
-        } else {
-          callback(cachedAll);
-        }
+        liveList.sort(
+          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+        );
+        saveStoredInnovations(liveList);
+        callback(liveList);
       },
       (err) => {
         if (isQuotaExceededError(err)) {
@@ -962,13 +935,22 @@ export function subscribeAllInnovations(
         callback(getStoredInnovations());
       }
     );
-    return unsubscribe;
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_innovations_changed', handleLocalChange);
+      }
+      unsubscribe();
+    };
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
     }
-    callback(cachedAll);
-    return () => {};
+    callback(getStoredInnovations());
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_innovations_changed', handleLocalChange);
+      }
+    };
   }
 }
 
@@ -1273,6 +1255,18 @@ export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
 ): () => void {
+  const handleLocalChange = () => {
+    const cached = getStoredTeacherMedia().filter(
+      (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
+    );
+    cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    callback(cached);
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_teacher_media_changed', handleLocalChange);
+  }
+
   try {
     const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
     const unsubscribe = onSnapshot(
@@ -1280,28 +1274,39 @@ export function subscribeTeacherMedia(
       (snapshot) => {
         const liveList: TeacherMediaWork[] = [];
         snapshot.forEach((docSnap) => {
-          liveList.push(docSnap.data() as TeacherMediaWork);
+          const data = docSnap.data() as TeacherMediaWork;
+          liveList.push({ ...data, id: data?.id || docSnap.id });
         });
 
-        // Filter out any legacy seed items if any exist in collection
+        // Filter out legacy seed items if any exist in collection
         const realWorks = liveList.filter(
-          (w) => !w.id.startsWith('seed-') && w.title?.trim().length > 0
+          (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
         );
 
         // Sort newest first so real teacher submissions appear at top
         realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        saveStoredTeacherMedia(realWorks);
         callback(realWorks);
       },
       (err) => {
         console.warn('subscribeTeacherMedia fallback:', err);
-        callback([]);
+        handleLocalChange();
       }
     );
-    return unsubscribe;
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
+      }
+      unsubscribe();
+    };
   } catch (err) {
     console.error('subscribeTeacherMedia failed:', err);
     callback([]);
-    return () => {};
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
+      }
+    };
   }
 }
 
@@ -1327,6 +1332,10 @@ export async function updateTeacherMedia(
     }
 
     await updateDoc(docRef, updates);
+    saveStoredTeacherMedia(
+      getStoredTeacherMedia().map((m) => (m.id === id ? { ...m, ...updates } : m))
+    );
+    notifyTeacherMediaChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error updating teacher media:', err);
@@ -1336,7 +1345,7 @@ export async function updateTeacherMedia(
 
 /**
  * Delete teacher's media item.
- * Admin can delete any; creator can delete their own.
+ * Admin can delete any (including their own); creator can delete their own.
  */
 export async function deleteTeacherMedia(
   id: string,
@@ -1346,8 +1355,19 @@ export async function deleteTeacherMedia(
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     const snap = await getDoc(docRef);
     if (!snap.exists()) {
+      const cachedList = getStoredTeacherMedia();
+      const cachedItem = cachedList.find((m) => m.id === id);
+      if (cachedItem && !canUserModify(cachedItem.submittedByEmail, currentUserEmail)) {
+        return { success: false, error: 'คุณไม่มีสิทธิ์ลบสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
+      }
+      if (cachedItem || canUserModify(undefined, currentUserEmail)) {
+        saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
+        notifyTeacherMediaChanged();
+        return { success: true };
+      }
       return { success: false, error: 'ไม่พบรายการสื่อที่ต้องการลบ' };
     }
+
     const currentData = snap.data() as TeacherMediaWork;
 
     if (!canUserModify(currentData.submittedByEmail, currentUserEmail)) {
@@ -1355,10 +1375,120 @@ export async function deleteTeacherMedia(
     }
 
     await deleteDoc(docRef);
+    saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== id));
+    notifyTeacherMediaChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error deleting teacher media:', err);
     return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
+  }
+}
+
+/**
+ * Strictly remove ONLY Admin's (weerapong1625@acu.ac.th) own media submissions and reset
+ * ONLY Admin's own 5-item innovation slots in user_profiles to pending.
+ * NEVER touches any other user's data.
+ */
+export async function clearAdminOwnMedia(
+  adminEmail: string
+): Promise<{ success: boolean; deletedCount: number; error?: string }> {
+  const normAdmin = (adminEmail || '').trim().toLowerCase();
+  const targetAdmin = ADMIN_TARGET_EMAIL.toLowerCase();
+  if (normAdmin !== targetAdmin) {
+    return { success: false, deletedCount: 0, error: 'สงวนสิทธิ์เฉพาะผู้ดูแลระบบหลัก (Admin) เท่านั้น' };
+  }
+
+  let deletedCount = 0;
+
+  try {
+    // 1. Delete only weerapong1625@acu.ac.th's docs in teacher_innovations_submissions
+    const innovSnap = await getDocs(collection(db, INNOVATIONS_COLLECTION));
+    for (const d of innovSnap.docs) {
+      const data = d.data() as InnovationSubmission;
+      const docOwner = (data?.userEmail || '').trim().toLowerCase();
+      if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
+        await deleteDoc(d.ref);
+        deletedCount++;
+        try {
+          await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${d.id}`));
+        } catch {}
+        try {
+          await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${d.id}`));
+        } catch {}
+      }
+    }
+
+    // 2. Delete only weerapong1625@acu.ac.th's docs in teacher_media_repository
+    const mediaSnap = await getDocs(collection(db, TEACHER_MEDIA_COLLECTION));
+    for (const d of mediaSnap.docs) {
+      const data = d.data() as TeacherMediaWork;
+      const docOwner = (data?.submittedByEmail || '').trim().toLowerCase();
+      if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
+        await deleteDoc(d.ref);
+        deletedCount++;
+      }
+    }
+
+    // 3. Delete only weerapong1625@acu.ac.th's Innovation_5_Items docs in system_test_submissions
+    const sysSnap = await getDocs(collection(db, SYSTEM_TEST_COLLECTION));
+    for (const d of sysSnap.docs) {
+      const data = d.data() as any;
+      const docOwner = (data?.userEmail || '').trim().toLowerCase();
+      if (docOwner === targetAdmin && (data?.sourceModule === 'Innovation_5_Items' || d.id.startsWith('test_innov_'))) {
+        await deleteDoc(d.ref);
+      }
+    }
+
+    // 4. Reset ONLY weerapong1625@acu.ac.th's 5 innovation slots in user_profiles
+    const emptySlots = [1, 2, 3, 4, 5].map((slot) => ({
+      id: slot,
+      title: '',
+      category: '',
+      status: 'pending',
+      submittedDate: '-',
+      linkUrl: '',
+      notes: '',
+      coverImageUrl: '',
+    }));
+
+    const safeDocId = encodeURIComponent(targetAdmin);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    const profileSnap = await getDoc(profileRef);
+    if (profileSnap.exists()) {
+      await updateDoc(profileRef, {
+        innovations: emptySlots,
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    // 5. Clean only weerapong1625@acu.ac.th items from localStorage caches
+    saveStoredInnovations(
+      getStoredInnovations().filter((item) => (item.userEmail || '').trim().toLowerCase() !== targetAdmin)
+    );
+    saveStoredTeacherMedia(
+      getStoredTeacherMedia().filter((m) => (m.submittedByEmail || '').trim().toLowerCase() !== targetAdmin)
+    );
+
+    try {
+      const cacheKey = `acu_user_full_profile_${targetAdmin}`;
+      const rawProf = localStorage.getItem(cacheKey);
+      if (rawProf) {
+        const parsed = JSON.parse(rawProf);
+        if (parsed) {
+          parsed.innovations = emptySlots;
+          parsed.updatedAt = new Date().toISOString();
+          localStorage.setItem(cacheKey, JSON.stringify(parsed));
+        }
+      }
+    } catch {}
+
+    notifyInnovationsChanged();
+    notifyTeacherMediaChanged();
+
+    return { success: true, deletedCount };
+  } catch (err: any) {
+    console.error('Error clearing Admin own media:', err);
+    return { success: false, deletedCount, error: err?.message || 'ไม่สามารถลบสื่อของ Admin ได้' };
   }
 }
 
