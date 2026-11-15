@@ -910,7 +910,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       id="input-profile-fullname"
                       value={fullNameInput}
                       onChange={(e) => setFullNameInput(e.target.value)}
-                      placeholder="เช่น ม.วีระพงษ์ มีทรัพย์"
+                      placeholder="ระบุชื่อ-นามสกุลจริง"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                     />
                   </div>
