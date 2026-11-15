@@ -37,7 +37,6 @@ import {
   fetchFullUserProfile, 
   saveFullUserProfile, 
   addVisitorPraiseAndRating, 
-  recordProfileVisit,
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS,
   getCleanRealName
@@ -53,7 +52,9 @@ import {
 import { 
   subscribeAllLoginLogs, 
   LoginLogEntry, 
-  resetAllLoginLogs 
+  resetAllLoginLogs,
+  resetAdminLoginLogs,
+  resetUserLoginLogsByEmail
 } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
@@ -94,7 +95,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     userEmail ||
     ''
   ).trim().toLowerCase();
-  const isAdmin = isSuperAdmin(activeViewerEmail) || isSuperAdmin(userEmail);
+  const isViewerAdmin = isSuperAdmin(activeViewerEmail);
+  const isAdmin = isViewerAdmin;
   const [profile, setProfile] = useState<FullUserProfile>(() => {
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
@@ -167,17 +169,28 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return () => unsub();
   }, [isOpen]);
 
-  // Handle Admin visitor logs reset to 0
-  const handleResetAllVisitorLogs = async () => {
-    if (!window.confirm('คุณแน่ใจหรือไม่ว่าต้องการรีเซ็ตสถิติผู้เข้าชมและประวัติการเข้าใช้งานทั้งระบบเป็น 0 เพื่อเริ่มนับตามจำนวนครั้งจริงตั้งแต่วันนี้?')) {
+  // Handle Admin's OWN visitor logs reset to 0 (never touches other users)
+  const handleResetAdminOnlyStats = async () => {
+    if (!window.confirm(`ยืนยันการรีเซ็ตสถิติการเข้าชมเฉพาะของ Admin (${SUPER_ADMIN_EMAIL}) เป็น 0 ใช่หรือไม่? (ข้อมูลคนอื่นจะคงเดิม)`)) {
       return;
     }
     setIsResettingLogs(true);
     try {
-      const res = await resetAllLoginLogs();
+      const res = await resetAdminLoginLogs(SUPER_ADMIN_EMAIL);
       if (res.success) {
-        setLoginLogs([]);
-        setResetLogsSuccess(`รีเซ็ตสถิติผู้เข้าชมเป็น 0 สำเร็จแล้ว (ลบประวัติเดิม ${res.count} รายการ เริ่มนับจริงทีละ 1)`);
+        const normAdmin = SUPER_ADMIN_EMAIL.toLowerCase().trim();
+        setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== normAdmin));
+        if (isMasterWeerapong) {
+          setProfile((prev) => {
+            const next = {
+              ...prev,
+              stats: { ...prev.stats, totalViews: 0, uniqueVisitors: 0 },
+            };
+            onProfileUpdated?.(next);
+            return next;
+          });
+        }
+        setResetLogsSuccess(`รีเซ็ตสถิติการเข้าชมของ Admin เป็น 0 สำเร็จแล้ว (ล้างประวัติ ${res.count} รายการ)`);
         setTimeout(() => setResetLogsSuccess(null), 4000);
       } else {
         alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
@@ -189,23 +202,119 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
-  // Sync profile data on mount & record visit
+  // Handle resetting a specific viewed user's visitor logs to 0 (never touches other users)
+  const handleResetTargetUserStats = async () => {
+    const targetNorm = userEmail.toLowerCase().trim();
+    if (!window.confirm(`ยืนยันการรีเซ็ตสถิติการเข้าชมของ ${targetNorm} เป็น 0 ใช่หรือไม่? (ข้อมูลของคนอื่นจะคงเดิม)`)) {
+      return;
+    }
+    setIsResettingLogs(true);
+    try {
+      const res = await resetUserLoginLogsByEmail(targetNorm, SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== targetNorm));
+        setProfile((prev) => {
+          const next = {
+            ...prev,
+            stats: { ...prev.stats, totalViews: 0, uniqueVisitors: 0 },
+          };
+          onProfileUpdated?.(next);
+          return next;
+        });
+        setResetLogsSuccess(`รีเซ็ตสถิติการเข้าชมของ ${targetNorm} เป็น 0 สำเร็จแล้ว (ล้างประวัติ ${res.count} รายการ)`);
+        setTimeout(() => setResetLogsSuccess(null), 4000);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
+
+  // Handle Admin visitor logs reset ALL users to 0
+  const handleResetAllVisitorLogs = async () => {
+    if (!window.confirm('คุณแน่ใจหรือไม่ว่าต้องการรีเซ็ตสถิติการเข้าชมของทุกคนในระบบ (ทั้ง Admin และผู้ใช้งานทุกคน) เป็น 0 เพื่อเริ่มนับตามจำนวนครั้งจริง?')) {
+      return;
+    }
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAllLoginLogs();
+      if (res.success) {
+        setLoginLogs([]);
+        setProfile((prev) => {
+          const next = {
+            ...prev,
+            stats: { ...prev.stats, totalViews: 0, uniqueVisitors: 0 },
+          };
+          onProfileUpdated?.(next);
+          return next;
+        });
+        setResetLogsSuccess(`รีเซ็ตสถิติผู้เข้าชมทุกคนในระบบเป็น 0 สำเร็จแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
+        setTimeout(() => setResetLogsSuccess(null), 4000);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
+
+  // Sync profile data on mount / target change (without mutating visitor counts or overwriting saved avatar)
   useEffect(() => {
     if (!isOpen) return;
+
+    const normEmail = userEmail.toLowerCase().trim();
+    const localAvatar = typeof window !== 'undefined'
+      ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
+      : '';
+
+    const cached = getCachedUserProfile(userEmail);
+    if (cached) {
+      const mergedCached: FullUserProfile = {
+        ...cached,
+        avatarUrl: cached.avatarUrl || localAvatar || avatarUrl || '',
+      };
+      setProfile(mergedCached);
+      setFullNameInput(mergedCached.fullName || userName || '');
+      setNicknameInput(mergedCached.nickname || '');
+      setSchoolInput(mergedCached.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
+      setRoleInput(mergedCached.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+    } else {
+      setFullNameInput(isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (userName || userEmail.split('@')[0]));
+      setNicknameInput('');
+      setSchoolInput('โรงเรียนอัสสัมชัญอุบลราชธานี');
+      setRoleInput(isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+    }
 
     let isMounted = true;
     const loadData = async () => {
       try {
         const fullData = await fetchFullUserProfile(userEmail, userName, avatarUrl);
         if (isMounted && fullData) {
-          setProfile(fullData);
-          setFullNameInput(fullData.fullName || userName || '');
-          setNicknameInput(fullData.nickname || '');
-          setSchoolInput(fullData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-          setRoleInput(fullData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+          const latestCached = getCachedUserProfile(userEmail);
+          const latestLocalAvatar = typeof window !== 'undefined'
+            ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
+            : '';
+          const effectiveAvatar =
+            fullData.avatarUrl ||
+            latestCached?.avatarUrl ||
+            latestLocalAvatar ||
+            avatarUrl ||
+            '';
+          const mergedData: FullUserProfile = {
+            ...fullData,
+            avatarUrl: effectiveAvatar,
+          };
+          setProfile(mergedData);
+          setFullNameInput(mergedData.fullName || userName || '');
+          setNicknameInput(mergedData.nickname || '');
+          setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
+          setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
         }
-        // Increment visit count
-        recordProfileVisit(userEmail);
       } catch (err) {
         console.error('Error loading full profile:', err);
       }
@@ -216,17 +325,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [isOpen, userEmail, userName, avatarUrl]);
-
-  // Sync input fields when profile state updates
-  useEffect(() => {
-    if (profile) {
-      setFullNameInput(profile.fullName || userName || '');
-      setNicknameInput(profile.nickname || '');
-      setSchoolInput(profile.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-      setRoleInput(profile.role || 'ครูผู้สอน');
-    }
-  }, [profile, userName]);
+  }, [isOpen, userEmail, userName, isMasterWeerapong]);
 
   // Synchronize user innovations dynamically from Firestore in real-time
   useEffect(() => {
@@ -323,17 +422,28 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return myMediaWorks.reduce((sum, item) => sum + (item.likes || 0), 0);
   }, [myMediaWorks]);
 
-  // Real-time verified visitor statistics based on authentic login logs
+  // Real-time verified visitor statistics based on authentic login logs (no artificial floors)
   const verifiedStats = React.useMemo(() => {
-    const targetYearNum = parseInt(selectedYear) || 2026;
+    const targetYearNum = parseInt(selectedYear, 10) || new Date().getFullYear();
     const now = new Date();
     const isCurrentYear = now.getFullYear() === targetYearNum;
     const currentMonthIdx = now.getMonth();
-    const todayStr = now.toISOString().split('T')[0];
+    const normTargetEmail = (userEmail || '').toLowerCase().trim();
+
+    const isSameLocalDay = (ts?: string) => {
+      if (!ts) return false;
+      const d = new Date(ts);
+      if (isNaN(d.getTime())) return false;
+      return (
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate()
+      );
+    };
 
     // Filter by user's email
     const myLogs = loginLogs.filter(
-      (l) => l.email?.toLowerCase().trim() === userEmail?.toLowerCase().trim()
+      (l) => l.email?.toLowerCase().trim() === normTargetEmail
     );
 
     // All logs that fall in selected target year
@@ -351,10 +461,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
-    const isMaster = userEmail?.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
-    const myYearVisits = isMaster && targetYearNum === 2026
-      ? Math.max(myYearLogs.length, profileViews, 105)
-      : Math.max(myYearLogs.length, profileViews, isCurrentYear ? 1 : 0);
+    // Fallback for accounts with recorded profile views when login_logs entry is absent
+    const useProfileViewsFallback = myYearLogs.length === 0 && isCurrentYear && profileViews > 0;
 
     // Monthly breakdown for selected year (1-12)
     const monthNames = [
@@ -372,10 +480,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         return d.getMonth() === idx;
       }).length;
 
-      // Ensure active current month reflects at least 1 visit if today has active access
-      if (isCurrentYear && idx === currentMonthIdx) {
-        myCount = Math.max(myCount, 1);
-        allCount = Math.max(allCount, myCount);
+      if (useProfileViewsFallback && idx === currentMonthIdx) {
+        myCount += profileViews;
+        allCount += profileViews;
       }
 
       return {
@@ -386,26 +493,30 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       };
     });
 
+    const myYearVisits = monthlyData.reduce((sum, m) => sum + m.myCount, 0);
+    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+
     const myTodayVisits = isCurrentYear
-      ? Math.max(myYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length, 1)
+      ? myYearLogs.filter((l) => isSameLocalDay(l.loginTimestamp)).length
       : 0;
     const myMonthVisits = isCurrentYear
-      ? Math.max(monthlyData[currentMonthIdx]?.myCount || 0, myTodayVisits)
+      ? (monthlyData[currentMonthIdx]?.myCount || 0)
       : 0;
 
     const allTodayVisits = isCurrentYear
-      ? Math.max(allYearLogs.filter((l) => l.loginTimestamp?.startsWith(todayStr)).length, myTodayVisits)
+      ? allYearLogs.filter((l) => isSameLocalDay(l.loginTimestamp)).length
       : 0;
     const allMonthVisits = isCurrentYear
-      ? Math.max(monthlyData[currentMonthIdx]?.allCount || 0, myMonthVisits)
+      ? (monthlyData[currentMonthIdx]?.allCount || 0)
       : 0;
 
-    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
-
-    const uniqueVerifiedUsersYear = Math.max(
-      new Set(allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)).size,
-      1
+    const uniqueEmailsInYear = new Set(
+      allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
     );
+    if (useProfileViewsFallback && normTargetEmail) {
+      uniqueEmailsInYear.add(normTargetEmail);
+    }
+    const uniqueVerifiedUsersYear = uniqueEmailsInYear.size;
 
     const uniqueAllUsers = Math.max(
       new Set(loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)).size,
@@ -437,18 +548,37 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     setSaveSuccess(false);
 
     try {
+      const normEmail = userEmail.toLowerCase().trim();
+      const localStoredAvatar = typeof window !== 'undefined'
+        ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
+        : '';
+      const cachedNow = getCachedUserProfile(userEmail);
+      const preservedAvatar =
+        (profile.avatarUrl && profile.avatarUrl.trim()) ||
+        (cachedNow?.avatarUrl && cachedNow.avatarUrl.trim()) ||
+        localStoredAvatar ||
+        avatarUrl ||
+        '';
+
       const updatedProfile: FullUserProfile = {
         ...profile,
         fullName: fullNameInput.trim() || userName,
         nickname: nicknameInput.trim(),
         school: schoolInput.trim() || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         role: roleInput.trim() || 'ครูผู้สอน',
+        avatarUrl: preservedAvatar,
         updatedAt: new Date().toISOString(),
       };
 
       const success = await saveFullUserProfile(updatedProfile);
       if (success) {
         setProfile(updatedProfile);
+        if (preservedAvatar) {
+          try {
+            localStorage.setItem(`acu_user_avatar_${normEmail}`, preservedAvatar);
+          } catch {}
+          onAvatarUpdated(preservedAvatar);
+        }
         setSaveSuccess(true);
         if (onProfileUpdated) {
           onProfileUpdated(updatedProfile);
@@ -797,7 +927,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     id="input-profile-nickname"
                     value={nicknameInput}
                     onChange={(e) => setNicknameInput(e.target.value)}
-                    placeholder="เช่น ครูปอย / น้องกานต์"
+                    placeholder="ระบุชื่อเล่น (ถ้ามี)"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                   />
                   <p className="text-[11px] text-slate-500">ชื่อเล่นสำหรับการเรียกขานอย่างเป็นกันเองในระบบ</p>
@@ -1153,27 +1283,51 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           {activeTab === 'stats' && (
             <div className="space-y-4 animate-in fade-in duration-200">
               
-              {/* Admin Reset Banner (Only for Admin weerapong1625@acu.ac.th) */}
-              {isMasterWeerapong && (
-                <div className="p-3.5 rounded-2xl bg-gradient-to-r from-red-950/60 to-slate-900 border border-red-500/40 flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-md">
+              {/* Admin Reset Banner (Visible whenever logged-in Admin views any profile or own profile) */}
+              {isViewerAdmin && (
+                <div className="p-3.5 rounded-2xl bg-gradient-to-r from-red-950/60 to-slate-900 border border-red-500/40 flex flex-col lg:flex-row lg:items-center justify-between gap-3 shadow-md">
                   <div className="flex items-center gap-2.5">
                     <div className="w-8 h-8 rounded-xl bg-red-500/20 text-red-400 flex items-center justify-center flex-shrink-0">
                       <RotateCcw className="w-4 h-4" />
                     </div>
                     <div>
-                      <p className="text-xs font-bold text-red-200">เครื่องมือแอดมิน: รีเซ็ตสถิติผู้เข้าชมทั้งระบบเป็น 0</p>
-                      <p className="text-[11px] text-slate-400">ล้างประวัติการเข้าใช้งานเดิมทั้งหมด เพื่อเริ่มนับตามจำนวนครั้งจริง 1 ครั้ง = 1 ยอดเข้าชม</p>
+                      <p className="text-xs font-bold text-red-200">เครื่องมือแอดมิน: รีเซ็ตสถิติการเข้าชมเป็น 0</p>
+                      <p className="text-[11px] text-slate-400">
+                        เลือกรีเซ็ตเฉพาะของ Admin, เฉพาะบัญชีนี้ หรือรีเซ็ตทุกคนในระบบเป็น 0 (ข้อมูลสื่อและผลงานคงเดิม)
+                      </p>
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={handleResetAllVisitorLogs}
-                    disabled={isResettingLogs}
-                    className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md shadow-red-600/30 cursor-pointer disabled:opacity-50 self-end sm:self-auto"
-                  >
-                    <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
-                    <span>{isResettingLogs ? 'กำลังรีเซ็ต...' : 'รีเซ็ตสถิติเป็น 0'}</span>
-                  </button>
+                  <div className="flex items-center gap-2 flex-wrap self-end lg:self-auto">
+                    {!isMasterWeerapong && (
+                      <button
+                        type="button"
+                        onClick={handleResetTargetUserStats}
+                        disabled={isResettingLogs}
+                        className="px-3 py-1.5 rounded-xl bg-amber-600/80 hover:bg-amber-500 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                        <span>รีเซ็ตผู้ใช้นี้เป็น 0</span>
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleResetAdminOnlyStats}
+                      disabled={isResettingLogs}
+                      className="px-3 py-1.5 rounded-xl bg-rose-700/80 hover:bg-rose-600 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                      <span>รีเซ็ตของฉัน (Admin) เป็น 0</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleResetAllVisitorLogs}
+                      disabled={isResettingLogs}
+                      className="px-3.5 py-1.5 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-md shadow-red-600/30 cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                      <span>{isResettingLogs ? 'กำลังรีเซ็ต...' : 'รีเซ็ตทั้งระบบ (ทุกคน) เป็น 0'}</span>
+                    </button>
+                  </div>
                 </div>
               )}
 
@@ -1244,7 +1398,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     {verifiedStats.allYearVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span>
                   </p>
                   <div className="mt-1 flex items-center justify-between text-[10px] text-slate-400 border-t border-slate-700/50 pt-1">
-                    <span>ผู้ใช้จริง: {verifiedStats.uniqueVerifiedUsersYear} บัญชี</span>
+                    <span>ผู้เข้าชม: {verifiedStats.uniqueVerifiedUsersYear} บัญชี</span>
                     <span>วันนี้: {verifiedStats.allTodayVisits} ครั้ง</span>
                   </div>
                 </div>
@@ -1340,40 +1494,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     ยอดรวมแต่ละเดือนตรงกับยอดสรุป 100%
                   </span>
                 </div>
-              </div>
-
-              {/* Real Activity & Login Audit Log */}
-              <div className="p-4 rounded-2xl bg-slate-800/40 border border-slate-700/60 space-y-3">
-                <h4 className="text-xs font-bold text-white flex items-center gap-2">
-                  <Clock className="w-4 h-4 text-sky-400" />
-                  <span>บันทึกความเคลื่อนไหวการเข้าสู่ระบบล่าสุดของคุณ (คิด 1 ครั้ง = 1 ดาว ปีต่อปี)</span>
-                </h4>
-                
-                {verifiedStats.myRecentLogs.length > 0 ? (
-                  <div className="space-y-1.5">
-                    {verifiedStats.myRecentLogs.map((log) => (
-                      <div
-                        key={log.id}
-                        className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/60 border border-slate-800 text-xs"
-                      >
-                        <div className="flex items-center gap-2">
-                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-                          <span className="text-slate-200 font-medium truncate max-w-[200px] sm:max-w-xs">{log.email}</span>
-                          <span className="px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-300 text-[10px]">
-                            {log.loginMethod || 'Google'}
-                          </span>
-                        </div>
-                        <div className="text-right text-[11px] text-slate-400 flex-shrink-0">
-                          {log.loginDate} {log.loginTime}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="p-3 text-center text-xs text-slate-400 bg-slate-900/40 rounded-xl">
-                    เริ่มนับสถิติการเข้าสู่ระบบตามความเป็นจริงตั้งแต่วันนี้เป็นต้นไป
-                  </div>
-                )}
               </div>
             </div>
           )}
@@ -1762,17 +1882,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               <LogOut className="w-3.5 h-3.5 rotate-180" />
               <span>กดออกหน้านี้</span>
             </button>
-            {activeTab === 'info' && (
-              <button
-                type="button"
-                onClick={handleSaveProfile}
-                disabled={isSaving}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold shadow-md transition-colors inline-flex items-center gap-1.5"
-              >
-                <Save className="w-3.5 h-3.5" />
-                <span>บันทึก</span>
-              </button>
-            )}
           </div>
         </div>
 
@@ -1800,6 +1909,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           displayName={profile.fullName || userName}
           currentAvatarUrl={profile.avatarUrl || avatarUrl}
           onSaveAvatar={async (newAvatarUrl) => {
+            const normEmail = userEmail.toLowerCase().trim();
+            if (newAvatarUrl && typeof window !== 'undefined') {
+              try {
+                localStorage.setItem(`acu_user_avatar_${normEmail}`, newAvatarUrl);
+              } catch {}
+            }
             const updatedProfile: FullUserProfile = {
               ...profile,
               avatarUrl: newAvatarUrl,
@@ -1808,6 +1923,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             setProfile(updatedProfile);
             await saveFullUserProfile(updatedProfile);
             onAvatarUpdated(newAvatarUrl);
+            if (onProfileUpdated) {
+              onProfileUpdated(updatedProfile);
+            }
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 3500);
             setShowAvatarEditModal(false);
           }}
         />

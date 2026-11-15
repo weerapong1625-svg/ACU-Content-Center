@@ -30,7 +30,6 @@ import {
   logUserLogin, 
   fetchRecentLoginLogs, 
   LoginLogEntry, 
-  saveUserProfile, 
   fetchUserProfile 
 } from '../services/auditService';
 import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
@@ -65,11 +64,14 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     ? userEmail.split('@')[0]
     : userEmail;
 
-  // Real profile picture state: check localStorage, otherwise preset authentic educator avatar
+  // Real profile picture state: check localStorage & cached profile, otherwise preset authentic educator avatar
   const getInitialAvatar = () => {
     try {
-      const saved = localStorage.getItem(`acu_user_avatar_${userEmail}`);
+      const norm = userEmail.toLowerCase().trim();
+      const saved = localStorage.getItem(`acu_user_avatar_${norm}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`);
       if (saved) return saved;
+      const cached = getCachedUserProfile(userEmail);
+      if (cached?.avatarUrl) return cached.avatarUrl;
     } catch {
       // ignore
     }
@@ -90,9 +92,16 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
 
   const handleProfileUpdated = (updated: FullUserProfile) => {
     if (updated.fullName) setProfileName(updated.fullName);
-    if (updated.nickname) setProfileNickname(updated.nickname);
+    setProfileNickname(updated.nickname || '');
     if (updated.school) setProfileSchool(updated.school);
-    if (updated.avatarUrl) setAvatarUrl(updated.avatarUrl);
+    if (updated.avatarUrl) {
+      setAvatarUrl(updated.avatarUrl);
+      try {
+        localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, updated.avatarUrl);
+      } catch {
+        // ignore
+      }
+    }
   };
 
   // Synchronize profile real-time from Firestore across all devices (mobile & desktop)
@@ -101,34 +110,19 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
       if (fullProf.avatarUrl) {
         setAvatarUrl(fullProf.avatarUrl);
         try {
-          localStorage.setItem(`acu_user_avatar_${userEmail}`, fullProf.avatarUrl);
+          localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, fullProf.avatarUrl);
         } catch {
           // ignore
         }
       }
       if (fullProf.fullName) setProfileName(fullProf.fullName);
-      if (fullProf.nickname) setProfileNickname(fullProf.nickname);
+      setProfileNickname(fullProf.nickname || '');
       if (fullProf.school) setProfileSchool(fullProf.school);
     });
     return () => {
       unsubscribe();
     };
   }, [userEmail]);
-
-  // Handle saving new avatar photo
-  const handleSaveAvatar = async (newAvatarUrl: string) => {
-    setAvatarUrl(newAvatarUrl);
-    try {
-      localStorage.setItem(`acu_user_avatar_${userEmail}`, newAvatarUrl);
-    } catch {
-      // ignore
-    }
-    await saveUserProfile({
-      email: userEmail,
-      displayName: userName,
-      avatarUrl: newAvatarUrl,
-    });
-  };
 
   // Format current login time
   const [loginTimeStr, setLoginTimeStr] = useState('');
@@ -705,7 +699,11 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
         currentUserEmail={userEmail}
         onAvatarUpdated={(newUrl) => {
           setAvatarUrl(newUrl);
-          handleSaveAvatar(newUrl);
+          try {
+            localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, newUrl);
+          } catch {
+            // ignore
+          }
         }}
         onProfileUpdated={handleProfileUpdated}
       />

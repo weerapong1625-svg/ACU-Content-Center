@@ -301,7 +301,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   };
 
   // Avatar calculation
-  const avatarSrc = profile?.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(
+  const storedLocalAvatar = typeof window !== 'undefined'
+    ? (localStorage.getItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`) || '')
+    : '';
+  const avatarSrc = profile?.avatarUrl || storedLocalAvatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(
     profile?.fullName || userEmail
   )}&background=1e40af&color=ffffff&size=160&bold=true`;
 
@@ -872,9 +875,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         avatarUrl={avatarSrc}
         currentUserEmail={userEmail}
         onAvatarUpdated={(newAvatar) => {
-          if (profile) {
-            setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
-          }
+          try {
+            localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, newAvatar);
+          } catch {}
+          setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
         }}
         onProfileUpdated={(updated) => {
           setProfile(updated);

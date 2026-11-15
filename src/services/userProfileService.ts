@@ -187,6 +187,30 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
   }
 }
 
+function getStoredAvatarUrl(email: string): string {
+  if (typeof window === 'undefined' || !email) return '';
+  try {
+    const norm = email.toLowerCase().trim();
+    return (
+      localStorage.getItem(`acu_user_avatar_${norm}`) ||
+      localStorage.getItem(`acu_user_avatar_${email.trim()}`) ||
+      ''
+    );
+  } catch {
+    return '';
+  }
+}
+
+function setStoredAvatarUrl(email: string, avatarUrl: string): void {
+  if (typeof window === 'undefined' || !email || !avatarUrl) return;
+  try {
+    const norm = email.toLowerCase().trim();
+    localStorage.setItem(`acu_user_avatar_${norm}`, avatarUrl);
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Helper to ensure innovation items are consistently formatted and that unsubmitted slots are pending
  */
@@ -225,13 +249,15 @@ export function subscribeFullUserProfile(
       (snapshot) => {
         if (snapshot.exists()) {
           const data = snapshot.data();
+          const cached = getCachedUserProfile(email);
+          const resolvedAvatar = data.avatarUrl || cached?.avatarUrl || getStoredAvatarUrl(email) || '';
           const loadedProfile: FullUserProfile = {
             email: data.email || email,
             fullName: data.fullName || 'คุณครูอัสสัมชัญ',
             nickname: data.nickname || '',
             school: data.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
             displayName: data.displayName || data.fullName || email.split('@')[0],
-            avatarUrl: data.avatarUrl || '',
+            avatarUrl: resolvedAvatar,
             role: data.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
             innovations: sanitizeInnovations(data.innovations),
             stats: {
@@ -245,6 +271,9 @@ export function subscribeFullUserProfile(
             updatedAt: data.updatedAt || new Date().toISOString(),
           };
           setCachedUserProfile(loadedProfile);
+          if (resolvedAvatar) {
+            setStoredAvatarUrl(email, resolvedAvatar);
+          }
           onUpdate(loadedProfile);
         } else {
           fetchFullUserProfile(email).then(onUpdate);
@@ -295,13 +324,14 @@ export async function fetchFullUserProfile(
     const snapshot = await getDoc(profileRef);
     if (snapshot.exists()) {
       const data = snapshot.data();
+      const resolvedAvatar = data.avatarUrl || cached?.avatarUrl || getStoredAvatarUrl(email) || initialAvatar || '';
       const loadedProfile: FullUserProfile = {
         email: data.email || email,
         fullName: data.fullName || (data.displayName || initialDisplayName || 'คุณครูอัสสัมชัญ'),
         nickname: data.nickname || '',
         school: data.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         displayName: data.displayName || initialDisplayName || email.split('@')[0],
-        avatarUrl: data.avatarUrl || initialAvatar || '',
+        avatarUrl: resolvedAvatar,
         role: data.role || 'ครูผู้สอน',
         innovations: sanitizeInnovations(data.innovations),
         stats: {
@@ -318,6 +348,9 @@ export async function fetchFullUserProfile(
       };
 
       setCachedUserProfile(loadedProfile);
+      if (resolvedAvatar) {
+        setStoredAvatarUrl(email, resolvedAvatar);
+      }
       return loadedProfile;
     }
   } catch (err) {
@@ -332,13 +365,17 @@ export async function fetchFullUserProfile(
 
   // If not yet in Firestore or quota reached, construct default and persist locally
   const isMasterWeerapong = email.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
-  const defaultProfile: FullUserProfile = cached || {
+  const fallbackAvatar = cached?.avatarUrl || getStoredAvatarUrl(email) || initialAvatar || '';
+  const defaultProfile: FullUserProfile = cached ? {
+    ...cached,
+    avatarUrl: fallbackAvatar,
+  } : {
     email: email,
     fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (initialDisplayName || email.split('@')[0]),
     nickname: isMasterWeerapong ? 'ครูปอย' : '',
     school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
     displayName: initialDisplayName || email.split('@')[0],
-    avatarUrl: initialAvatar || '',
+    avatarUrl: fallbackAvatar,
     role: isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
     innovations: DEFAULT_INNOVATION_ITEMS,
     stats: {
@@ -371,11 +408,22 @@ export async function fetchFullUserProfile(
  * Save Full User Profile to Firestore & Cache
  */
 export async function saveFullUserProfile(profile: FullUserProfile): Promise<boolean> {
+  const existingCached = getCachedUserProfile(profile.email);
+  const resolvedAvatar =
+    (profile.avatarUrl && profile.avatarUrl.trim()) ||
+    (existingCached?.avatarUrl && existingCached.avatarUrl.trim()) ||
+    getStoredAvatarUrl(profile.email) ||
+    '';
+
   const sanitizedProfile: FullUserProfile = {
     ...profile,
+    avatarUrl: resolvedAvatar,
     innovations: sanitizeInnovations(profile.innovations),
   };
   setCachedUserProfile(sanitizedProfile);
+  if (resolvedAvatar) {
+    setStoredAvatarUrl(profile.email, resolvedAvatar);
+  }
 
   const payload = {
     email: sanitizedProfile.email,
@@ -383,7 +431,7 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
     nickname: sanitizedProfile.nickname || '',
     school: sanitizedProfile.school || '',
     displayName: sanitizedProfile.displayName || '',
-    avatarUrl: sanitizedProfile.avatarUrl || '',
+    avatarUrl: resolvedAvatar,
     role: sanitizedProfile.role || 'ครูผู้สอน',
     innovations: sanitizedProfile.innovations,
     stats: profile.stats || {

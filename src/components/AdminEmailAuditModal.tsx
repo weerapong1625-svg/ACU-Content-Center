@@ -13,7 +13,8 @@ import {
   Search,
   Layers,
   Clock,
-  Sparkles
+  Sparkles,
+  Eye
 } from 'lucide-react';
 import { 
   auditAndSyncAllDatabaseEmails, 
@@ -28,6 +29,7 @@ interface AdminEmailAuditModalProps {
   onClose: () => void;
   adminEmail: string;
   onUserDeleted?: (deletedEmail: string) => void;
+  onViewUserProfile?: (email: string) => void;
 }
 
 export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
@@ -35,6 +37,7 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
   onClose,
   adminEmail,
   onUserDeleted,
+  onViewUserProfile,
 }) => {
   const [auditResult, setAuditResult] = useState<DatabaseEmailAuditResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -342,18 +345,31 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
                               </span>
                             </td>
                             <td className="p-3 text-right">
-                              {isSuper ? (
-                                <span className="text-[11px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
-                              ) : (
-                                <button
-                                  onClick={() => handleDeleteUserFromAudit(email)}
-                                  disabled={isDeleting && deletingEmail === email}
-                                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all disabled:opacity-50"
-                                >
-                                  <Trash2 className="w-3 h-3" />
-                                  <span>{isDeleting && deletingEmail === email ? 'กำลังลบ...' : 'ลบบัญชี'}</span>
-                                </button>
-                              )}
+                              <div className="inline-flex items-center justify-end gap-2">
+                                {onViewUserProfile && (
+                                  <button
+                                    type="button"
+                                    onClick={() => onViewUserProfile(email)}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white transition-all cursor-pointer"
+                                    title={`ดูโปรไฟล์ของ ${email}`}
+                                  >
+                                    <Eye className="w-3 h-3" />
+                                    <span>ดูโปรไฟล์</span>
+                                  </button>
+                                )}
+                                {isSuper ? (
+                                  <span className="text-[11px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
+                                ) : (
+                                  <button
+                                    onClick={() => handleDeleteUserFromAudit(email)}
+                                    disabled={isDeleting && deletingEmail === email}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all disabled:opacity-50"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>{isDeleting && deletingEmail === email ? 'กำลังลบ...' : 'ลบบัญชี'}</span>
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );

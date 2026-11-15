@@ -18,6 +18,7 @@ import {
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
 import { logUserLogin } from './services/auditService';
+import { getCachedUserProfile } from './services/userProfileService';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -76,11 +77,13 @@ export default function App() {
     }
 
     const isAdmin = norm === 'weerapong1625@acu.ac.th';
+    const cachedProf = getCachedUserProfile(norm);
     logUserLogin({
       email: norm,
-      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : norm.split('@')[0],
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0]),
       role: isAdmin ? 'admin' : 'teacher',
       loginMethod: method,
+      avatarUrl: cachedProf?.avatarUrl || '',
     });
   }, []);
 

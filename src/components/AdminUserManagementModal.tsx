@@ -16,7 +16,8 @@ import {
   Copy,
   Check,
   Award,
-  Database
+  Database,
+  Eye
 } from 'lucide-react';
 import { 
   FullUserProfile, 
@@ -44,6 +45,7 @@ interface AdminUserManagementModalProps {
   facilities?: FacilitySubmission[];
   onUserDeleted?: (deletedEmail: string) => void;
   onOpenEmailAudit?: () => void;
+  onViewUserProfile?: (user: { email: string; name: string; avatarUrl: string }) => void;
 }
 
 export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> = ({
@@ -56,6 +58,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
   facilities,
   onUserDeleted,
   onOpenEmailAudit,
+  onViewUserProfile,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [copiedEmail, setCopiedEmail] = useState<string | null>(null);
@@ -192,26 +195,67 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       }
     });
 
-    // 3. Aggregate innovations
+    // 3. Aggregate innovations (create entry if missing)
     activeInnovations.forEach((inv) => {
       const normEmail = (inv.userEmail || '').trim().toLowerCase();
       if (!normEmail) return;
-      const userObj = map.get(normEmail);
-      if (userObj) {
-        userObj.innovationCount++;
-        if (inv.teacherName && userObj.fullName === normEmail.split('@')[0]) {
-          userObj.fullName = inv.teacherName;
-        }
+      const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
+      let userObj = map.get(normEmail);
+      if (!userObj) {
+        userObj = {
+          email: normEmail,
+          fullName: inv.teacherName || normEmail.split('@')[0],
+          displayName: inv.teacherName || normEmail.split('@')[0],
+          school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+          avatarUrl: '',
+          role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน',
+          loginCount: 0,
+          innovationCount: 0,
+          facilityCount: 0,
+          isMasterAdmin: isMaster,
+        };
+        map.set(normEmail, userObj);
+      }
+      userObj.innovationCount++;
+      if (inv.teacherName && userObj.fullName === normEmail.split('@')[0]) {
+        userObj.fullName = inv.teacherName;
       }
     });
 
-    // 4. Aggregate facilities
+    // 4. Aggregate facilities (create entry if missing)
     activeFacilities.forEach((fac) => {
       const normEmail = (fac.userEmail || '').trim().toLowerCase();
       if (!normEmail) return;
-      const userObj = map.get(normEmail);
-      if (userObj) {
-        userObj.facilityCount++;
+      const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
+      let userObj = map.get(normEmail);
+      if (!userObj) {
+        userObj = {
+          email: normEmail,
+          fullName: fac.teacherName || normEmail.split('@')[0],
+          displayName: fac.teacherName || normEmail.split('@')[0],
+          school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+          avatarUrl: '',
+          role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน',
+          loginCount: 0,
+          innovationCount: 0,
+          facilityCount: 0,
+          isMasterAdmin: isMaster,
+        };
+        map.set(normEmail, userObj);
+      }
+      userObj.facilityCount++;
+      if (fac.teacherName && userObj.fullName === normEmail.split('@')[0]) {
+        userObj.fullName = fac.teacherName;
+      }
+    });
+
+    // 5. Fallback loginCount from profile stats if login_logs had 0 entries for an active user
+    map.forEach((userObj, normEmail) => {
+      if (userObj.loginCount === 0) {
+        const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
+        if (profViews > 0) {
+          userObj.loginCount = profViews;
+        }
       }
     });
 
@@ -475,8 +519,25 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
                       </div>
                     </div>
 
-                    {/* Action: Delete user account */}
+                    {/* Action: View profile & Delete user account */}
                     <div className="flex items-center gap-2 pl-3">
+                      {onViewUserProfile && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onViewUserProfile({
+                              email: user.email,
+                              name: cleanName,
+                              avatarUrl: user.avatarUrl,
+                            })
+                          }
+                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 hover:border-sky-500 text-sky-300 hover:text-white transition-all shadow-sm cursor-pointer"
+                          title={`ดูโปรไฟล์ของ ${cleanName}`}
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>ดูโปรไฟล์</span>
+                        </button>
+                      )}
                       {isSuper ? (
                         <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-amber-950/40 border border-amber-600/30 text-amber-300 text-xs font-medium cursor-not-allowed select-none">
                           <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />

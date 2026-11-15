@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { 
   X, 
   Upload, 
@@ -70,6 +70,13 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   const [activeMode, setActiveMode] = useState<'upload' | 'preset' | 'url'>('upload');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    if (isOpen) {
+      setSelectedAvatar(currentAvatarUrl || '');
+      setUploadError(null);
+    }
+  }, [isOpen, currentAvatarUrl]);
+
   if (!isOpen) return null;
 
   // Handle local file upload and compress to clean Base64
@@ -121,12 +128,16 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
           setSelectedAvatar(event.target?.result as string);
         }
       };
+      img.onerror = () => {
+        setUploadError('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้ กรุณาลองเลือกไฟล์อื่น (JPG, PNG, WebP)');
+      };
       img.src = event.target?.result as string;
     };
     reader.onerror = () => {
       setUploadError('เกิดข้อผิดพลาดในการอ่านไฟล์รูปภาพ');
     };
     reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   const handleApplyUrl = () => {
@@ -136,12 +147,18 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   };
 
   const handleSave = async () => {
+    const avatarToSave = (selectedAvatar || currentAvatarUrl || '').trim();
+    if (!avatarToSave) {
+      setUploadError('กรุณาเลือกรูปโปรไฟล์หรืออัปโหลดรูปภาพก่อนกดบันทึก');
+      return;
+    }
     setIsProcessing(true);
     try {
-      await onSaveAvatar(selectedAvatar);
+      await onSaveAvatar(avatarToSave);
       onClose();
     } catch (err) {
       console.error(err);
+      setUploadError('เกิดข้อผิดพลาดในการบันทึกรูปโปรไฟล์ กรุณาลองใหม่อีกครั้ง');
     } finally {
       setIsProcessing(false);
     }

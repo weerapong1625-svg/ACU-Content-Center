@@ -117,7 +117,8 @@ import {
   subscribeAllLoginLogs,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
-  resetAllLoginLogs
+  resetAllLoginLogs,
+  resetAdminLoginLogs
 } from '../services/auditService';
 import {
   PopupBannerConfig,
@@ -804,6 +805,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
         }
       });
+      if (yr === CURRENT_CALENDAR_YEAR) {
+        Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
+          const em = emKey.toLowerCase().trim();
+          if (!visitsByEmail[em] && (prof?.stats?.totalViews || 0) > 0) {
+            visitsByEmail[em] = prof.stats.totalViews;
+          }
+        });
+      }
       const eligible = Object.values(visitsByEmail).filter((v) => v >= 100).length;
       result[opt.value] = {
         total: Object.keys(visitsByEmail).length,
@@ -811,7 +820,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       };
     });
     return result;
-  }, [loginLogs]);
+  }, [loginLogs, userProfilesMap]);
 
   // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
   const innovationYearlyBreakdown = useMemo(() => {
@@ -837,51 +846,69 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Compute certificate candidate users based on login logs and user profiles for selectedYear
   const certificateCandidates = useMemo(() => {
-    const yr = parseInt(selectedYear, 10) || 2026;
+    const yr = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
+    const isCurrentSelectedYear = yr === CURRENT_CALENDAR_YEAR;
     
     // 1. Group login logs by email for the selectedYear
-    const visitCountsByEmail: Record<string, { count: number; lastLogin: string }> = {};
+    const visitCountsByEmail: Record<string, { count: number; lastLogin: string; avatarUrl?: string; displayName?: string }> = {};
     loginLogs.forEach((log) => {
       if (!log.email) return;
       const email = log.email.toLowerCase().trim();
       const logYear = new Date(log.loginTimestamp).getFullYear();
       if (logYear === yr) {
         if (!visitCountsByEmail[email]) {
-          visitCountsByEmail[email] = { count: 1, lastLogin: log.loginTimestamp };
+          visitCountsByEmail[email] = {
+            count: 1,
+            lastLogin: log.loginTimestamp,
+            avatarUrl: log.avatarUrl || '',
+            displayName: log.displayName || '',
+          };
         } else {
           visitCountsByEmail[email].count++;
           if (new Date(log.loginTimestamp) > new Date(visitCountsByEmail[email].lastLogin)) {
             visitCountsByEmail[email].lastLogin = log.loginTimestamp;
+            if (log.avatarUrl) visitCountsByEmail[email].avatarUrl = log.avatarUrl;
           }
         }
       }
     });
 
-    // 2. Gather all unique emails from logs, profiles, and teacher summaries
+    // 2. Gather all unique emails from logs, profiles, teacher summaries, facilities, and privileges
     const allEmails = new Set<string>();
     Object.keys(visitCountsByEmail).forEach((e) => allEmails.add(e));
-    Object.keys(userProfilesMap).forEach((e) => allEmails.add(e));
+    Object.keys(userProfilesMap).forEach((e) => allEmails.add(e.toLowerCase().trim()));
     teacherSummaries.forEach((t) => {
       if (t.email) allEmails.add(t.email.toLowerCase().trim());
+    });
+    facilities.forEach((f) => {
+      if (f.userEmail) allEmails.add(f.userEmail.toLowerCase().trim());
+    });
+    privilegeSummaries.forEach((p) => {
+      if (p.email) allEmails.add(p.email.toLowerCase().trim());
     });
 
     // 3. Construct candidate list
     const candidates = Array.from(allEmails).map((email) => {
       const profile = userProfilesMap[email];
       const summary = teacherSummaries.find((t) => t.email?.toLowerCase().trim() === email);
+      const priv = privilegeSummaries.find((p) => p.email?.toLowerCase().trim() === email);
       const visitData = visitCountsByEmail[email] || { count: 0, lastLogin: '' };
       
       // Determine real full name (เฉพาะชื่อ-นามสกุลจริงเท่านั้น)
-      const rawName = profile?.fullName || summary?.teacherName || profile?.displayName || '';
+      const rawName = profile?.fullName || summary?.teacherName || priv?.name || profile?.displayName || visitData.displayName || '';
       const realName = getCleanRealName(rawName, email);
       
-      const visits = visitData.count;
+      const profileViews = profile?.stats?.totalViews || 0;
+      const visits = visitData.count > 0
+        ? visitData.count
+        : (isCurrentSelectedYear && profileViews > 0 ? profileViews : 0);
       const isEligible = visits >= 100;
       const progressPercent = Math.min(100, Math.round((visits / 100) * 100));
 
       return {
         email,
         realName,
+        avatarUrl: profile?.avatarUrl || visitData.avatarUrl || '',
         school: profile?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         role: profile?.role || (email === SUPER_ADMIN_EMAIL.toLowerCase() ? 'ผู้ดูแลระบบ' : 'ครูผู้สอน'),
         visits,
@@ -897,7 +924,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (!a.isEligible && b.isEligible) return 1;
       return b.visits - a.visits;
     });
-  }, [loginLogs, userProfilesMap, teacherSummaries, selectedYear]);
+  }, [loginLogs, userProfilesMap, teacherSummaries, facilities, privilegeSummaries, selectedYear]);
 
   // Filtered certificate candidates based on status and search query
   const filteredCertificateCandidates = useMemo(() => {
@@ -1088,6 +1115,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     teacherSummaries.forEach(t => {
       if (t.email) allSystemAccounts.add(t.email.trim().toLowerCase());
     });
+    facilities.forEach(f => {
+      if (f.userEmail) allSystemAccounts.add(f.userEmail.trim().toLowerCase());
+    });
+    privilegeSummaries.forEach(p => {
+      if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
+    });
     const totalAccountsCount = allSystemAccounts.size;
 
     return {
@@ -1099,7 +1132,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       totalFacilities: yearFacilities.length,
       monthlyBreakdown,
     };
-  }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, selectedYear]);
+  }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
@@ -1297,15 +1330,56 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Reset all visitor login logs to 0
+  // Reset ONLY Admin's own visitor login logs to 0 (preserves all other users)
+  const handleResetAdminVisitorLogs = async () => {
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAdminLoginLogs(SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        const normAdmin = SUPER_ADMIN_EMAIL.toLowerCase().trim();
+        setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== normAdmin));
+        setUserProfilesMap((prev) => {
+          const cur = prev[normAdmin];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [normAdmin]: {
+              ...cur,
+              stats: { ...cur.stats, totalViews: 0, uniqueVisitors: 0 },
+            },
+          };
+        });
+        setShowResetConfirmModal(false);
+        showToast(`รีเซ็ตสถิติการเข้าชมของ Admin (${SUPER_ADMIN_EMAIL}) เป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
+
+  // Reset ALL visitor login logs (Admin + every user in system) to 0
   const handleResetVisitorLogs = async () => {
     setIsResettingLogs(true);
     try {
       const res = await resetAllLoginLogs();
       if (res.success) {
         setLoginLogs([]);
+        setUserProfilesMap((prev) => {
+          const next: Record<string, FullUserProfile> = {};
+          Object.entries(prev).forEach(([k, prof]) => {
+            next[k] = {
+              ...prof,
+              stats: { ...prof.stats, totalViews: 0, uniqueVisitors: 0 },
+            };
+          });
+          return next;
+        });
         setShowResetConfirmModal(false);
-        showToast(`รีเซ็ตสถิติผู้เข้าชมเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ เริ่มนับจริงทีละ 1 ตั้งแต่วันนี้)`);
+        showToast(`รีเซ็ตสถิติผู้เข้าชมทุกคนในระบบเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
       } else {
         alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
       }
@@ -1417,11 +1491,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               type="button"
               id="btn-admin-delete-user"
               onClick={() => setShowUserManagementModal(true)}
-              className="px-3.5 py-1.5 rounded-xl bg-red-600/25 hover:bg-red-600 border border-red-500/50 text-red-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-red-950/40 transition-all cursor-pointer group active:scale-95 hover:border-red-400"
-              title="ระบบจัดการและลบบัญชีผู้ใช้งานระบบ (เฉพาะ Admin)"
+              className="px-3.5 py-1.5 rounded-xl bg-sky-600/25 hover:bg-sky-600 border border-sky-500/50 text-sky-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-sky-950/40 transition-all cursor-pointer group active:scale-95 hover:border-sky-400"
+              title="ดูโปรไฟล์ผู้ใช้งานทุกคนและจัดการบัญชีผู้ใช้ (เฉพาะ Admin)"
             >
-              <Trash2 className="w-3.5 h-3.5 text-red-400 group-hover:text-white transition-colors" />
-              <span>ลบบัญชีผู้ใช้</span>
+              <Users className="w-3.5 h-3.5 text-sky-400 group-hover:text-white transition-colors" />
+              <span>ดูโปรไฟล์ / จัดการบัญชี</span>
             </button>
 
             <button
@@ -2152,20 +2226,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               </span>
                             </td>
                             <td className="py-3 px-3.5 text-center">
-                              {isSuper ? (
-                                <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
-                              ) : (
+                              <div className="inline-flex items-center justify-center gap-1.5">
                                 <button
                                   type="button"
-                                  onClick={() => handleDirectDeleteUser(log.email, log.displayName)}
-                                  disabled={isDeletingUserDirect}
-                                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                  title={`ลบบัญชี ${log.email} ออกจากระบบถาวร`}
+                                  onClick={() => setViewUserProfileTarget({
+                                    email: log.email,
+                                    name: profileObj?.fullName || log.displayName,
+                                    avatarUrl: userAvatar,
+                                  })}
+                                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer"
+                                  title={`ดูโปรไฟล์ของ ${log.email}`}
                                 >
-                                  <Trash2 className="w-3 h-3" />
-                                  <span>ลบบัญชี</span>
+                                  <Eye className="w-3 h-3" />
+                                  <span>ดูโปรไฟล์</span>
                                 </button>
-                              )}
+                                {isSuper ? (
+                                  <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลัก</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDirectDeleteUser(log.email, log.displayName)}
+                                    disabled={isDeletingUserDirect}
+                                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                    title={`ลบบัญชี ${log.email} ออกจากระบบถาวร`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>ลบบัญชี</span>
+                                  </button>
+                                )}
+                              </div>
                             </td>
                           </tr>
                         );
@@ -2454,24 +2543,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                             {/* ชื่อ-นามสกุลจริง (เฉพาะชื่อ นามสกุลจริงเท่านั้น) */}
                             <td className="py-3 px-3.5">
-                              <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={() => setViewUserProfileTarget({
+                                  email: cand.email,
+                                  name: cand.realName,
+                                  avatarUrl: cand.avatarUrl,
+                                })}
+                                className="flex items-center gap-2 text-left group cursor-pointer"
+                                title={`คลิกเพื่อดูโปรไฟล์ของ ${cand.realName}`}
+                              >
                                 {cand.isEligible && (
                                   <Award className="w-4 h-4 text-amber-400 flex-shrink-0" />
                                 )}
                                 <div>
-                                  <span className={`font-bold text-sm ${cand.isEligible ? 'text-amber-200' : 'text-white'}`}>
+                                  <span className={`font-bold text-sm group-hover:underline ${cand.isEligible ? 'text-amber-200' : 'text-white group-hover:text-sky-300'}`}>
                                     {cand.realName}
                                   </span>
                                   <span className="block text-[10px] text-slate-400">
                                     {cand.school}
                                   </span>
                                 </div>
-                              </div>
+                              </button>
                             </td>
 
                             {/* อีเมลผู้ใช้งาน */}
                             <td className="py-3 px-3.5 font-mono text-sky-300 text-xs">
-                              {cand.email}
+                              <button
+                                type="button"
+                                onClick={() => setViewUserProfileTarget({
+                                  email: cand.email,
+                                  name: cand.realName,
+                                  avatarUrl: cand.avatarUrl,
+                                })}
+                                className="hover:underline cursor-pointer text-left"
+                                title={`คลิกเพื่อดูโปรไฟล์ของ ${cand.email}`}
+                              >
+                                {cand.email}
+                              </button>
                             </td>
 
                             {/* บทบาท */}
@@ -2524,9 +2633,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               )}
                             </td>
 
-                            {/* การดำเนินการ: ปุ่มกดพิมพ์ทันที + ปุ่มลบบัญชี (เฉพาะ Admin) */}
+                            {/* การดำเนินการ: ดูโปรไฟล์ + กดพิมพ์ + ลบบัญชี */}
                             <td className="py-3 px-3.5 text-center">
                               <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewUserProfileTarget({
+                                    email: cand.email,
+                                    name: cand.realName,
+                                    avatarUrl: cand.avatarUrl,
+                                  })}
+                                  className="px-2.5 py-1 rounded-lg bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all cursor-pointer"
+                                  title={`ดูโปรไฟล์และสถิติของ ${cand.realName}`}
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>ดูโปรไฟล์</span>
+                                </button>
+
                                 {cand.isEligible ? (
                                   <button
                                     type="button"
@@ -2559,7 +2682,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                     title="ดูตัวอย่างเกียรติบัตร"
                                   >
                                     <Eye className="w-3 h-3" />
-                                    <span>ดูตัวอย่าง</span>
+                                    <span>เกียรติบัตร</span>
                                   </button>
                                 )}
 
@@ -2963,6 +3086,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               <div className="flex items-center justify-center gap-1.5 flex-wrap">
                                 <button
                                   type="button"
+                                  onClick={() => {
+                                    const norm = item.email.trim().toLowerCase();
+                                    const prof = userProfilesMap[norm];
+                                    setViewUserProfileTarget({
+                                      email: item.email,
+                                      name: prof?.fullName || item.name,
+                                      avatarUrl: prof?.avatarUrl || '',
+                                    });
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all cursor-pointer"
+                                  title={`ดูโปรไฟล์ของ ${item.name}`}
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>ดูโปรไฟล์</span>
+                                </button>
+
+                                <button
+                                  type="button"
                                   onClick={() => setManagingPrivilegeTeacher(item)}
                                   className="px-2.5 py-1 rounded-lg bg-amber-600/20 hover:bg-amber-600 border border-amber-500/40 text-amber-200 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all shadow-xs cursor-pointer"
                                   title="บันทึกการมอบรางวัล / ตรวจสอบสิทธิ์"
@@ -3254,8 +3395,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                         <tr key={item.id} className="hover:bg-slate-800/40 transition-colors">
                           <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
                           <td className="py-3 px-3.5 font-medium text-white">
-                            <div>{item.teacherName}</div>
-                            <div className="text-[10px] text-slate-500 font-mono">{item.userEmail}</div>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const norm = (item.userEmail || '').trim().toLowerCase();
+                                const prof = userProfilesMap[norm];
+                                setViewUserProfileTarget({
+                                  email: item.userEmail,
+                                  name: prof?.fullName || item.teacherName,
+                                  avatarUrl: prof?.avatarUrl || '',
+                                });
+                              }}
+                              className="text-left hover:text-sky-300 transition-colors cursor-pointer group"
+                              title={`คลิกเพื่อดูโปรไฟล์ของ ${item.teacherName}`}
+                            >
+                              <div className="group-hover:underline">{item.teacherName}</div>
+                              <div className="text-[10px] text-slate-500 font-mono">{item.userEmail}</div>
+                            </button>
                           </td>
                           <td className="py-3 px-3.5 whitespace-nowrap">
                             <span className="px-2.5 py-1 rounded-lg bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 font-medium text-xs">
@@ -3444,7 +3600,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                         return (
                         <tr key={teacher.email || index} className="hover:bg-slate-800/40 transition-colors">
                           <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
-                          <td className="py-3 px-3.5 font-bold text-white whitespace-nowrap">{teacher.teacherName}</td>
+                          <td className="py-3 px-3.5 font-bold text-white whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const norm = (teacher.email || '').trim().toLowerCase();
+                                const prof = userProfilesMap[norm];
+                                setViewUserProfileTarget({
+                                  email: teacher.email,
+                                  name: prof?.fullName || teacher.teacherName,
+                                  avatarUrl: prof?.avatarUrl || '',
+                                });
+                              }}
+                              className="hover:text-sky-300 hover:underline cursor-pointer text-left"
+                              title={`คลิกเพื่อดูโปรไฟล์ของ ${teacher.teacherName}`}
+                            >
+                              {teacher.teacherName}
+                            </button>
+                          </td>
                           <td className="py-3 px-3.5 text-indigo-300 font-semibold whitespace-nowrap">
                             <span className="px-2.5 py-1 rounded-lg bg-indigo-500/15 border border-indigo-500/30 text-[11px]">
                               {teacher.subjectGroup || 'ไม่ระบุกลุ่มสาระ'}
@@ -3479,34 +3652,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item4}>{teacher.item4}</td>
                           <td className="py-3 px-3.5 text-slate-400 max-w-[120px] truncate" title={teacher.item5}>{teacher.item5}</td>
                           <td className="py-3 px-3.5 text-center whitespace-nowrap">
-                            {isSuper ? (
-                              <div className="inline-flex items-center gap-2">
-                                <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลักห้ามลบ</span>
-                                {teacher.submittedCount > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={handleClearAdminOwnMedia}
-                                    disabled={isClearingAdminMedia}
-                                    className="px-2 py-1 rounded-lg text-[11px] font-bold bg-rose-600/20 hover:bg-rose-600 border border-rose-500/40 text-rose-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                    title={`ลบเฉพาะสื่อของ Admin (${SUPER_ADMIN_EMAIL})`}
-                                  >
-                                    <Trash2 className="w-3 h-3" />
-                                    <span>{isClearingAdminMedia ? 'กำลังลบ...' : 'ลบสื่อของฉัน'}</span>
-                                  </button>
-                                )}
-                              </div>
-                            ) : (
+                            <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => handleDirectDeleteUser(teacher.email, teacher.teacherName)}
-                                disabled={isDeletingUserDirect}
-                                className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                title={`ลบบัญชี ${teacher.email} ออกจากระบบถาวร`}
+                                onClick={() => {
+                                  const norm = (teacher.email || '').trim().toLowerCase();
+                                  const prof = userProfilesMap[norm];
+                                  setViewUserProfileTarget({
+                                    email: teacher.email,
+                                    name: prof?.fullName || teacher.teacherName,
+                                    avatarUrl: prof?.avatarUrl || '',
+                                  });
+                                }}
+                                className="px-2.5 py-1 rounded-lg text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer"
+                                title={`ดูโปรไฟล์ของ ${teacher.teacherName}`}
                               >
-                                <Trash2 className="w-3 h-3" />
-                                <span>ลบบัญชี</span>
+                                <Eye className="w-3 h-3" />
+                                <span>ดูโปรไฟล์</span>
                               </button>
-                            )}
+                              {isSuper ? (
+                                <div className="inline-flex items-center gap-2">
+                                  <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลัก</span>
+                                  {teacher.submittedCount > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={handleClearAdminOwnMedia}
+                                      disabled={isClearingAdminMedia}
+                                      className="px-2 py-1 rounded-lg text-[11px] font-bold bg-rose-600/20 hover:bg-rose-600 border border-rose-500/40 text-rose-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                      title={`ลบเฉพาะสื่อของ Admin (${SUPER_ADMIN_EMAIL})`}
+                                    >
+                                      <Trash2 className="w-3 h-3" />
+                                      <span>{isClearingAdminMedia ? 'กำลังลบ...' : 'ลบสื่อของฉัน'}</span>
+                                    </button>
+                                  )}
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => handleDirectDeleteUser(teacher.email, teacher.teacherName)}
+                                  disabled={isDeletingUserDirect}
+                                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  title={`ลบบัญชี ${teacher.email} ออกจากระบบถาวร`}
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                  <span>ลบบัญชี</span>
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       );
@@ -3691,7 +3883,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                         return (
                           <tr key={fac.id} className="hover:bg-slate-800/40 transition-colors">
                             <td className="py-3 px-3.5 text-center text-slate-400">{idx + 1}</td>
-                            <td className="py-3 px-3.5 font-semibold text-white whitespace-nowrap">{fac.teacherName}</td>
+                            <td className="py-3 px-3.5 font-semibold text-white whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const norm = (fac.userEmail || '').trim().toLowerCase();
+                                  const prof = userProfilesMap[norm];
+                                  setViewUserProfileTarget({
+                                    email: fac.userEmail,
+                                    name: prof?.fullName || fac.teacherName,
+                                    avatarUrl: prof?.avatarUrl || '',
+                                  });
+                                }}
+                                className="hover:text-sky-300 hover:underline cursor-pointer text-left"
+                                title={`คลิกเพื่อดูโปรไฟล์ของ ${fac.teacherName}`}
+                              >
+                                {fac.teacherName}
+                              </button>
+                            </td>
                             <td className="py-3 px-3.5 text-slate-300">{fac.subjectGroup}</td>
                             <td className="py-3 px-3.5 text-sky-300 font-medium">{fac.learningCenter}</td>
                             <td className="py-3 px-3.5 text-center">
@@ -4704,7 +4913,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       )}
 
       {/* =========================================================================
-          Reset All Visitor Logs Confirmation Modal
+          Reset Visitor Logs Confirmation Modal (Admin Self or All Users)
          ========================================================================= */}
       {showResetConfirmModal && (
         <div
@@ -4712,7 +4921,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           onClick={() => !isResettingLogs && setShowResetConfirmModal(false)}
         >
           <div
-            className="relative w-full max-w-md bg-slate-900 border border-red-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            className="relative w-full max-w-lg bg-slate-900 border border-red-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center gap-3">
@@ -4720,23 +4929,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 <RotateCcw className="w-6 h-6" />
               </div>
               <div>
-                <h3 className="text-base font-bold text-white">รีเซ็ตสถิติผู้เข้าชมระบบเป็น 0</h3>
-                <p className="text-xs text-slate-400">เริ่มต้นนับสถิติใหม่ตามการ Login จริงเท่านั้น</p>
+                <h3 className="text-base font-bold text-white">รีเซ็ตสถิติการเข้าชมเป็น 0</h3>
+                <p className="text-xs text-slate-400">เลือกขอบเขตการรีเซ็ต (ไม่กระทบข้อมูลสื่อและผลงานอื่น)</p>
               </div>
             </div>
 
             <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
-              <p className="font-semibold text-red-300 flex items-center gap-1.5">
+              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
                 <AlertTriangle className="w-4 h-4 text-amber-400" />
-                <span>คำเตือน: การกระทำนี้ไม่สามารถย้อนกลับได้</span>
+                <span>โปรดเลือกการดำเนินการ (ไม่สามารถย้อนกลับประวัติการเข้าชมได้)</span>
               </p>
               <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
-                <li>ข้อมูลสถิติผู้เข้าชมทั้งของ <strong>Admin</strong> และ <strong>ผู้ใช้งานทั้งหมด</strong> จะถูกรีเซ็ตเป็น 0</li>
-                <li>ระบบจะเริ่มนับสถิติใหม่อย่างแม่นยำ โดยเมื่อมีการ Login สำเร็จจะนับเป็นเข้าชม 1 ครั้ง และนับเพิ่มทีละ 1 ตามจริงเท่านั้น</li>
+                <li><strong>รีเซ็ตเฉพาะของ Admin (ฉัน)</strong>: ล้างสถิติการเข้าชมเฉพาะของ {SUPER_ADMIN_EMAIL} เป็น 0 โดยคงสถิติของคนอื่นไว้ตามเดิม</li>
+                <li><strong>รีเซ็ตทุกคนในระบบ</strong>: ล้างสถิติการเข้าชมของทั้ง Admin และผู้ใช้งานทุกคนในระบบเป็น 0 เพื่อเริ่มนับใหม่ทีละ 1</li>
               </ul>
             </div>
 
-            <div className="pt-2 flex items-center justify-end gap-2.5">
+            <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
               <button
                 type="button"
                 disabled={isResettingLogs}
@@ -4747,12 +4956,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </button>
               <button
                 type="button"
+                onClick={handleResetAdminVisitorLogs}
+                disabled={isResettingLogs}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                <span>รีเซ็ตเฉพาะของฉัน (Admin) เป็น 0</span>
+              </button>
+              <button
+                type="button"
                 onClick={handleResetVisitorLogs}
                 disabled={isResettingLogs}
-                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md shadow-red-900/30"
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md shadow-red-900/30"
               >
-                <RotateCcw className={`w-4 h-4 ${isResettingLogs ? 'animate-spin' : ''}`} />
-                <span>{isResettingLogs ? 'กำลังรีเซ็ตสถิติ...' : 'ยืนยันรีเซ็ตเป็น 0'}</span>
+                <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                <span>{isResettingLogs ? 'กำลังรีเซ็ต...' : 'รีเซ็ตทุกคนในระบบเป็น 0'}</span>
               </button>
             </div>
           </div>
@@ -4785,7 +5003,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         />
       )}
 
-      {/* Admin User Management Modal: ลบบัญชีผู้ใช้ทุกข้อมูลและคลังสื่อ */}
+      {/* Admin User Management Modal: ดูโปรไฟล์ทุกคนและลบบัญชีผู้ใช้ */}
       <AdminUserManagementModal
         isOpen={showUserManagementModal}
         onClose={() => setShowUserManagementModal(false)}
@@ -4801,6 +5019,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           setShowUserManagementModal(false);
           setShowEmailAuditModal(true);
         }}
+        onViewUserProfile={(user) => {
+          setShowUserManagementModal(false);
+          setViewUserProfileTarget(user);
+        }}
       />
 
       {/* Admin Email Database Audit & Sync Modal: ตรวจสอบอีเมลตรงกันทุกฐานข้อมูล */}
@@ -4810,6 +5032,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
+        }}
+        onViewUserProfile={(targetEmail) => {
+          const norm = targetEmail.toLowerCase().trim();
+          const prof = userProfilesMap[norm];
+          setShowEmailAuditModal(false);
+          setViewUserProfileTarget({
+            email: targetEmail,
+            name: prof?.fullName || prof?.displayName || norm.split('@')[0],
+            avatarUrl: prof?.avatarUrl || '',
+          });
         }}
       />
 
@@ -4829,6 +5061,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       {/* Admin View Full User Profile Modal (สามารถเข้าดูโปรไฟล์และรูปภาพของผู้ใช้งานทุกคนได้) */}
       {viewUserProfileTarget && (
         <UserProfileModal
+          key={viewUserProfileTarget.email}
           isOpen={Boolean(viewUserProfileTarget)}
           onClose={() => setViewUserProfileTarget(null)}
           userEmail={viewUserProfileTarget.email}
