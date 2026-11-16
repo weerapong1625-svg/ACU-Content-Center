@@ -26,22 +26,10 @@ try {
 export const db = firestoreInstance;
 export const auth = getAuth(app);
 
-export function createAcuGoogleProvider(loginHint?: string): GoogleAuthProvider {
-  const provider = new GoogleAuthProvider();
-  provider.addScope('email');
-  provider.addScope('profile');
-  const params: Record<string, string> = {
-    prompt: 'select_account',
-    hd: 'acu.ac.th',
-  };
-  if (loginHint && loginHint.trim()) {
-    params.login_hint = loginHint.trim().toLowerCase();
-  }
-  provider.setCustomParameters(params);
-  return provider;
-}
-
-export const googleAuthProvider = createAcuGoogleProvider();
+export const googleAuthProvider = new GoogleAuthProvider();
+googleAuthProvider.setCustomParameters({
+  prompt: 'select_account',
+});
 
 export default app;
 
