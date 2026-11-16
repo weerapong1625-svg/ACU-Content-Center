@@ -40,7 +40,7 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
   if (!trimmed) {
     return {
       isValid: false,
-      errorMessage: 'กรุณากรอกอีเมล Gmail หรือบัญชีโรงเรียน @acu.ac.th',
+      errorMessage: 'กรุณากรอกอีเมลบัญชีโรงเรียนโดเมน @acu.ac.th เท่านั้น',
     };
   }
 
@@ -65,7 +65,7 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
   if (atParts.length !== 2) {
     return {
       isValid: false,
-      errorMessage: 'รูปแบบอีเมลไม่ถูกต้อง ต้องมีเครื่องหมาย @ หนึ่งตัว (เช่น yourname@gmail.com หรือ user@acu.ac.th)',
+      errorMessage: 'รูปแบบอีเมลไม่ถูกต้อง ต้องมีเครื่องหมาย @ หนึ่งตัว (เช่น yourname@acu.ac.th)',
     };
   }
 
@@ -79,12 +79,12 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
     };
   }
 
-  // Gmail local part rules:
+  // Google Workspace local part rules:
   // Cannot start or end with a dot
   if (localPart.startsWith('.') || localPart.endsWith('.')) {
     return {
       isValid: false,
-      errorMessage: 'ชื่อบัญชี Gmail ต้องไม่ขึ้นต้นหรือลงท้ายด้วยจุด (.) กรุณากรอกใหม่',
+      errorMessage: 'ชื่อบัญชีอีเมลต้องไม่ขึ้นต้นหรือลงท้ายด้วยจุด (.) กรุณากรอกใหม่',
     };
   }
 
@@ -92,7 +92,7 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
   if (localPart.includes('..')) {
     return {
       isValid: false,
-      errorMessage: 'ชื่อบัญชี Gmail ต้องไม่มีจุดต่อเนื่องกัน (..) กรุณากรอกใหม่',
+      errorMessage: 'ชื่อบัญชีอีเมลต้องไม่มีจุดต่อเนื่องกัน (..) กรุณากรอกใหม่',
     };
   }
 
@@ -108,30 +108,24 @@ export function validateRealGmailAccount(input: string): EmailValidationResult {
   if (!domainPart || !domainPart.includes('.')) {
     return {
       isValid: false,
-      errorMessage: 'ชื่อโดเมนไม่ถูกต้อง กรุณาระบุโดเมนที่มีอยู่จริง เช่น @acu.ac.th หรือ @gmail.com',
+      errorMessage: 'ชื่อโดเมนไม่ถูกต้อง ระบบรองรับเฉพาะอีเมลโดเมน @acu.ac.th เท่านั้น',
     };
   }
 
-  // Check common domain typos
-  if (COMMON_TYPOS[domainPart]) {
-    const correctDomain = COMMON_TYPOS[domainPart];
+  // Check common ACU domain typos and suggest @acu.ac.th
+  if (COMMON_TYPOS[domainPart] === 'acu.ac.th') {
     return {
       isValid: false,
-      errorMessage: `ตรวจพบชื่อโดเมนพิมพ์ผิด: "@${domainPart}" ที่ถูกต้องคือ "@${correctDomain}" กรุณากรอกใหม่`,
-      suggestedFix: `${localPart}@${correctDomain}`,
+      errorMessage: `ตรวจพบชื่อโดเมนพิมพ์ผิด: "@${domainPart}" ที่ถูกต้องคือ "@acu.ac.th" กรุณากรอกใหม่`,
+      suggestedFix: `${localPart}@acu.ac.th`,
     };
   }
 
-  // Check allowed educational, Gmail, and standard email provider domains
-  const isAcuDomain = domainPart === 'acu.ac.th';
-  const isGmailDomain = domainPart === 'gmail.com';
-  const isGoogleWorkspace = domainPart.endsWith('.edu') || domainPart.endsWith('.ac.th') || domainPart === 'google.com';
-  const isStandardProvider = /^(gmail\.com|acu\.ac\.th|hotmail\.com|outlook\.com|yahoo\.com|icloud\.com|live\.com|windowslive\.com|mail\.com|proton\.me|protonmail\.com)$/.test(domainPart) || domainPart.endsWith('.ac.th') || domainPart.endsWith('.edu') || domainPart.endsWith('.go.th');
-
-  if (!isStandardProvider) {
+  // Strictly allow ONLY @acu.ac.th domain
+  if (domainPart !== 'acu.ac.th') {
     return {
       isValid: false,
-      errorMessage: `โดเมน "@${domainPart}" ไม่อยู่ในรายชื่อผู้ให้บริการที่รองรับ กรุณาใช้บัญชี @acu.ac.th, @gmail.com หรือบัญชีอีเมลมาตรฐานที่ถูกต้อง`,
+      errorMessage: `ระบบรองรับเฉพาะบัญชีอีเมลโรงเรียนโดเมน @acu.ac.th เท่านั้น (ไม่รองรับโดเมน "@${domainPart}")`,
     };
   }
 

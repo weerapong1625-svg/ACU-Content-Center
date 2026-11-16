@@ -19,6 +19,8 @@ import {
 } from './hooks/useInactivityTimeout';
 import { logUserLogin } from './services/auditService';
 import { getCachedUserProfile } from './services/userProfileService';
+import { signOut } from 'firebase/auth';
+import { auth } from './firebase';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -45,6 +47,12 @@ export default function App() {
   const [loggedInUser, setLoggedInUser] = useState<string | null>(() => {
     try {
       const email = localStorage.getItem('acu_current_user_email');
+      if (email && !email.toLowerCase().trim().endsWith('@acu.ac.th')) {
+        localStorage.removeItem('acu_current_user_email');
+        localStorage.removeItem('acu_user_role');
+        localStorage.removeItem(ACU_LAST_ACTIVE_KEY);
+        return null;
+      }
       const lastActive = localStorage.getItem(ACU_LAST_ACTIVE_KEY);
       if (email && lastActive) {
         const diff = Date.now() - parseInt(lastActive, 10);
@@ -95,6 +103,7 @@ export default function App() {
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
+    signOut(auth).catch(() => {});
     try {
       localStorage.removeItem('acu_current_user_email');
       localStorage.removeItem('acu_user_role');
@@ -109,15 +118,19 @@ export default function App() {
   }, []);
 
   const handleLoginSuccess = (email: string) => {
-    setLoggedInUser(email);
+    const norm = email.toLowerCase().trim();
+    if (!norm.endsWith('@acu.ac.th')) {
+      return;
+    }
+    setLoggedInUser(norm);
     setSessionTimedOut(false);
     try {
-      localStorage.setItem('acu_current_user_email', email);
+      localStorage.setItem('acu_current_user_email', norm);
       localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
     } catch {
       // ignore
     }
-    recordLoginVisit(email, 'Direct Login');
+    recordLoginVisit(norm, 'Google Account SSO');
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)
