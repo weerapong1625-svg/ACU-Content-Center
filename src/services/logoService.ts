@@ -1,5 +1,5 @@
-import { doc, getDoc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import { doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 
 export const SUPER_ADMIN_EMAIL = 'weerapong1625@acu.ac.th';
 export const DEFAULT_LOGO_IMAGE = '/acu_active_logo.png';
@@ -73,7 +73,12 @@ export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => 
         onUpdate(initial);
       },
       (error) => {
-        console.warn('Realtime logo subscription warning:', error);
+        if (isQuotaExceededError(error)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Daily read quota exceeded for logo subscription; using cached/default logo.');
+        } else {
+          console.warn('Realtime logo subscription warning:', error);
+        }
         onUpdate(getInitialLogoUrl());
       }
     );
@@ -82,6 +87,9 @@ export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => 
       unsubscribe();
     };
   } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
     console.warn('Could not initialize realtime logo listener:', err);
     onUpdate(getInitialLogoUrl());
     return () => {
@@ -128,7 +136,12 @@ export async function saveSchoolLogo(
     await setDoc(logoRef, payload, { merge: true });
     return { success: true, message: 'บันทึกโลโก้โรงเรียนเรียบร้อยแล้ว' };
   } catch (err: any) {
-    console.error('Failed to save school logo to Firestore:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      console.warn('[Firestore] Quota exceeded while saving school logo; preserved locally.');
+      return { success: true, message: 'บันทึกโลโก้โรงเรียนในเครื่องเรียบร้อยแล้ว (ฐานข้อมูลออนไลน์เกินโควตารายวัน)' };
+    }
+    console.warn('Failed to save school logo to Firestore:', err);
     return { success: false, message: err.message || 'เกิดข้อผิดพลาดในการบันทึกข้อมูลลงฐานข้อมูล' };
   }
 }
@@ -157,7 +170,11 @@ export async function resetSchoolLogo(
     await deleteDoc(logoRef);
     return { success: true, message: 'รีเซ็ตโลโก้กลับเป็นค่าเริ่มต้นทางการเรียบร้อยแล้ว' };
   } catch (err) {
-    console.error('Failed to delete school logo from Firestore:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, message: 'รีเซ็ตโลโก้ในเครื่องเรียบร้อยแล้ว' };
+    }
+    console.warn('Failed to delete school logo from Firestore:', err);
     return { success: false, message: 'เกิดข้อผิดพลาดในการรีเซ็ตโลโก้' };
   }
 }

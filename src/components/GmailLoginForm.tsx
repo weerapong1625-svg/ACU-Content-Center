@@ -1,14 +1,125 @@
-import React, { useState } from 'react';
-import { Mail, Lock, Eye, EyeOff, ArrowRight, CheckCircle2, AlertCircle, Sparkles, X, ShieldCheck, Fingerprint, Camera } from 'lucide-react';
+import React, { useState, useRef } from 'react';
+import {
+  Mail,
+  Lock,
+  Eye,
+  EyeOff,
+  ArrowRight,
+  CheckCircle2,
+  AlertCircle,
+  Sparkles,
+  X,
+  ShieldCheck,
+  UserPlus,
+  ExternalLink,
+  Trash2,
+  ArrowLeft,
+} from 'lucide-react';
 import { signInWithPopup } from 'firebase/auth';
-import { auth, googleAuthProvider } from '../firebase';
-import { getCachedUserProfile, setCachedUserProfile } from '../services/userProfileService';
+import { auth, createGoogleAuthProvider } from '../firebase';
+import {
+  fetchFullUserProfile,
+  getCachedUserProfile,
+  saveFullUserProfile,
+  setCachedUserProfile,
+} from '../services/userProfileService';
 import { validateRealGmailAccount } from '../utils/emailValidation';
 import { verifyEmailPassword } from '../services/authCredentialService';
 import { BiometricAuthModal } from './BiometricAuthModal';
 
 interface GmailLoginFormProps {
-  onLoginSuccess?: (email: string) => void;
+  onLoginSuccess?: (email: string, loginMethod?: string) => void;
+}
+
+interface SavedGoogleAccount {
+  email: string;
+  displayName?: string;
+  photoURL?: string;
+  lastUsedAt?: string;
+}
+
+const SAVED_GOOGLE_ACCOUNTS_KEY = 'acu_saved_google_accounts';
+const SUPER_ADMIN_EMAIL_LOWER = 'weerapong1625@acu.ac.th';
+
+function readSavedGoogleAccounts(): SavedGoogleAccount[] {
+  if (typeof window === 'undefined') return [];
+  const map = new Map<string, SavedGoogleAccount>();
+
+  try {
+    const raw = localStorage.getItem(SAVED_GOOGLE_ACCOUNTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          const norm = typeof item?.email === 'string' ? item.email.toLowerCase().trim() : '';
+          if (norm && norm !== SUPER_ADMIN_EMAIL_LOWER) {
+            const cached = getCachedUserProfile(norm);
+            map.set(norm, {
+              email: norm,
+              displayName: cached?.fullName || item.displayName || norm.split('@')[0],
+              photoURL: cached?.avatarUrl || item.photoURL || '',
+              lastUsedAt: item.lastUsedAt,
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore corrupted storage
+  }
+
+  try {
+    const remembered = (localStorage.getItem('acu_remembered_gmail') || '').toLowerCase().trim();
+    if (remembered && remembered !== SUPER_ADMIN_EMAIL_LOWER && !map.has(remembered)) {
+      const cached = getCachedUserProfile(remembered);
+      map.set(remembered, {
+        email: remembered,
+        displayName: cached?.fullName || remembered.split('@')[0],
+        photoURL: cached?.avatarUrl || '',
+      });
+    }
+  } catch {
+    // ignore
+  }
+
+  return Array.from(map.values());
+}
+
+function saveGoogleAccountToDevice(account: SavedGoogleAccount): void {
+  if (typeof window === 'undefined') return;
+  const norm = (account.email || '').toLowerCase().trim();
+  if (!norm || norm === SUPER_ADMIN_EMAIL_LOWER) return;
+
+  try {
+    const existing = readSavedGoogleAccounts().filter((a) => a.email !== norm);
+    const updated: SavedGoogleAccount[] = [
+      {
+        email: norm,
+        displayName: account.displayName || norm.split('@')[0],
+        photoURL: account.photoURL || '',
+        lastUsedAt: new Date().toISOString(),
+      },
+      ...existing,
+    ].slice(0, 8);
+    localStorage.setItem(SAVED_GOOGLE_ACCOUNTS_KEY, JSON.stringify(updated));
+  } catch {
+    // ignore
+  }
+}
+
+function removeGoogleAccountFromDevice(emailToRemove: string): SavedGoogleAccount[] {
+  const norm = emailToRemove.toLowerCase().trim();
+  const remaining = readSavedGoogleAccounts().filter((a) => a.email !== norm);
+  try {
+    localStorage.setItem(SAVED_GOOGLE_ACCOUNTS_KEY, JSON.stringify(remaining));
+    const remembered = (localStorage.getItem('acu_remembered_gmail') || '').toLowerCase().trim();
+    if (remembered === norm) {
+      localStorage.removeItem('acu_remembered_gmail');
+    }
+  } catch {
+    // ignore
+  }
+  return remaining;
 }
 
 export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }) => {
@@ -22,12 +133,18 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [isSuccess, setIsSuccess] = useState(false);
   const [activeUser, setActiveUser] = useState<string | null>(null);
 
+  const emailInputRef = useRef<HTMLInputElement>(null);
+  const googleEmailInputRef = useRef<HTMLInputElement>(null);
+
   // Biometric Verification Modal State (Face Scan / Fingerprint / Skip)
   const [isBiometricModalOpen, setIsBiometricModalOpen] = useState(false);
   const [pendingLoginData, setPendingLoginData] = useState<{ email: string; method: string } | null>(null);
 
-  // Google SSO Modal State (Forces fresh Gmail sign-in every time or uses remembered device user)
+  // Google Account Chooser & Add Account Modal State
   const [isGoogleModalOpen, setIsGoogleModalOpen] = useState(false);
+  const [savedGoogleAccounts, setSavedGoogleAccounts] = useState<SavedGoogleAccount[]>([]);
+  const [googleModalView, setGoogleModalView] = useState<'chooser' | 'add'>('chooser');
+  const [popupNotice, setPopupNotice] = useState<string | null>(null);
   const [googleEmail, setGoogleEmail] = useState('');
   const [googlePassword, setGooglePassword] = useState('');
   const [showGooglePassword, setShowGooglePassword] = useState(false);
@@ -36,15 +153,79 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [googleError, setGoogleError] = useState<string | null>(null);
   const [googleSuggestedFix, setGoogleSuggestedFix] = useState<string | null>(null);
 
-  // Finalizes login after biometric verification or skip
+  // Warm & preserve existing user profile without overwriting existing data
+  const preserveAndSyncUserProfile = async (
+    userEmail: string,
+    googleDisplayName?: string | null,
+    googlePhotoURL?: string | null
+  ) => {
+    const norm = userEmail.toLowerCase().trim();
+    try {
+      const existing = await fetchFullUserProfile(
+        norm,
+        googleDisplayName || undefined,
+        googlePhotoURL || undefined
+      );
+
+      if (existing) {
+        let needsSave = false;
+        const nextProfile = { ...existing };
+
+        // Preserve any custom uploaded avatar; only fill from Google if empty
+        if (googlePhotoURL && !nextProfile.avatarUrl) {
+          nextProfile.avatarUrl = googlePhotoURL;
+          needsSave = true;
+        }
+
+        // Preserve user's edited fullName; only fill from Google if still generic prefix
+        const emailPrefix = norm.split('@')[0];
+        if (
+          googleDisplayName &&
+          norm !== SUPER_ADMIN_EMAIL_LOWER &&
+          (!nextProfile.fullName || nextProfile.fullName === emailPrefix || nextProfile.fullName === 'คุณครูอัสสัมชัญ')
+        ) {
+          nextProfile.fullName = googleDisplayName;
+          nextProfile.displayName = googleDisplayName;
+          needsSave = true;
+        }
+
+        setCachedUserProfile(nextProfile);
+        if (nextProfile.avatarUrl) {
+          try {
+            localStorage.setItem(`acu_user_avatar_${norm}`, nextProfile.avatarUrl);
+          } catch {
+            // ignore
+          }
+        }
+
+        if (needsSave) {
+          await saveFullUserProfile(nextProfile);
+        }
+
+        return nextProfile;
+      }
+    } catch {
+      // Never block login if offline or Firestore quota reached
+    }
+    return getCachedUserProfile(norm);
+  };
+
+  // Finalizes login and passes accurate login method
   const finalizeLogin = async (verifiedEmail: string, method: string) => {
+    const norm = verifiedEmail.toLowerCase().trim();
     setIsLoading(true);
     setIsBiometricModalOpen(false);
+    setPendingLoginData(null);
 
     try {
-      localStorage.setItem('acu_current_user_email', verifiedEmail);
-      if (rememberMe && verifiedEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
-        localStorage.setItem('acu_remembered_gmail', verifiedEmail);
+      localStorage.setItem('acu_current_user_email', norm);
+      if (rememberMe && norm !== SUPER_ADMIN_EMAIL_LOWER) {
+        localStorage.setItem('acu_remembered_gmail', norm);
+      } else if (!rememberMe) {
+        const currentRem = (localStorage.getItem('acu_remembered_gmail') || '').toLowerCase().trim();
+        if (currentRem === norm) {
+          localStorage.removeItem('acu_remembered_gmail');
+        }
       }
     } catch {
       // ignore
@@ -52,10 +233,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
     setIsLoading(false);
     setIsSuccess(true);
-    setActiveUser(verifiedEmail);
-    onLoginSuccess?.(verifiedEmail);
+    setActiveUser(norm);
+    onLoginSuccess?.(norm, method);
   };
 
+  // Direct Email & Password login handler (preserved fully)
   const handleEmailLogin = (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
@@ -67,7 +249,6 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    // Strict validation against real Gmail & ACU account standards
     const validation = validateRealGmailAccount(trimmed);
     if (!validation.isValid) {
       setError(validation.errorMessage);
@@ -80,10 +261,8 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    const validEmail = validation.normalizedEmail || trimmed;
+    const validEmail = (validation.normalizedEmail || trimmed).toLowerCase().trim();
 
-    // Strict password verification:
-    // If the password is wrong, reject and require user to re-enter
     const passCheck = verifyEmailPassword(validEmail, password);
     if (!passCheck.isValid) {
       setError(passCheck.errorMessage);
@@ -99,84 +278,26 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setIsBiometricModalOpen(true);
   };
 
-  // Launch native Google Account Chooser popup ("เด้งไปยังบัญชี Google ที่ผู้ใช้งานแต่ละคนใช้")
-  const handleGoogleSignInDirect = async () => {
-    setError(null);
-    setGoogleError(null);
-    setIsLoading(true);
-
-    try {
-      const result = await signInWithPopup(auth, googleAuthProvider);
-      const googleUser = result.user;
-      const userEmail = googleUser.email?.toLowerCase().trim();
-
-      if (!userEmail) {
-        setError('ไม่พบอีเมลจากบัญชี Google กรุณาลองใหม่อีกครั้ง');
-        setIsLoading(false);
-        return;
-      }
-
-      // Sync name & photo from Google profile into user profile cache
-      if (googleUser.displayName || googleUser.photoURL) {
-        try {
-          const cached = getCachedUserProfile(userEmail);
-          if (cached) {
-            if (googleUser.photoURL && !cached.avatarUrl) {
-              cached.avatarUrl = googleUser.photoURL;
-            }
-            if (googleUser.displayName && (!cached.fullName || cached.fullName === userEmail.split('@')[0])) {
-              cached.fullName = googleUser.displayName;
-              cached.displayName = googleUser.displayName;
-            }
-            setCachedUserProfile(cached);
-          }
-        } catch {
-          // ignore
-        }
-      }
-
-      await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
-    } catch (err: any) {
-      console.warn('Google Sign-In notice:', err);
-      setIsLoading(false);
-
-      if (err?.code === 'auth/popup-closed-by-user' || err?.code === 'auth/cancelled-popup-request') {
-        // User voluntarily closed the Google popup window
-        return;
-      }
-
-      // If popup was blocked by browser or iframe constraints, open fallback modal
-      if (
-        err?.code === 'auth/popup-blocked' ||
-        err?.code === 'auth/unauthorized-domain' ||
-        err?.code === 'auth/operation-not-allowed'
-      ) {
-        setError('หน้าต่างเลือกบัญชี Google ถูกบล็อกโดยเบราว์เซอร์ กำลังเปิดหน้าต่างเข้าสู่ระบบ...');
-        handleOpenGoogleSso();
-        return;
-      }
-
-      setError(err?.message || 'ไม่สามารถเชื่อมต่อบัญชี Google ได้ กรุณาลองใหม่อีกครั้ง');
-    }
-  };
-
-  // Open Google SSO Modal - Guaranteed fresh state every time, or loads remembered Gmail (NEVER Admin's)
-  const handleOpenGoogleSso = () => {
+  // Open Google Account Chooser / Add Account fallback dialog
+  const handleOpenGoogleChooser = (notice?: string | null, forceAddView?: boolean) => {
     setError(null);
     setSuggestedFix(null);
-    let remembered = '';
+    const accounts = readSavedGoogleAccounts();
+    setSavedGoogleAccounts(accounts);
+
+    // Ensure Admin email is never remembered in local chooser
     try {
-      remembered = localStorage.getItem('acu_remembered_gmail') || '';
-      // Under NO circumstances allow Admin's email to be auto-filled or remembered
-      if (remembered.trim().toLowerCase() === 'weerapong1625@acu.ac.th') {
+      const remembered = (localStorage.getItem('acu_remembered_gmail') || '').toLowerCase().trim();
+      if (remembered === SUPER_ADMIN_EMAIL_LOWER) {
         localStorage.removeItem('acu_remembered_gmail');
-        remembered = '';
       }
     } catch {
       // ignore
     }
 
-    setGoogleEmail(remembered);
+    setPopupNotice(notice || null);
+    setGoogleModalView(forceAddView || accounts.length === 0 ? 'add' : 'chooser');
+    setGoogleEmail('');
     setGooglePassword('');
     setGoogleError(null);
     setGoogleSuggestedFix(null);
@@ -184,8 +305,97 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setIsGoogleModalOpen(true);
   };
 
-  // Submit Google SSO - Validates against real Gmail accounts and prompts biometric verification
-  const handleGoogleSsoSubmit = (e: React.FormEvent) => {
+  // Launch native Google Account Chooser popup (with optional login_hint)
+  const attemptNativeGooglePopup = async (loginHint?: string): Promise<'success' | 'cancelled' | 'fallback' | 'error'> => {
+    try {
+      const provider = createGoogleAuthProvider(loginHint);
+      const result = await signInWithPopup(auth, provider);
+      const googleUser = result.user;
+      const userEmail = googleUser.email?.toLowerCase().trim();
+
+      if (!userEmail) {
+        setError('ไม่พบอีเมลจากบัญชี Google กรุณาลองใหม่อีกครั้ง');
+        return 'error';
+      }
+
+      const syncedProfile = await preserveAndSyncUserProfile(
+        userEmail,
+        googleUser.displayName,
+        googleUser.photoURL
+      );
+
+      saveGoogleAccountToDevice({
+        email: userEmail,
+        displayName: syncedProfile?.fullName || googleUser.displayName || userEmail.split('@')[0],
+        photoURL: syncedProfile?.avatarUrl || googleUser.photoURL || '',
+      });
+
+      setIsGoogleModalOpen(false);
+      await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
+      return 'success';
+    } catch (err: any) {
+      const code = err?.code || '';
+      console.warn('Google Sign-In notice:', code || err);
+
+      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+        return 'cancelled';
+      }
+
+      if (
+        code === 'auth/popup-blocked' ||
+        code === 'auth/unauthorized-domain' ||
+        code === 'auth/operation-not-allowed' ||
+        code === 'auth/operation-not-supported-in-this-environment' ||
+        code === 'auth/internal-error' ||
+        code === 'auth/network-request-failed'
+      ) {
+        return 'fallback';
+      }
+
+      setError(err?.message || 'ไม่สามารถเชื่อมต่อบัญชี Google ได้ กรุณาลองใหม่อีกครั้ง');
+      return 'error';
+    }
+  };
+
+  // Main Google button click handler
+  const handleGoogleSignInDirect = async () => {
+    setError(null);
+    setSuggestedFix(null);
+    setGoogleError(null);
+    setIsLoading(true);
+
+    const status = await attemptNativeGooglePopup();
+    setIsLoading(false);
+
+    if (status === 'fallback') {
+      handleOpenGoogleChooser(
+        'เบราว์เซอร์หรือหน้าต่างพรีวิวยังไม่สามารถเปิดป๊อปอัป Google อัตโนมัติได้ คุณสามารถเลือกบัญชีหรือเพิ่มบัญชี Google เพื่อเข้าสู่ระบบได้ทันที'
+      );
+    }
+  };
+
+  // Click a saved Google account from the Account Chooser
+  const handleSelectSavedGoogleAccount = async (account: SavedGoogleAccount) => {
+    setGoogleError(null);
+    setIsGoogleSubmitting(true);
+    try {
+      const synced = await preserveAndSyncUserProfile(account.email, account.displayName, account.photoURL);
+      saveGoogleAccountToDevice({
+        email: account.email,
+        displayName: synced?.fullName || account.displayName,
+        photoURL: synced?.avatarUrl || account.photoURL,
+      });
+      setIsGoogleModalOpen(false);
+      await finalizeLogin(account.email, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
+    } catch (err: any) {
+      setGoogleError(err?.message || 'ไม่สามารถเข้าสู่ระบบด้วยบัญชีนี้ได้ กรุณาลองใหม่');
+    } finally {
+      setIsGoogleSubmitting(false);
+    }
+  };
+
+  // Add / Sign-In with a Google account inside the chooser modal
+  const handleGoogleSsoSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setGoogleError(null);
     setGoogleSuggestedFix(null);
@@ -196,7 +406,6 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    // Strict validation against real Gmail & ACU account standards
     const validation = validateRealGmailAccount(trimmedEmail);
     if (!validation.isValid) {
       setGoogleError(validation.errorMessage);
@@ -209,9 +418,8 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    const validEmail = validation.normalizedEmail || trimmedEmail;
+    const validEmail = (validation.normalizedEmail || trimmedEmail).toLowerCase().trim();
 
-    // Strict password verification for Google SSO
     const passCheck = verifyEmailPassword(validEmail, googlePassword);
     if (!passCheck.isValid) {
       setGoogleError(passCheck.errorMessage);
@@ -219,29 +427,56 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       return;
     }
 
-    // Never save Admin email to remembered list
-    if (rememberGoogleEmail && validEmail.toLowerCase() !== 'weerapong1625@acu.ac.th') {
-      try {
-        localStorage.setItem('acu_remembered_gmail', validEmail);
-      } catch {
-        // ignore
+    setIsGoogleSubmitting(true);
+    try {
+      const synced = await preserveAndSyncUserProfile(validEmail);
+
+      if (rememberGoogleEmail && validEmail !== SUPER_ADMIN_EMAIL_LOWER) {
+        try {
+          localStorage.setItem('acu_remembered_gmail', validEmail);
+        } catch {
+          // ignore
+        }
+        saveGoogleAccountToDevice({
+          email: validEmail,
+          displayName: synced?.fullName || validEmail.split('@')[0],
+          photoURL: synced?.avatarUrl || '',
+        });
+      } else if (!rememberGoogleEmail) {
+        try {
+          const currentRem = (localStorage.getItem('acu_remembered_gmail') || '').toLowerCase().trim();
+          if (currentRem === validEmail) {
+            localStorage.removeItem('acu_remembered_gmail');
+          }
+        } catch {
+          // ignore
+        }
       }
-    } else if (!rememberGoogleEmail) {
-      try {
-        localStorage.removeItem('acu_remembered_gmail');
-      } catch {
-        // ignore
-      }
+
+      setIsGoogleModalOpen(false);
+      await finalizeLogin(validEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
+    } catch (err: any) {
+      setGoogleError(err?.message || 'เกิดข้อผิดพลาดในการเข้าสู่ระบบ กรุณาลองใหม่');
+    } finally {
+      setIsGoogleSubmitting(false);
     }
+  };
 
-    setIsGoogleModalOpen(false);
+  // Try native Google Popup specifically for the typed email (login_hint)
+  const handleTryGooglePopupWithHint = async () => {
+    setGoogleError(null);
+    setGoogleSuggestedFix(null);
+    setIsGoogleSubmitting(true);
 
-    // Proceed to Biometric Verification (Face Scan / Fingerprint or Skip)
-    setPendingLoginData({
-      email: validEmail,
-      method: 'Google Account SSO (เข้าสู่ระบบ Gmail)',
-    });
-    setIsBiometricModalOpen(true);
+    const hintEmail = googleEmail.trim().toLowerCase();
+    const status = await attemptNativeGooglePopup(hintEmail.includes('@') ? hintEmail : undefined);
+    setIsGoogleSubmitting(false);
+
+    if (status === 'fallback') {
+      setPopupNotice(
+        'หน้าต่างป๊อปอัป Google ถูกบล็อกในสภาพแวดล้อมนี้ กรุณาเลือกบัญชีด้านล่าง หรือกรอกอีเมลและรหัสผ่านเพื่อเพิ่มบัญชีและใช้งานได้ทันที'
+      );
+    }
   };
 
   const handleAppendDomain = (suffix: string) => {
@@ -255,16 +490,21 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     }
     setError(null);
     setSuggestedFix(null);
+    emailInputRef.current?.focus();
   };
 
   const handleQuickFillGoogle = (suffix: string) => {
     if (googleEmail.includes('@')) {
       const prefix = googleEmail.split('@')[0];
       setGoogleEmail(`${prefix}${suffix}`);
+    } else if (googleEmail.trim()) {
+      setGoogleEmail(`${googleEmail.trim()}${suffix}`);
     } else {
-      setGoogleEmail(`${googleEmail}${suffix}`);
+      setGoogleEmail(suffix);
     }
     setGoogleError(null);
+    setGoogleSuggestedFix(null);
+    googleEmailInputRef.current?.focus();
   };
 
   const handleReset = () => {
@@ -382,7 +622,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         onClick={handleGoogleSignInDirect}
         disabled={isLoading}
         className="w-full flex items-center justify-center gap-3 py-3 px-4 rounded-xl bg-white border border-slate-300 hover:border-slate-400 text-slate-700 font-medium shadow-sm hover:shadow-md transition-all duration-200 active:scale-[0.99] disabled:opacity-60 mb-5 group cursor-pointer"
-        title="เข้าสู่ระบบด้วยบัญชี Google ที่คุณใช้งาน (เลือกบัญชี Google บนอุปกรณ์ของคุณ)"
+        title="เข้าสู่ระบบด้วยบัญชี Google ที่คุณใช้งาน (เลือกบัญชี Google หรือเพิ่มบัญชีใหม่)"
       >
         {isLoading ? (
           <div className="w-5 h-5 border-2 border-slate-300 border-t-blue-600 rounded-full animate-spin flex-shrink-0" />
@@ -408,7 +648,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
           </svg>
         )}
         <span className="text-sm font-semibold group-hover:text-slate-900 transition-colors">
-          {isLoading ? 'กำลังเปิดหน้าต่างเลือกบัญชี Google...' : 'ลงชื่อเข้าใช้ด้วยบัญชี Google'}
+          {isLoading ? 'กำลังเชื่อมต่อไปยังบัญชี Google...' : 'ลงชื่อเข้าใช้ด้วยบัญชี Google'}
         </span>
       </button>
 
@@ -422,7 +662,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
       </div>
 
       {/* Form Fields */}
-      <form onSubmit={handleEmailLogin} className="space-y-4">
+      <form onSubmit={handleEmailLogin} noValidate className="space-y-4">
         {/* Email Field */}
         <div>
           <label htmlFor="input-email" className="block text-xs font-semibold text-slate-700 mb-1.5">
@@ -433,10 +673,15 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               <Mail className="h-4 w-4" />
             </div>
             <input
+              ref={emailInputRef}
               id="input-email"
               type="email"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                if (error) setError(null);
+                if (suggestedFix) setSuggestedFix(null);
+              }}
               placeholder="example@gmail.com"
               className="block w-full pl-10 pr-3 py-2.5 sm:py-3 bg-slate-50/70 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/40 focus:border-blue-600 focus:bg-white transition-all"
               required
@@ -449,14 +694,14 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
             <button
               type="button"
               onClick={() => handleAppendDomain('@acu.ac.th')}
-              className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors"
+              className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors cursor-pointer"
             >
               @acu.ac.th
             </button>
             <button
               type="button"
               onClick={() => handleAppendDomain('@gmail.com')}
-              className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors"
+              className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-100 text-blue-700 border border-slate-200/70 font-mono transition-colors cursor-pointer"
             >
               @gmail.com
             </button>
@@ -488,7 +733,10 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               id="input-password"
               type={showPassword ? 'text' : 'password'}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                if (error) setError(null);
+              }}
               placeholder="กรอกรหัสผ่านอีเมลตนเอง..."
               className="block w-full pl-10 pr-10 py-2.5 sm:py-3 bg-slate-50/70 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-600/40 focus:border-blue-600 focus:bg-white transition-all"
             />
@@ -496,7 +744,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               type="button"
               id="btn-toggle-password"
               onClick={() => setShowPassword(!showPassword)}
-              className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600"
+              className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
             >
               {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
             </button>
@@ -527,7 +775,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
           type="submit"
           id="btn-submit-login"
           disabled={isLoading}
-          className="w-full py-3 sm:py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-700 via-indigo-700 to-red-600 hover:from-blue-800 hover:via-indigo-800 hover:to-red-700 text-white font-semibold text-sm shadow-[0_4px_14px_rgba(29,78,216,0.35)] hover:shadow-[0_6px_20px_rgba(29,78,216,0.45)] transition-all duration-200 active:scale-[0.99] disabled:opacity-70 flex items-center justify-center gap-2 mt-2"
+          className="w-full py-3 sm:py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-700 via-indigo-700 to-red-600 hover:from-blue-800 hover:via-indigo-800 hover:to-red-700 text-white font-semibold text-sm shadow-[0_4px_14px_rgba(29,78,216,0.35)] hover:shadow-[0_6px_20px_rgba(29,78,216,0.45)] transition-all duration-200 active:scale-[0.99] disabled:opacity-70 flex items-center justify-center gap-2 mt-2 cursor-pointer"
         >
           {isLoading ? (
             <>
@@ -549,7 +797,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         <span>ระบบความปลอดภัยมาตรฐาน Google Cloud & SSL 256-bit</span>
       </div>
 
-      {/* Authentic Google Account Sign-In Dialog (Forces fresh Gmail sign-in every time or uses remembered non-admin device user) */}
+      {/* Google Account Chooser & Add Account Dialog (Fallback / Quick Account Switcher) */}
       {isGoogleModalOpen && (
         <div
           id="google-sso-modal-backdrop"
@@ -560,20 +808,20 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         >
           <div
             id="google-sso-modal-card"
-            className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-8 shadow-2xl border border-slate-200 animate-in zoom-in-95 duration-200 relative text-left"
+            className="bg-white rounded-3xl max-w-md w-full p-6 sm:p-7 shadow-2xl border border-slate-200 animate-in zoom-in-95 duration-200 relative text-left max-h-[92vh] overflow-y-auto"
           >
             {/* Close Button */}
             <button
               type="button"
               id="btn-close-google-sso"
               onClick={() => setIsGoogleModalOpen(false)}
-              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition-colors"
+              className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 rounded-full hover:bg-slate-100 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
 
             {/* Google G Logo & Title */}
-            <div className="text-center mb-6">
+            <div className="text-center mb-5">
               <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-slate-50 border border-slate-200 mb-3 shadow-xs">
                 <svg className="w-6 h-6" viewBox="0 0 24 24">
                   <path
@@ -594,11 +842,29 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
                   />
                 </svg>
               </div>
-              <h3 className="text-xl font-bold text-slate-800 tracking-tight">ลงชื่อเข้าใช้ด้วย Google</h3>
+              <h3 className="text-xl font-bold text-slate-800 tracking-tight">
+                {googleModalView === 'chooser' ? 'เลือกบัญชี Google เพื่อเข้าสู่ระบบ' : 'เพิ่มบัญชี Google E-mail'}
+              </h3>
               <p className="text-xs text-slate-500 mt-1">
                 เพื่อเข้าสู่ระบบคลังสื่อนวัตกรรมการศึกษา โรงเรียนอัสสัมชัญอุบลราชธานี
               </p>
             </div>
+
+            {/* Info notice when browser/iframe blocked automatic popup */}
+            {popupNotice && (
+              <div className="mb-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-xs leading-relaxed flex flex-col gap-2">
+                <span>{popupNotice}</span>
+                <button
+                  type="button"
+                  onClick={handleTryGooglePopupWithHint}
+                  disabled={isGoogleSubmitting}
+                  className="inline-flex items-center justify-center gap-1.5 self-start px-3 py-1.5 rounded-lg bg-white hover:bg-blue-100/70 border border-blue-300 text-blue-700 font-semibold text-[11px] transition-colors cursor-pointer"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" />
+                  <span>ลองเปิดหน้าต่าง Google อีกครั้ง</span>
+                </button>
+              </div>
+            )}
 
             {/* Error banner */}
             {googleError && (
@@ -626,117 +892,205 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               </div>
             )}
 
-            {/* Google Sign In Form */}
-            <form onSubmit={handleGoogleSsoSubmit} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  อีเมล Gmail / บัญชี Google
-                </label>
-                <div className="relative rounded-xl shadow-xs">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <Mail className="h-4 w-4" />
-                  </div>
-                  <input
-                    type="email"
-                    id="input-google-email"
-                    value={googleEmail}
-                    onChange={(e) => setGoogleEmail(e.target.value)}
-                    placeholder="name@gmail.com หรือ user@acu.ac.th"
-                    autoFocus
-                    required
-                    className="block w-full pl-10 pr-3 py-2.5 bg-slate-50/70 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-all"
-                  />
+            {/* Account Chooser List View */}
+            {googleModalView === 'chooser' && savedGoogleAccounts.length > 0 && (
+              <div className="space-y-2.5">
+                <div className="divide-y divide-slate-100 border border-slate-200 rounded-2xl overflow-hidden bg-slate-50/40">
+                  {savedGoogleAccounts.map((acc) => {
+                    const fallbackAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(
+                      acc.displayName || acc.email
+                    )}&background=2563eb&color=ffffff&size=96&bold=true`;
+                    return (
+                      <div
+                        key={acc.email}
+                        className="flex items-center justify-between gap-2 px-3.5 py-3 hover:bg-blue-50/70 transition-colors"
+                      >
+                        <button
+                          type="button"
+                          disabled={isGoogleSubmitting}
+                          onClick={() => handleSelectSavedGoogleAccount(acc)}
+                          className="flex items-center gap-3 flex-1 min-w-0 text-left cursor-pointer disabled:opacity-60"
+                        >
+                          <img
+                            src={acc.photoURL || fallbackAvatar}
+                            alt={acc.displayName || acc.email}
+                            className="w-10 h-10 rounded-full object-cover border border-slate-200 flex-shrink-0 bg-slate-100"
+                            onError={(e) => {
+                              (e.target as HTMLImageElement).src = fallbackAvatar;
+                            }}
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-slate-800 truncate">
+                              {acc.displayName || acc.email.split('@')[0]}
+                            </p>
+                            <p className="text-xs text-slate-500 font-mono truncate">{acc.email}</p>
+                          </div>
+                          <ArrowRight className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const updated = removeGoogleAccountFromDevice(acc.email);
+                            setSavedGoogleAccounts(updated);
+                            if (updated.length === 0) {
+                              setGoogleModalView('add');
+                            }
+                          }}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer"
+                          title="นำบัญชีนี้ออกจากรายการอุปกรณ์"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-                {/* Suffix helpers */}
-                <div className="flex items-center gap-1.5 mt-2">
-                  <span className="text-[11px] text-slate-400">เติมด่วน:</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const prefix = googleEmail.split('@')[0] || 'teacher';
-                      setGoogleEmail(`${prefix}@gmail.com`);
-                    }}
-                    className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-50 text-blue-600 border border-slate-200 transition-colors"
-                  >
-                    @gmail.com
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const prefix = googleEmail.split('@')[0] || 'teacher';
-                      setGoogleEmail(`${prefix}@acu.ac.th`);
-                    }}
-                    className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-50 text-blue-600 border border-slate-200 transition-colors"
-                  >
-                    @acu.ac.th
-                  </button>
-                </div>
-              </div>
 
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  รหัสผ่านบัญชี Google
-                </label>
-                <div className="relative rounded-xl shadow-xs">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
-                    <Lock className="h-4 w-4" />
-                  </div>
-                  <input
-                    type={showGooglePassword ? 'text' : 'password'}
-                    id="input-google-password"
-                    value={googlePassword}
-                    onChange={(e) => setGooglePassword(e.target.value)}
-                    placeholder="ป้อนรหัสผ่าน Google ของคุณ"
-                    className="block w-full pl-10 pr-10 py-2.5 bg-slate-50/70 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-all"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowGooglePassword(!showGooglePassword)}
-                    className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600"
-                  >
-                    {showGooglePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 pt-1">
-                <input
-                  type="checkbox"
-                  id="checkbox-remember-google"
-                  checked={rememberGoogleEmail}
-                  onChange={(e) => setRememberGoogleEmail(e.target.checked)}
-                  className="w-4 h-4 rounded text-blue-600 border-slate-300 focus:ring-blue-500"
-                />
-                <label htmlFor="checkbox-remember-google" className="text-xs text-slate-600 cursor-pointer select-none">
-                  จดจำบัญชี Gmail บนอุปกรณ์นี้ (เข้าสู่ระบบได้ทันทีในครั้งถัดไป)
-                </label>
-              </div>
-
-              <div className="flex items-center justify-end gap-2.5 pt-3">
                 <button
                   type="button"
-                  onClick={() => setIsGoogleModalOpen(false)}
-                  className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition-colors"
+                  id="btn-google-add-another-account"
+                  onClick={() => {
+                    setGoogleError(null);
+                    setGoogleSuggestedFix(null);
+                    setGoogleModalView('add');
+                  }}
+                  className="w-full py-3 px-4 rounded-xl border border-slate-300 hover:border-blue-400 bg-white hover:bg-blue-50/40 text-slate-700 hover:text-blue-700 text-xs font-semibold flex items-center justify-center gap-2 transition-all cursor-pointer"
                 >
-                  ยกเลิก
-                </button>
-                <button
-                  type="submit"
-                  id="btn-google-sso-submit"
-                  disabled={isGoogleSubmitting}
-                  className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-70"
-                >
-                  {isGoogleSubmitting ? (
-                    <>
-                      <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                      <span>กำลังเข้าสู่ระบบ...</span>
-                    </>
-                  ) : (
-                    <span>ถัดไป / เข้าสู่ระบบ</span>
-                  )}
+                  <UserPlus className="w-4 h-4" />
+                  <span>ใช้บัญชีอื่น / เพิ่มบัญชี Google E-mail</span>
                 </button>
               </div>
-            </form>
+            )}
+
+            {/* Add Another Google Account Form */}
+            {googleModalView === 'add' && (
+              <form onSubmit={handleGoogleSsoSubmit} noValidate className="space-y-4">
+                {savedGoogleAccounts.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGoogleError(null);
+                      setGoogleModalView('chooser');
+                    }}
+                    className="inline-flex items-center gap-1.5 text-xs font-medium text-blue-600 hover:text-blue-800 cursor-pointer"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5" />
+                    <span>กลับไปเลือกบัญชี Google ที่บันทึกไว้ ({savedGoogleAccounts.length})</span>
+                  </button>
+                )}
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    อีเมล Gmail / บัญชี Google
+                  </label>
+                  <div className="relative rounded-xl shadow-xs">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Mail className="h-4 w-4" />
+                    </div>
+                    <input
+                      ref={googleEmailInputRef}
+                      type="email"
+                      id="input-google-email"
+                      value={googleEmail}
+                      onChange={(e) => {
+                        setGoogleEmail(e.target.value);
+                        if (googleError) setGoogleError(null);
+                        if (googleSuggestedFix) setGoogleSuggestedFix(null);
+                      }}
+                      placeholder="name@gmail.com หรือ user@acu.ac.th"
+                      autoFocus
+                      required
+                      className="block w-full pl-10 pr-3 py-2.5 bg-slate-50/70 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-all"
+                    />
+                  </div>
+                  {/* Suffix helpers */}
+                  <div className="flex items-center gap-1.5 mt-2">
+                    <span className="text-[11px] text-slate-400">เติมด่วน:</span>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickFillGoogle('@gmail.com')}
+                      className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-50 text-blue-600 border border-slate-200 transition-colors cursor-pointer"
+                    >
+                      @gmail.com
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleQuickFillGoogle('@acu.ac.th')}
+                      className="text-[11px] px-2 py-0.5 rounded-md bg-slate-100 hover:bg-blue-50 text-blue-600 border border-slate-200 transition-colors cursor-pointer"
+                    >
+                      @acu.ac.th
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    รหัสผ่านบัญชี Google
+                  </label>
+                  <div className="relative rounded-xl shadow-xs">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
+                      <Lock className="h-4 w-4" />
+                    </div>
+                    <input
+                      type={showGooglePassword ? 'text' : 'password'}
+                      id="input-google-password"
+                      value={googlePassword}
+                      onChange={(e) => {
+                        setGooglePassword(e.target.value);
+                        if (googleError) setGoogleError(null);
+                      }}
+                      placeholder="ป้อนรหัสผ่าน Google ของคุณ"
+                      className="block w-full pl-10 pr-10 py-2.5 bg-slate-50/70 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 focus:bg-white transition-all"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGooglePassword(!showGooglePassword)}
+                      className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-400 hover:text-slate-600 cursor-pointer"
+                    >
+                      {showGooglePassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                    </button>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="checkbox"
+                    id="checkbox-remember-google"
+                    checked={rememberGoogleEmail}
+                    onChange={(e) => setRememberGoogleEmail(e.target.checked)}
+                    className="w-4 h-4 rounded text-blue-600 border-slate-300 focus:ring-blue-500"
+                  />
+                  <label htmlFor="checkbox-remember-google" className="text-xs text-slate-600 cursor-pointer select-none">
+                    จดจำบัญชี Google นี้ในอุปกรณ์ (คลิกเลือกเข้าใช้งานได้ทันทีในครั้งถัดไป)
+                  </label>
+                </div>
+
+                <div className="flex items-center justify-end gap-2.5 pt-3">
+                  <button
+                    type="button"
+                    onClick={() => setIsGoogleModalOpen(false)}
+                    className="px-4 py-2.5 rounded-xl border border-slate-300 text-slate-600 text-xs font-semibold hover:bg-slate-50 transition-colors cursor-pointer"
+                  >
+                    ยกเลิก
+                  </button>
+                  <button
+                    type="submit"
+                    id="btn-google-sso-submit"
+                    disabled={isGoogleSubmitting}
+                    className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold shadow-md shadow-blue-500/20 transition-all flex items-center gap-2 disabled:opacity-70 cursor-pointer"
+                  >
+                    {isGoogleSubmitting ? (
+                      <>
+                        <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        <span>กำลังเข้าสู่ระบบ...</span>
+                      </>
+                    ) : (
+                      <span>เพิ่มบัญชีและเข้าสู่ระบบ</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}
@@ -757,6 +1111,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         }}
         onClose={() => {
           setIsBiometricModalOpen(false);
+          setPendingLoginData(null);
           setIsLoading(false);
         }}
       />

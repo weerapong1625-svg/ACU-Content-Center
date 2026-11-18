@@ -17,6 +17,8 @@ import {
   WARNING_BEFORE_TIMEOUT_MS,
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
+import { signOut } from 'firebase/auth';
+import { auth } from './firebase';
 import { logUserLogin } from './services/auditService';
 import { getCachedUserProfile } from './services/userProfileService';
 
@@ -95,6 +97,9 @@ export default function App() {
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
+    signOut(auth).catch(() => {
+      // ignore signOut errors
+    });
     try {
       localStorage.removeItem('acu_current_user_email');
       localStorage.removeItem('acu_user_role');
@@ -108,16 +113,17 @@ export default function App() {
     }
   }, []);
 
-  const handleLoginSuccess = (email: string) => {
-    setLoggedInUser(email);
+  const handleLoginSuccess = (email: string, loginMethod?: string) => {
+    const normalized = email.toLowerCase().trim();
+    setLoggedInUser(normalized);
     setSessionTimedOut(false);
     try {
-      localStorage.setItem('acu_current_user_email', email);
+      localStorage.setItem('acu_current_user_email', normalized);
       localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
     } catch {
       // ignore
     }
-    recordLoginVisit(email, 'Direct Login');
+    recordLoginVisit(normalized, loginMethod || 'Direct Login');
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)

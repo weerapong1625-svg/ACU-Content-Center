@@ -1,5 +1,5 @@
-import { doc, getDoc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
-import { db } from '../firebase';
+import { doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { SUPER_ADMIN_EMAIL, getInitialLogoUrl } from './logoService';
 import { ADMIN_TARGET_EMAIL } from './submissionService';
 
@@ -77,7 +77,12 @@ export function subscribeCertificateLogo(onUpdate: (url: string) => void): () =>
         onUpdate(getInitialCertificateLogoUrl());
       },
       (error) => {
-        console.warn('Realtime certificate logo subscription error:', error);
+        if (isQuotaExceededError(error)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Daily read quota exceeded for certificate logo subscription; using cached/default logo.');
+        } else {
+          console.warn('Realtime certificate logo subscription error:', error);
+        }
         onUpdate(getInitialCertificateLogoUrl());
       }
     );
@@ -87,6 +92,9 @@ export function subscribeCertificateLogo(onUpdate: (url: string) => void): () =>
       unsubscribe();
     };
   } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
     console.warn('Failed to initialize certificate logo listener:', err);
     onUpdate(getInitialCertificateLogoUrl());
     return () => {
@@ -132,7 +140,11 @@ export async function saveCertificateLogo(
     await setDoc(docRef, payload, { merge: true });
     return { success: true, message: 'บันทึกภาพโลโก้บนเกียรติบัตรเรียบร้อยแล้ว' };
   } catch (err: any) {
-    console.error('Failed to save certificate logo to Firestore:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, message: 'บันทึกภาพโลโก้ในเครื่องเรียบร้อยแล้ว (ฐานข้อมูลออนไลน์เกินโควตารายวัน)' };
+    }
+    console.warn('Failed to save certificate logo to Firestore:', err);
     return {
       success: false,
       message: err.message || 'เกิดข้อผิดพลาดในการบันทึกภาพโลโก้เกียรติบัตรลงฐานข้อมูล',
@@ -174,7 +186,11 @@ export async function resetCertificateLogo(
       message: 'รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพโลโก้ทางการของโรงเรียนเรียบร้อยแล้ว',
     };
   } catch (err) {
-    console.error('Failed to reset certificate logo:', err);
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, message: 'รีเซ็ตโลโก้ในเครื่องเรียบร้อยแล้ว' };
+    }
+    console.warn('Failed to reset certificate logo:', err);
     return {
       success: false,
       message: 'เกิดข้อผิดพลาดในการรีเซ็ตโลโก้เกียรติบัตร',

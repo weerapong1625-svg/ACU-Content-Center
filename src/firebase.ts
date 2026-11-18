@@ -27,9 +27,23 @@ export const db = firestoreInstance;
 export const auth = getAuth(app);
 
 export const googleAuthProvider = new GoogleAuthProvider();
+googleAuthProvider.addScope('email');
+googleAuthProvider.addScope('profile');
 googleAuthProvider.setCustomParameters({
   prompt: 'select_account',
 });
+
+export function createGoogleAuthProvider(loginHint?: string): GoogleAuthProvider {
+  const provider = new GoogleAuthProvider();
+  provider.addScope('email');
+  provider.addScope('profile');
+  const params: Record<string, string> = { prompt: 'select_account' };
+  if (loginHint && loginHint.trim()) {
+    params.login_hint = loginHint.trim().toLowerCase();
+  }
+  provider.setCustomParameters(params);
+  return provider;
+}
 
 export default app;
 

@@ -608,9 +608,9 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
                   type="button"
                   onMouseDown={handleStartFingerprintScan}
                   onMouseUp={handleEndFingerprintScan}
+                  onMouseLeave={handleEndFingerprintScan}
                   onTouchStart={handleStartFingerprintScan}
                   onTouchEnd={handleEndFingerprintScan}
-                  onClick={handleNativeWebAuthn}
                   className={`relative w-28 h-28 sm:w-32 sm:h-32 rounded-3xl border-2 flex items-center justify-center transition-all cursor-pointer select-none active:scale-95 ${
                     fpState === 'verified'
                       ? 'bg-emerald-600/30 border-emerald-400 shadow-xl shadow-emerald-500/20 text-emerald-400'
@@ -618,7 +618,7 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
                       ? 'bg-emerald-500/20 border-emerald-400 shadow-lg shadow-emerald-500/30 text-emerald-300'
                       : 'bg-slate-800/80 hover:bg-slate-800 border-slate-700 hover:border-emerald-500/50 text-slate-300 hover:text-white'
                   }`}
-                  title="แตะหรือกดค้างเพื่อสแกนลายนิ้วมือ / Touch ID"
+                  title="กดค้างเพื่อสแกนลายนิ้วมือ"
                 >
                   {fpState === 'verified' ? (
                     <CheckCircle2 className="w-14 h-14 text-emerald-400 animate-in zoom-in" />
@@ -647,17 +647,27 @@ export const BiometricAuthModal: React.FC<BiometricAuthModalProps> = ({
               </div>
 
               {/* Status Instructions */}
-              <div className="w-full mt-2 space-y-1">
+              <div className="w-full mt-2 space-y-1.5">
                 <p className="text-xs font-semibold text-white">
                   {fpState === 'verified'
                     ? 'สแกนลายนิ้วมือถูกต้อง ยืนยันตัวตนสำเร็จ!'
                     : isPressingFp
                     ? 'กำลังอ่านค่าลายนิ้วมือ...'
-                    : 'แตะหรือกดค้างที่รูปนิ้วมือเพื่อสแกน (หรือใช้ Touch ID / Windows Hello)'}
+                    : 'กดค้างที่รูปนิ้วมือเพื่อสแกน'}
                 </p>
                 <p className="text-[11px] text-slate-400">
                   รองรับเซ็นเซอร์นิ้วมือของอุปกรณ์ และการตรวจสอบผ่านหน้าจอสัมผัส
                 </p>
+                {typeof window !== 'undefined' && 'PublicKeyCredential' in window && fpState !== 'verified' && (
+                  <button
+                    type="button"
+                    onClick={handleNativeWebAuthn}
+                    className="mt-1 inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 text-emerald-300 text-[11px] font-medium transition-colors cursor-pointer"
+                  >
+                    <Fingerprint className="w-3.5 h-3.5" />
+                    <span>ใช้ Touch ID / Windows Hello</span>
+                  </button>
+                )}
               </div>
 
               {/* Progress Indicator */}
