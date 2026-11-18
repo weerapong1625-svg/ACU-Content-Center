@@ -12,7 +12,6 @@ import {
   Eye
 } from 'lucide-react';
 import { DEFAULT_BANNER_IMAGE, savePopupBannerConfig, resetPopupBannerConfig } from '../services/bannerService';
-import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 
 interface AdminBannerManagerModalProps {
   isOpen: boolean;
@@ -119,7 +118,7 @@ export const AdminBannerManagerModal: React.FC<AdminBannerManagerModalProps> = (
       const success = await savePopupBannerConfig({
         bannerImageUrl: selectedUrl,
         title: 'ป๊อปอัปประชาสัมพันธ์หน้าแรก',
-        updatedBy: SUPER_ADMIN_EMAIL,
+        updatedBy: 'admin@acu.ac.th',
       });
       if (success) {
         onBannerUpdated(selectedUrl);

@@ -410,7 +410,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     );
 
     return () => unsubscribe();
-  }, [isOpen, userEmail, isMasterWeerapong]);
+  }, [isOpen, userEmail, userName, profile?.fullName, isMasterWeerapong]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear, 10) || getBangkokDateParts()?.year || new Date().getFullYear();
@@ -448,72 +448,90 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     const currentMonthIdx = nowParts.monthIndex;
     const normTargetEmail = (userEmail || '').toLowerCase().trim();
 
-    const myLogs: LoginLogEntry[] = [];
-    const myMonthlyBuckets = new Array<number>(12).fill(0);
-    const allMonthlyBuckets = new Array<number>(12).fill(0);
-    const uniqueEmailsInYear = new Set<string>();
-    const uniqueEmailsAll = new Set<string>();
+    const isSameBangkokDay = (ts?: string) => {
+      const parts = ts ? getBangkokDateParts(ts) : null;
+      return Boolean(parts && parts.dateKey === nowParts.dateKey);
+    };
 
-    let myYearCount = 0;
-    let allYearCount = 0;
-    let myTodayVisits = 0;
-    let allTodayVisits = 0;
+    // Filter by user's email
+    const myLogs = loginLogs.filter(
+      (l) => l.email?.toLowerCase().trim() === normTargetEmail
+    );
 
-    for (const l of loginLogs) {
-      const logEmail = (l.email || '').toLowerCase().trim();
-      const isMine = logEmail === normTargetEmail;
-      if (logEmail) uniqueEmailsAll.add(logEmail);
-      if (isMine) myLogs.push(l);
-
+    // All logs that fall in selected target year (Bangkok calendar)
+    const allYearLogs = loginLogs.filter((l) => {
       const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
-      if (parts && parts.year === yearNum) {
-        allYearCount++;
-        if (logEmail) uniqueEmailsInYear.add(logEmail);
-        if (parts.monthIndex >= 0 && parts.monthIndex < 12) {
-          allMonthlyBuckets[parts.monthIndex]++;
-        }
-        if (isCurrentYear && parts.dateKey === nowParts.dateKey) {
-          allTodayVisits++;
-        }
-        if (isMine) {
-          myYearCount++;
-          if (parts.monthIndex >= 0 && parts.monthIndex < 12) {
-            myMonthlyBuckets[parts.monthIndex]++;
-          }
-          if (isCurrentYear && parts.dateKey === nowParts.dateKey) {
-            myTodayVisits++;
-          }
-        }
-      }
-    }
+      return Boolean(parts && parts.year === yearNum);
+    });
+
+    // User's logs in selected target year (Bangkok calendar)
+    const myYearLogs = myLogs.filter((l) => {
+      const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+      return Boolean(parts && parts.year === yearNum);
+    });
 
     const profileViews = profile?.stats?.totalViews || 0;
-    const useProfileViewsFallback = myYearCount === 0 && isCurrentYear && profileViews > 0;
-    if (useProfileViewsFallback && currentMonthIdx >= 0 && currentMonthIdx < 12) {
-      myMonthlyBuckets[currentMonthIdx] += profileViews;
-      allMonthlyBuckets[currentMonthIdx] += profileViews;
-      if (normTargetEmail) uniqueEmailsInYear.add(normTargetEmail);
-    }
+    // Fallback for accounts with recorded profile views when login_logs entry is absent
+    const useProfileViewsFallback = myYearLogs.length === 0 && isCurrentYear && profileViews > 0;
 
+    // Monthly breakdown for selected year (1-12)
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
-    const monthlyData = monthNames.map((name, idx) => ({
-      monthName: name,
-      monthIndex: idx + 1,
-      myCount: myMonthlyBuckets[idx],
-      allCount: allMonthlyBuckets[idx],
-    }));
+    const monthlyData = monthNames.map((name, idx) => {
+      let myCount = myYearLogs.filter((l) => {
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
+      }).length;
+      let allCount = allYearLogs.filter((l) => {
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
+      }).length;
 
-    const myYearVisits = useProfileViewsFallback ? myYearCount + profileViews : myYearCount;
-    const allYearVisits = useProfileViewsFallback ? allYearCount + profileViews : allYearCount;
+      if (useProfileViewsFallback && idx === currentMonthIdx) {
+        myCount += profileViews;
+        allCount += profileViews;
+      }
 
-    const myMonthVisits = isCurrentYear ? (myMonthlyBuckets[currentMonthIdx] || 0) : 0;
-    const allMonthVisits = isCurrentYear ? (allMonthlyBuckets[currentMonthIdx] || 0) : 0;
+      return {
+        monthName: name,
+        monthIndex: idx + 1,
+        myCount,
+        allCount,
+      };
+    });
+
+    const myYearVisits = monthlyData.reduce((sum, m) => sum + m.myCount, 0);
+    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+
+    const myTodayVisits = isCurrentYear
+      ? myYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
+      : 0;
+    const myMonthVisits = isCurrentYear
+      ? (monthlyData[currentMonthIdx]?.myCount || 0)
+      : 0;
+
+    const allTodayVisits = isCurrentYear
+      ? allYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
+      : 0;
+    const allMonthVisits = isCurrentYear
+      ? (monthlyData[currentMonthIdx]?.allCount || 0)
+      : 0;
+
+    const uniqueEmailsInYear = new Set(
+      allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
+    );
+    if (useProfileViewsFallback && normTargetEmail) {
+      uniqueEmailsInYear.add(normTargetEmail);
+    }
     const uniqueVerifiedUsersYear = uniqueEmailsInYear.size;
-    const uniqueAllUsers = Math.max(uniqueEmailsAll.size, uniqueVerifiedUsersYear);
+
+    const uniqueAllUsers = Math.max(
+      new Set(loginLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)).size,
+      uniqueVerifiedUsersYear
+    );
 
     return {
       myTodayVisits,

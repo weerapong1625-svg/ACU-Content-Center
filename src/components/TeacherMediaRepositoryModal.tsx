@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   X, 
   FolderArchive, 
@@ -87,8 +87,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   onClose,
 }) => {
   const [rawMediaList, setRawMediaList] = useState<TeacherMediaWork[]>([]);
+  const [mediaList, setMediaList] = useState<TeacherMediaWork[]>([]);
   const [sortOrder, setSortOrder] = useState<'newest' | 'shuffle'>('newest');
-  const [shuffleSeed, setShuffleSeed] = useState<number>(() => getDailyRandomSeed());
   const [onlyMyPosts, setOnlyMyPosts] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedGroup, setSelectedGroup] = useState('all');
@@ -96,9 +96,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [hoverRating, setHoverRating] = useState<{ [id: string]: number }>({});
   const [userVotedStars, setUserVotedStars] = useState<{ [id: string]: number }>({});
   const [voteSuccessMsg, setVoteSuccessMsg] = useState<string | null>(null);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<TeacherMediaWork | null>(null);
-  const [isDeletingTarget, setIsDeletingTarget] = useState(false);
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -123,7 +120,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     thumbnailUrl: string;
   }>({
     title: '',
-    teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? 'ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
+    teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
     subjectGroup: String(SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี'),
     subjectName: '',
     mediaType: 'สื่อเทคโนโลยี',
@@ -132,45 +129,29 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     thumbnailUrl: '',
   });
 
-  const showSuccessFeedback = (msg: string, ms = 3000) => {
-    setErrorMsg(null);
-    setVoteSuccessMsg(msg);
-    setTimeout(() => setVoteSuccessMsg((cur) => (cur === msg ? null : cur)), ms);
-  };
-
-  const showErrorFeedback = (msg: string, ms = 4000) => {
-    setVoteSuccessMsg(null);
-    setErrorMsg(msg);
-    setTimeout(() => setErrorMsg((cur) => (cur === msg ? null : cur)), ms);
-  };
-
   // Current Thai Date string
-  const todayThai = useMemo(
-    () =>
-      new Date().toLocaleDateString('th-TH', {
-        weekday: 'long',
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric',
-      }),
-    []
-  );
+  const todayThai = new Date().toLocaleDateString('th-TH', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
 
-  // Subscribe once to teacher media works (0ms instant cached render + live Firestore sync)
+  // Subscribe to teacher media works (Default to newest first so teacher submissions appear immediately)
   useEffect(() => {
     const unsub = subscribeTeacherMedia((items) => {
       setRawMediaList(items);
+      if (sortOrder === 'shuffle') {
+        const seed = getDailyRandomSeed();
+        const dailyShuffled = shuffleWithSeed(items, seed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
+        setMediaList(dailyShuffled);
+      } else {
+        // Newest first - items already sorted newest first from service
+        setMediaList(items.slice(0, MAX_MEDIA_DISPLAY_LIMIT));
+      }
     });
     return () => unsub();
-  }, []);
-
-  // Compute sorted/shuffled list in memory in 0ms without re-subscribing to Firestore
-  const mediaList = useMemo(() => {
-    if (sortOrder === 'shuffle') {
-      return shuffleWithSeed(rawMediaList, shuffleSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
-    }
-    return rawMediaList.slice(0, MAX_MEDIA_DISPLAY_LIMIT);
-  }, [rawMediaList, sortOrder, shuffleSeed]);
+  }, [sortOrder]);
 
   const handleStartEdit = (item: TeacherMediaWork) => {
     setEditingItem(item);
@@ -194,41 +175,42 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     const res = await updateTeacherMedia(editingItem.id, updates, userEmail);
 
     if (res.success) {
-      showSuccessFeedback(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
+      setVoteSuccessMsg(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
       setEditingItem(null);
+      setMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
       setRawMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
-      showErrorFeedback(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
+      alert(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
     }
   };
 
-  const handleDeleteConfirm = async () => {
-    if (!confirmDeleteTarget) return;
-    const item = confirmDeleteTarget;
-    setIsDeletingTarget(true);
+  const handleDelete = async (item: TeacherMediaWork) => {
+    if (!window.confirm(`คุณต้องการลบสื่อ "${item.title}" ออกจากคลังสื่อใช่หรือไม่?`)) {
+      return;
+    }
     const res = await deleteTeacherMedia(item.id, userEmail);
-    setIsDeletingTarget(false);
     if (res.success) {
-      setConfirmDeleteTarget(null);
+      setVoteSuccessMsg(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+      setMediaList(prev => prev.filter(m => m.id !== item.id));
       setRawMediaList(prev => prev.filter(m => m.id !== item.id));
       if (activeViewItem && activeViewItem.id === item.id) {
         setActiveViewItem(null);
       }
-      showSuccessFeedback(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
     } else {
-      setConfirmDeleteTarget(null);
-      showErrorFeedback(res.error || 'ลบข้อมูลไม่สำเร็จ');
+      alert(res.error || 'ลบข้อมูลไม่สำเร็จ');
     }
   };
 
   const handleSaveNewMedia = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!addForm.title.trim()) {
-      showErrorFeedback('กรุณากรอกชื่อสื่อ/นวัตกรรม');
+      alert('กรุณากรอกชื่อสื่อ/นวัตกรรม');
       return;
     }
     if (!addForm.teacherName.trim()) {
-      showErrorFeedback('กรุณากรอกชื่อครูผู้จัดทำ');
+      alert('กรุณากรอกชื่อครูผู้จัดทำ');
       return;
     }
 
@@ -247,12 +229,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     setIsSubmittingNew(false);
 
     if (res.success) {
-      const savedTitle = addForm.title;
+      setVoteSuccessMsg(`เพิ่มสื่อ "${addForm.title}" เข้าสู่คลังเรียบร้อยแล้ว`);
       setIsAddModalOpen(false);
       setSortOrder('newest');
       setAddForm({
         title: '',
-        teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? 'ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
+        teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
         subjectGroup: SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
         subjectName: '',
         mediaType: 'สื่อเทคโนโลยี',
@@ -260,52 +242,57 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
         onlineUrl: '',
         thumbnailUrl: '',
       });
-      showSuccessFeedback(`เพิ่มสื่อ "${savedTitle}" เข้าสู่คลังเรียบร้อยแล้ว`, 3500);
+      setTimeout(() => setVoteSuccessMsg(null), 3500);
     } else {
-      showErrorFeedback(res.error || 'เพิ่มข้อมูลสื่อไม่สำเร็จ');
+      alert(res.error || 'เพิ่มข้อมูลสื่อไม่สำเร็จ');
     }
   };
 
-  // Filter items (memoized)
-  const filteredList = useMemo(() => {
-    const q = searchTerm.toLowerCase();
-    const normUser = userEmail.toLowerCase().trim();
-    const emailPrefix = normUser.split('@')[0];
-    return mediaList.filter((item) => {
-      const matchesSearch =
-        !q ||
-        item.title.toLowerCase().includes(q) ||
-        item.teacherName.toLowerCase().includes(q) ||
-        item.subjectName.toLowerCase().includes(q) ||
-        (item.gradeLevel && item.gradeLevel.toLowerCase().includes(q));
-      const matchesGroup = selectedGroup === 'all' || item.subjectGroup === selectedGroup;
-      const matchesMyPosts =
-        !onlyMyPosts ||
-        (item.submittedByEmail
-          ? item.submittedByEmail.toLowerCase().trim() === normUser
-          : item.teacherName.toLowerCase().includes(emailPrefix));
-      return matchesSearch && matchesGroup && matchesMyPosts;
-    });
-  }, [mediaList, searchTerm, selectedGroup, onlyMyPosts, userEmail]);
+  // Filter items
+  const filteredList = mediaList.filter((item) => {
+    const matchesSearch = 
+      item.title.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      item.teacherName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      item.subjectName.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (item.gradeLevel && item.gradeLevel.toLowerCase().includes(searchTerm.toLowerCase()));
+    const matchesGroup = selectedGroup === 'all' || item.subjectGroup === selectedGroup;
+    const matchesMyPosts = !onlyMyPosts || (
+      item.submittedByEmail
+        ? item.submittedByEmail.toLowerCase().trim() === userEmail.toLowerCase().trim()
+        : item.teacherName.toLowerCase().includes(userEmail.split('@')[0].toLowerCase())
+    );
+    return matchesSearch && matchesGroup && matchesMyPosts;
+  });
 
   // Handle star rating click
   const handleRate = async (item: TeacherMediaWork, stars: number) => {
     setUserVotedStars(prev => ({ ...prev, [item.id]: stars }));
-    showSuccessFeedback(`ให้คะแนน ${stars} ดาวแก่สื่อ "${item.title}" เรียบร้อยแล้ว`, 2500);
+    setVoteSuccessMsg(`ให้คะแนน ${stars} ดาวแก่สื่อ "${item.title}" เรียบร้อยแล้ว`);
 
+    // Update in Firestore
     await rateTeacherMedia(item.id, stars, userEmail);
 
-    setRawMediaList(prev =>
-      prev.map(m => {
-        if (m.id === item.id) {
-          const currentTotal = m.ratingAvg * m.ratingCount;
-          const newCount = m.ratingCount + 1;
-          const newAvg = Number(((currentTotal + stars) / newCount).toFixed(1));
-          return { ...m, ratingAvg: newAvg, ratingCount: newCount };
-        }
-        return m;
-      })
-    );
+    // Update local state smoothly
+    const updateList = (list: TeacherMediaWork[]) => list.map(m => {
+      if (m.id === item.id) {
+        const currentTotal = m.ratingAvg * m.ratingCount;
+        const newCount = m.ratingCount + 1;
+        const newAvg = Number(((currentTotal + stars) / newCount).toFixed(1));
+        return {
+          ...m,
+          ratingAvg: newAvg,
+          ratingCount: newCount,
+        };
+      }
+      return m;
+    });
+
+    setMediaList(prev => updateList(prev));
+    setRawMediaList(prev => updateList(prev));
+
+    setTimeout(() => {
+      setVoteSuccessMsg(null);
+    }, 2500);
   };
 
   // Handle like toggle (Appreciation points for teacher)
@@ -329,6 +316,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           return m;
         });
 
+      setMediaList((prev) => updateLikes(prev));
       setRawMediaList((prev) => updateLikes(prev));
 
       if (activeViewItem && activeViewItem.id === item.id) {
@@ -346,26 +334,30 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       }
 
       if (res.isLiked) {
-        showSuccessFeedback(`กดถูกใจสื่อ "${item.title}" สะสมแต้มชื่นชม +1 ให้คุณครู ${item.teacherName} สำเร็จ!`);
+        setVoteSuccessMsg(`กดถูกใจสื่อ "${item.title}" สะสมแต้มชื่นชม +1 ให้คุณครู ${item.teacherName} สำเร็จ!`);
       } else {
-        showSuccessFeedback(`ยกเลิกการถูกใจสื่อ "${item.title}"`);
+        setVoteSuccessMsg(`ยกเลิกการถูกใจสื่อ "${item.title}"`);
       }
+      setTimeout(() => setVoteSuccessMsg(null), 3000);
     }
   };
 
-  // Re-shuffle / randomize items in memory in 0ms
+  // Re-shuffle / randomize items on demand (up to 100 items)
   const handleShuffle = () => {
     if (rawMediaList.length === 0) return;
     const randomSeed = Math.floor(Math.random() * 1000000) + 1;
-    setShuffleSeed(randomSeed);
+    const shuffled = shuffleWithSeed(rawMediaList, randomSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
+    setMediaList(shuffled);
     setSortOrder('shuffle');
-    const count = Math.min(rawMediaList.length, MAX_MEDIA_DISPLAY_LIMIT);
-    showSuccessFeedback(`สุ่มแสดงผลสื่อชุดใหม่เรียบร้อยแล้ว (${count} รายการ จากทั้งหมด ${rawMediaList.length} รายการ)`, 2500);
+    setVoteSuccessMsg(`สุ่มแสดงผลสื่อชุดใหม่เรียบร้อยแล้ว (${shuffled.length} รายการ จากทั้งหมด ${rawMediaList.length} รายการ)`);
+    setTimeout(() => setVoteSuccessMsg(null), 2500);
   };
 
   const handleShowNewest = () => {
     setSortOrder('newest');
-    showSuccessFeedback('แสดงผลสื่อเรียงตามล่าสุด (ส่งสื่อนวัตกรรมใหม่แสดงผลทันทีด้านบนสุด)', 2500);
+    setMediaList(rawMediaList.slice(0, MAX_MEDIA_DISPLAY_LIMIT));
+    setVoteSuccessMsg('แสดงผลสื่อเรียงตามล่าสุด (ส่งสื่อนวัตกรรมใหม่แสดงผลทันทีด้านบนสุด)');
+    setTimeout(() => setVoteSuccessMsg(null), 2500);
   };
 
   return (
@@ -528,15 +520,10 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           </div>
         </div>
 
-        {/* Feedback Toasts */}
+        {/* Vote Success Toast */}
         {voteSuccessMsg && (
           <div className="bg-emerald-600/90 text-white text-xs py-2 px-4 text-center font-medium shadow-md transition-all">
             {voteSuccessMsg}
-          </div>
-        )}
-        {errorMsg && (
-          <div className="bg-rose-600/90 text-white text-xs py-2 px-4 text-center font-medium shadow-md transition-all">
-            {errorMsg}
           </div>
         )}
 
@@ -545,6 +532,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {filteredList.map((item) => {
               const currentHover = hoverRating[item.id] || 0;
+              const voted = userVotedStars[item.id];
               return (
                 <div
                   key={item.id}
@@ -558,8 +546,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                         <img
                           src={item.thumbnailUrl}
                           alt={item.title}
-                          loading="lazy"
-                          decoding="async"
                           className="w-full h-full object-cover group-hover/thumb:scale-110 transition-transform duration-300"
                           onError={(e) => {
                             (e.target as HTMLImageElement).src = '/ACU N.png';
@@ -690,8 +676,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                           </button>
                           <button
                             type="button"
-                            onClick={() => setConfirmDeleteTarget(item)}
-                            className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-colors cursor-pointer"
+                            onClick={() => handleDelete(item)}
+                            className="p-1.5 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 transition-colors"
                             title="ลบสื่อนี้"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
@@ -699,26 +685,20 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                         </>
                       )}
 
-                      {item.onlineUrl ? (
-                        <a
-                          href={item.onlineUrl}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>กดชม</span>
-                        </a>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => setActiveViewItem(item)}
-                          className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
-                        >
-                          <Eye className="w-3.5 h-3.5" />
-                          <span>กดชม</span>
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (item.onlineUrl) {
+                            window.open(item.onlineUrl, '_blank');
+                          } else {
+                            setActiveViewItem(item);
+                          }
+                        }}
+                        className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>กดชม</span>
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -866,9 +846,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               <img
                 src={activeViewItem.thumbnailUrl}
                 alt={activeViewItem.title}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).src = '/ACU N.png';
-                }}
                 className="w-full max-h-72 object-contain rounded-2xl bg-slate-950 border border-slate-800 mb-4"
               />
 
@@ -898,7 +875,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                 {canUserModify(activeViewItem.submittedByEmail, userEmail) && (
                   <button
                     type="button"
-                    onClick={() => setConfirmDeleteTarget(activeViewItem)}
+                    onClick={() => handleDelete(activeViewItem)}
                     className="px-3 py-2 rounded-xl bg-rose-500/20 hover:bg-rose-600 text-rose-300 hover:text-white border border-rose-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer"
                     title="ลบสื่อนี้"
                   >
@@ -1088,50 +1065,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                 </button>
               </div>
             </form>
-          </div>
-        </div>
-      )}
-
-      {/* Inline Delete Confirmation Modal */}
-      {confirmDeleteTarget && (
-        <div
-          className="fixed inset-0 z-[90] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in"
-          onClick={() => !isDeletingTarget && setConfirmDeleteTarget(null)}
-        >
-          <div
-            className="w-full max-w-md bg-slate-900 border border-rose-500/50 rounded-3xl shadow-2xl p-6 text-white space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-400/40 flex items-center justify-center text-rose-400 flex-shrink-0">
-                <Trash2 className="w-5 h-5" />
-              </div>
-              <div>
-                <h4 className="text-sm font-bold text-white">ยืนยันการลบสื่อออกจากคลัง</h4>
-                <p className="text-xs text-slate-400">"{confirmDeleteTarget.title}"</p>
-              </div>
-            </div>
-            <p className="text-xs text-slate-300">
-              คุณต้องการลบสื่อรายการนี้ออกจากคลังสื่อคุณครูผลิตเองใช่หรือไม่?
-            </p>
-            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-              <button
-                type="button"
-                disabled={isDeletingTarget}
-                onClick={() => setConfirmDeleteTarget(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold cursor-pointer"
-              >
-                ยกเลิก
-              </button>
-              <button
-                type="button"
-                disabled={isDeletingTarget}
-                onClick={handleDeleteConfirm}
-                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
-              >
-                {isDeletingTarget ? 'กำลังลบ...' : 'ยืนยันการลบ'}
-              </button>
-            </div>
           </div>
         </div>
       )}

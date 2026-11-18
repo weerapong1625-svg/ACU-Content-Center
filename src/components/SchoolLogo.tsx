@@ -35,8 +35,6 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -79,10 +77,9 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    setErrorMessage(null);
 
     if (!file.type.startsWith('image/')) {
-      setErrorMessage('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)');
+      alert('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)');
       return;
     }
 
@@ -91,7 +88,7 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_DIM = 360;
+        const MAX_DIM = 500;
         let width = img.width;
         let height = img.height;
 
@@ -112,11 +109,7 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          let compressed = canvas.toDataURL('image/png');
-          if (compressed.length > 240000) {
-            const webp = canvas.toDataURL('image/webp', 0.88);
-            compressed = webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/jpeg', 0.85);
-          }
+          const compressed = canvas.toDataURL('image/png');
           setNewImagePreview(compressed);
         }
       };
@@ -130,7 +123,6 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setStatusMessage(null);
-    setErrorMessage(null);
 
     // 1. Immediately reflect visually for zero latency
     setLogoUrl(newImagePreview);
@@ -146,24 +138,22 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
         setStatusMessage(null);
       }, 900);
     } else {
-      setErrorMessage(res.message);
+      setStatusMessage(res.message);
     }
   };
 
-  const handleResetConfirm = async () => {
+  const handleReset = async () => {
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
+    if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นรูปทางการดั้งเดิม ใช่หรือไม่?')) return;
     setIsSaving(true);
-    setErrorMessage(null);
     setLogoUrl(DEFAULT_LOGO_IMAGE);
     const res = await resetSchoolLogo(emailToUse);
     setIsSaving(false);
     if (res.success) {
-      setConfirmResetOpen(false);
       setNewImagePreview(null);
       setIsAdminModalOpen(false);
     } else {
-      setConfirmResetOpen(false);
-      setErrorMessage(res.message);
+      alert(res.message);
     }
   };
 
@@ -262,7 +252,7 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => setConfirmResetOpen(true)}
+                    onClick={handleReset}
                     className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 flex items-center gap-1 transition-colors cursor-pointer"
                     title="รีเซ็ตกลับเป็น ACU N.png"
                   >
@@ -270,36 +260,6 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
                     <span>รีเซ็ตค่าเดิม</span>
                   </button>
                 </div>
-
-                {confirmResetOpen && (
-                  <div className="mt-3 p-3 rounded-xl bg-amber-950/60 border border-amber-500/40 text-xs text-amber-200 flex items-center justify-between gap-2 w-full">
-                    <span>ยืนยันรีเซ็ตโลโก้กลับเป็นตราดั้งเดิม?</span>
-                    <div className="flex items-center gap-1.5 flex-shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => setConfirmResetOpen(false)}
-                        className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
-                      >
-                        ยกเลิก
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isSaving}
-                        onClick={handleResetConfirm}
-                        className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold"
-                      >
-                        ยืนยันรีเซ็ต
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {errorMessage && (
-                  <div className="mt-3 px-3 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1.5">
-                    <ShieldAlert className="w-3.5 h-3.5" />
-                    <span>{errorMessage}</span>
-                  </div>
-                )}
 
                 {statusMessage && (
                   <div className="mt-3 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs flex items-center gap-1.5">
