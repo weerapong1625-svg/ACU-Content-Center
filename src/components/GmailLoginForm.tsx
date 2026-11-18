@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Mail,
   Lock,
@@ -15,8 +15,15 @@ import {
   Trash2,
   ArrowLeft,
 } from 'lucide-react';
-import { signInWithPopup } from 'firebase/auth';
+import {
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  signInWithCredential,
+  GoogleAuthProvider,
+} from 'firebase/auth';
 import { auth, createGoogleAuthProvider } from '../firebase';
+import firebaseConfig from '../../firebase-applet-config.json';
 import {
   fetchFullUserProfile,
   getCachedUserProfile,
@@ -145,6 +152,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   const [savedGoogleAccounts, setSavedGoogleAccounts] = useState<SavedGoogleAccount[]>([]);
   const [googleModalView, setGoogleModalView] = useState<'chooser' | 'add'>('chooser');
   const [popupNotice, setPopupNotice] = useState<string | null>(null);
+  const [unauthorizedHost, setUnauthorizedHost] = useState<string | null>(null);
   const [googleEmail, setGoogleEmail] = useState('');
   const [googlePassword, setGooglePassword] = useState('');
   const [showGooglePassword, setShowGooglePassword] = useState(false);
@@ -237,6 +245,39 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     onLoginSuccess?.(norm, method);
   };
 
+  // Handle returning from signInWithRedirect (for standalone/mobile browsers on other devices)
+  useEffect(() => {
+    let isMounted = true;
+    getRedirectResult(auth)
+      .then(async (result) => {
+        if (!isMounted || !result?.user?.email) return;
+        const userEmail = result.user.email.toLowerCase().trim();
+        setIsLoading(true);
+        const syncedProfile = await preserveAndSyncUserProfile(
+          userEmail,
+          result.user.displayName,
+          result.user.photoURL
+        );
+        saveGoogleAccountToDevice({
+          email: userEmail,
+          displayName: syncedProfile?.fullName || result.user.displayName || userEmail.split('@')[0],
+          photoURL: syncedProfile?.avatarUrl || result.user.photoURL || '',
+        });
+        if (isMounted) {
+          await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
+        }
+      })
+      .catch((err) => {
+        if (!isMounted) return;
+        console.warn('Google Redirect Result notice:', err?.code || err);
+        setIsLoading(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
   // Direct Email & Password login handler (preserved fully)
   const handleEmailLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -279,7 +320,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
   };
 
   // Open Google Account Chooser / Add Account fallback dialog
-  const handleOpenGoogleChooser = (notice?: string | null, forceAddView?: boolean) => {
+  const handleOpenGoogleChooser = (
+    notice?: string | null,
+    forceAddView?: boolean,
+    unauthHost?: string | null
+  ) => {
     setError(null);
     setSuggestedFix(null);
     const accounts = readSavedGoogleAccounts();
@@ -296,6 +341,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     }
 
     setPopupNotice(notice || null);
+    setUnauthorizedHost(unauthHost || null);
     setGoogleModalView(forceAddView || accounts.length === 0 ? 'add' : 'chooser');
     setGoogleEmail('');
     setGooglePassword('');
@@ -305,8 +351,99 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setIsGoogleModalOpen(true);
   };
 
-  // Launch native Google Account Chooser popup (with optional login_hint)
-  const attemptNativeGooglePopup = async (loginHint?: string): Promise<'success' | 'cancelled' | 'fallback' | 'error'> => {
+  // Direct Google Identity Services (accounts.google.com) OAuth popup fallback
+  const attemptGisGoogleSignIn = (loginHint?: string): Promise<'success' | 'cancelled' | 'unavailable'> => {
+    return new Promise((resolve) => {
+      const googleOAuth2 = typeof window !== 'undefined' ? (window as any).google?.accounts?.oauth2 : null;
+      const clientId = (firebaseConfig as any)?.oAuthClientId;
+      if (!googleOAuth2 || !clientId) {
+        resolve('unavailable');
+        return;
+      }
+
+      let settled = false;
+      const done = (status: 'success' | 'cancelled' | 'unavailable') => {
+        if (!settled) {
+          settled = true;
+          resolve(status);
+        }
+      };
+
+      try {
+        const tokenClient = googleOAuth2.initTokenClient({
+          client_id: clientId,
+          scope: 'openid email profile',
+          prompt: 'select_account',
+          ...(loginHint && loginHint.trim() ? { login_hint: loginHint.trim().toLowerCase() } : {}),
+          callback: async (tokenResponse: any) => {
+            if (!tokenResponse?.access_token) {
+              done('unavailable');
+              return;
+            }
+            try {
+              const userInfoRes = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+                headers: {
+                  Authorization: `Bearer ${tokenResponse.access_token}`,
+                },
+              });
+              if (!userInfoRes.ok) {
+                done('unavailable');
+                return;
+              }
+              const userInfo = await userInfoRes.json();
+              const userEmail = typeof userInfo?.email === 'string' ? userInfo.email.toLowerCase().trim() : '';
+              if (!userEmail) {
+                done('unavailable');
+                return;
+              }
+
+              // Link Firebase Auth session silently if supported on this domain
+              try {
+                const credential = GoogleAuthProvider.credential(null, tokenResponse.access_token);
+                await signInWithCredential(auth, credential);
+              } catch {
+                // Proceed even if domain is not in Firebase Authorized Domains
+              }
+
+              const syncedProfile = await preserveAndSyncUserProfile(
+                userEmail,
+                userInfo.name || null,
+                userInfo.picture || null
+              );
+
+              saveGoogleAccountToDevice({
+                email: userEmail,
+                displayName: syncedProfile?.fullName || userInfo.name || userEmail.split('@')[0],
+                photoURL: syncedProfile?.avatarUrl || userInfo.picture || '',
+              });
+
+              setIsGoogleModalOpen(false);
+              await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
+              done('success');
+            } catch {
+              done('unavailable');
+            }
+          },
+          error_callback: (err: any) => {
+            if (err?.type === 'popup_closed') {
+              done('cancelled');
+            } else {
+              done('unavailable');
+            }
+          },
+        });
+
+        tokenClient.requestAccessToken({ prompt: 'select_account' });
+      } catch {
+        done('unavailable');
+      }
+    });
+  };
+
+  // Launch native Google Account Chooser popup (with redirect & GIS support for other devices)
+  const attemptNativeGooglePopup = async (
+    loginHint?: string
+  ): Promise<{ status: 'success' | 'cancelled' | 'redirecting' | 'fallback' | 'error'; code?: string }> => {
     try {
       const provider = createGoogleAuthProvider(loginHint);
       const result = await signInWithPopup(auth, provider);
@@ -315,7 +452,7 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
       if (!userEmail) {
         setError('ไม่พบอีเมลจากบัญชี Google กรุณาลองใหม่อีกครั้ง');
-        return 'error';
+        return { status: 'error' };
       }
 
       const syncedProfile = await preserveAndSyncUserProfile(
@@ -332,13 +469,28 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
 
       setIsGoogleModalOpen(false);
       await finalizeLogin(userEmail, 'Google Account SSO (เข้าสู่ระบบด้วย Google)');
-      return 'success';
+      return { status: 'success' };
     } catch (err: any) {
       const code = err?.code || '';
       console.warn('Google Sign-In notice:', code || err);
 
       if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        return 'cancelled';
+        return { status: 'cancelled', code };
+      }
+
+      // On standalone/mobile browsers (not inside iframe), redirect directly to Google Sign-In page if popup was blocked
+      const isTopLevelWindow = typeof window !== 'undefined' && window.self === window.top;
+      if (
+        isTopLevelWindow &&
+        (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment')
+      ) {
+        try {
+          const provider = createGoogleAuthProvider(loginHint);
+          await signInWithRedirect(auth, provider);
+          return { status: 'redirecting', code };
+        } catch (redirErr: any) {
+          console.warn('Google Redirect fallback notice:', redirErr?.code || redirErr);
+        }
       }
 
       if (
@@ -349,11 +501,11 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
         code === 'auth/internal-error' ||
         code === 'auth/network-request-failed'
       ) {
-        return 'fallback';
+        return { status: 'fallback', code };
       }
 
       setError(err?.message || 'ไม่สามารถเชื่อมต่อบัญชี Google ได้ กรุณาลองใหม่อีกครั้ง');
-      return 'error';
+      return { status: 'error', code };
     }
   };
 
@@ -364,14 +516,33 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     setGoogleError(null);
     setIsLoading(true);
 
-    const status = await attemptNativeGooglePopup();
-    setIsLoading(false);
-
-    if (status === 'fallback') {
-      handleOpenGoogleChooser(
-        'เบราว์เซอร์หรือหน้าต่างพรีวิวยังไม่สามารถเปิดป๊อปอัป Google อัตโนมัติได้ คุณสามารถเลือกบัญชีหรือเพิ่มบัญชี Google เพื่อเข้าสู่ระบบได้ทันที'
-      );
+    const res = await attemptNativeGooglePopup();
+    if (res.status === 'redirecting') {
+      return; // Browser is navigating to Google Sign-In page
     }
+
+    if (res.status === 'fallback') {
+      // Try direct Google Identity Services (accounts.google.com) if Firebase popup failed (e.g. unauthorized-domain on shared URL)
+      const gisStatus = await attemptGisGoogleSignIn();
+      setIsLoading(false);
+
+      if (gisStatus === 'success' || gisStatus === 'cancelled') {
+        return;
+      }
+
+      const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+      const isUnauthDomain = res.code === 'auth/unauthorized-domain';
+      handleOpenGoogleChooser(
+        isUnauthDomain
+          ? 'โดเมนนี้ยังไม่ได้เปิดสิทธิ์ป๊อปอัป Google ในระบบคลาวด์ คุณสามารถกดปุ่มเปิดหน้าต่าง Google ด้านล่าง หรือเลือก/เพิ่มบัญชี Google เพื่อเข้าใช้งานได้ทันที'
+          : 'เบราว์เซอร์บล็อกหน้าต่างป๊อปอัป Google อัตโนมัติ คุณสามารถกดปุ่มเปิดหน้าต่าง Google ด้านล่าง หรือเลือก/เพิ่มบัญชี Google เพื่อเข้าสู่ระบบได้ทันที',
+        false,
+        isUnauthDomain ? currentHost : null
+      );
+      return;
+    }
+
+    setIsLoading(false);
   };
 
   // Click a saved Google account from the Account Chooser
@@ -462,21 +633,35 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
     }
   };
 
-  // Try native Google Popup specifically for the typed email (login_hint)
+  // Synchronous user-gesture trigger for Google Sign-In directly from inside the modal
   const handleTryGooglePopupWithHint = async () => {
     setGoogleError(null);
     setGoogleSuggestedFix(null);
     setIsGoogleSubmitting(true);
 
     const hintEmail = googleEmail.trim().toLowerCase();
-    const status = await attemptNativeGooglePopup(hintEmail.includes('@') ? hintEmail : undefined);
-    setIsGoogleSubmitting(false);
+    const hint = hintEmail.includes('@') ? hintEmail : undefined;
 
-    if (status === 'fallback') {
-      setPopupNotice(
-        'หน้าต่างป๊อปอัป Google ถูกบล็อกในสภาพแวดล้อมนี้ กรุณาเลือกบัญชีด้านล่าง หรือกรอกอีเมลและรหัสผ่านเพื่อเพิ่มบัญชีและใช้งานได้ทันที'
-      );
+    // Try direct GIS OAuth first if domain wasn't authorized in Firebase Auth, otherwise Firebase Popup
+    if (unauthorizedHost) {
+      const gisStatus = await attemptGisGoogleSignIn(hint);
+      setIsGoogleSubmitting(false);
+      if (gisStatus === 'success' || gisStatus === 'cancelled') return;
+    } else {
+      const res = await attemptNativeGooglePopup(hint);
+      if (res.status === 'redirecting') return;
+      if (res.status === 'success' || res.status === 'cancelled') {
+        setIsGoogleSubmitting(false);
+        return;
+      }
+      const gisStatus = await attemptGisGoogleSignIn(hint);
+      setIsGoogleSubmitting(false);
+      if (gisStatus === 'success' || gisStatus === 'cancelled') return;
     }
+
+    setPopupNotice(
+      'ไม่สามารถเปิดหน้าต่าง Google บนอุปกรณ์/เบราว์เซอร์นี้ได้ กรุณาเลือกบัญชีด้านล่าง หรือกรอกอีเมลและรหัสผ่านเพื่อเข้าสู่ระบบได้ทันที'
+    );
   };
 
   const handleAppendDomain = (suffix: string) => {
@@ -850,19 +1035,39 @@ export const GmailLoginForm: React.FC<GmailLoginFormProps> = ({ onLoginSuccess }
               </p>
             </div>
 
-            {/* Info notice when browser/iframe blocked automatic popup */}
-            {popupNotice && (
+            {/* Info notice when browser/iframe/domain blocked automatic popup */}
+            {(popupNotice || unauthorizedHost) && (
               <div className="mb-4 p-3 rounded-xl bg-blue-50 border border-blue-200 text-blue-800 text-xs leading-relaxed flex flex-col gap-2">
-                <span>{popupNotice}</span>
-                <button
-                  type="button"
-                  onClick={handleTryGooglePopupWithHint}
-                  disabled={isGoogleSubmitting}
-                  className="inline-flex items-center justify-center gap-1.5 self-start px-3 py-1.5 rounded-lg bg-white hover:bg-blue-100/70 border border-blue-300 text-blue-700 font-semibold text-[11px] transition-colors cursor-pointer"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                  <span>ลองเปิดหน้าต่าง Google อีกครั้ง</span>
-                </button>
+                {popupNotice && <span>{popupNotice}</span>}
+                {unauthorizedHost && (
+                  <div className="text-[11px] bg-white/80 border border-blue-200/80 rounded-lg p-2 text-slate-700">
+                    <span className="font-semibold text-blue-900">หมายเหตุสำหรับผู้ดูแลระบบ:</span>{' '}
+                    โดเมน <span className="font-mono font-semibold text-blue-700 break-all">{unauthorizedHost}</span>{' '}
+                    ยังไม่ได้รับอนุญาตใน Firebase Authentication → Settings → Authorized domains
+                  </div>
+                )}
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleTryGooglePopupWithHint}
+                    disabled={isGoogleSubmitting}
+                    className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-blue-100/70 border border-blue-300 text-blue-700 font-semibold text-[11px] transition-colors cursor-pointer"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                    <span>เปิดหน้าต่างบัญชี Google</span>
+                  </button>
+                  {typeof window !== 'undefined' && window.self !== window.top && (
+                    <a
+                      href={window.location.href}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold text-[11px] transition-colors"
+                    >
+                      <ExternalLink className="w-3.5 h-3.5" />
+                      <span>เปิดในแท็บเต็มจอ</span>
+                    </a>
+                  )}
+                </div>
               </div>
             )}
 
