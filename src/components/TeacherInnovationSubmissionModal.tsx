@@ -88,21 +88,32 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Subscribe to real-time submissions with case-insensitivity & teacherName fallback
+  const editingIdRef = useRef<string | null>(null);
+  editingIdRef.current = editingId;
+
+  const teacherNameRef = useRef(defaultTeacherName || teacherName);
+  teacherNameRef.current = defaultTeacherName || teacherName;
+
   useEffect(() => {
-    const targetName = defaultTeacherName || teacherName;
+    if (defaultTeacherName) {
+      setTeacherName((curr) => curr || defaultTeacherName);
+    }
+  }, [defaultTeacherName]);
+
+  // Subscribe once per userEmail to real-time submissions (no re-subscribing when editingId changes)
+  useEffect(() => {
     const unsubUser = subscribeUserInnovations(
       userEmail,
       (list) => {
         setUserSubmissions(list);
         if (list.length > 0) {
           const prevGroup = list.find((s) => s.subjectGroup)?.subjectGroup;
-          if (prevGroup && !editingId) {
+          if (prevGroup && !editingIdRef.current) {
             setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
           }
         }
       },
-      targetName
+      teacherNameRef.current
     );
     const unsubAll = subscribeAllInnovations((list) => {
       setAllSubmissions(list);
@@ -111,7 +122,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       unsubUser();
       unsubAll();
     };
-  }, [userEmail, defaultTeacherName, editingId]);
+  }, [userEmail]);
 
   // Match user submissions strictly by email when userEmail is present (prevents cross-user or stale resurrection)
   const effectiveUserSubmissions = React.useMemo(() => {

@@ -85,6 +85,18 @@ export function hasCachedBannerConfig(): boolean {
  * Real-time subscription to the announcement banner configuration in Firestore.
  */
 export function subscribePopupBanner(onUpdate: (config: PopupBannerConfig) => void): () => void {
+  onUpdate(getCachedOrDefaultBannerConfig());
+
+  const handleCustomUpdate = (e: Event) => {
+    const custom = e as CustomEvent<PopupBannerConfig>;
+    if (custom.detail) {
+      onUpdate(custom.detail);
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_popup_banner_changed', handleCustomUpdate);
+  }
+
   try {
     const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);
     const unsubscribe = onSnapshot(
@@ -124,14 +136,23 @@ export function subscribePopupBanner(onUpdate: (config: PopupBannerConfig) => vo
         onUpdate(getCachedOrDefaultBannerConfig());
       }
     );
-    return unsubscribe;
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_popup_banner_changed', handleCustomUpdate);
+      }
+      unsubscribe();
+    };
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
     }
     console.warn('Could not initialize realtime banner listener:', err);
     onUpdate(getCachedOrDefaultBannerConfig());
-    return () => {};
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_popup_banner_changed', handleCustomUpdate);
+      }
+    };
   }
 }
 
@@ -194,16 +215,21 @@ export async function savePopupBannerConfig(config: {
     title: config.title || current.title || 'ประกาศ/ภาพประชาสัมพันธ์ 1',
     title2: config.title2 || current.title2 || 'ประกาศ/ภาพประชาสัมพันธ์ 2',
     enabled: true,
-    updatedBy: config.updatedBy || 'admin@acu.ac.th',
+    updatedBy: config.updatedBy || 'weerapong1625@acu.ac.th',
     updatedAt: new Date().toISOString(),
   };
 
-  // 1. Cache immediately to LocalStorage
+  // 1. Cache immediately to LocalStorage & notify components instantly
   try {
     localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
   } catch (err) {
     console.warn('LocalStorage save error:', err);
   }
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_popup_banner_changed', { detail: payload }));
+    }
+  } catch {}
 
   // 2. Persist to Firebase Firestore
   try {
@@ -230,6 +256,18 @@ export async function resetPopupBannerConfig(): Promise<boolean> {
   } catch {
     // ignore
   }
+  const defaultCfg: PopupBannerConfig = {
+    bannerImageUrl: DEFAULT_BANNER_IMAGE,
+    bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
+    title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
+    title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
+    enabled: true,
+  };
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_popup_banner_changed', { detail: defaultCfg }));
+    }
+  } catch {}
 
   try {
     const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);

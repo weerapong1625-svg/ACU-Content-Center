@@ -50,6 +50,25 @@ const FAKE_SAMPLE_EMAILS = new Set([
 ]);
 
 /**
+ * Cached Intl.DateTimeFormat & memo map so repeated calls across thousands of logs
+ * in AdminDashboard & UserProfileModal execute in O(1) without allocating formatters.
+ */
+const bangkokDateFormatter = (() => {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+  } catch {
+    return null;
+  }
+})();
+
+const bangkokPartsCache = new Map<string, { year: number; monthIndex: number; day: number; dateKey: string } | null>();
+
+/**
  * Get consistent Thailand (Asia/Bangkok, UTC+7) date parts so all devices
  * (tablet, laptop, mobile) compute identical day/month/year regardless of OS timezone.
  */
@@ -59,35 +78,64 @@ export function getBangkokDateParts(input?: string | number | Date): {
   day: number; // 1-31
   dateKey: string; // YYYY-MM-DD
 } | null {
+  if (typeof input === 'string' && input) {
+    const cached = bangkokPartsCache.get(input);
+    if (cached !== undefined) return cached;
+  }
+
+  let result: { year: number; monthIndex: number; day: number; dateKey: string } | null = null;
   try {
     const date = input instanceof Date ? input : input !== undefined ? new Date(input) : new Date();
-    if (isNaN(date.getTime())) return null;
-    const formatted = new Intl.DateTimeFormat('en-CA', {
-      timeZone: 'Asia/Bangkok',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }).format(date);
-    const parts = formatted.split('-');
-    if (parts.length !== 3) return null;
-    const year = parseInt(parts[0], 10);
-    const monthIndex = parseInt(parts[1], 10) - 1;
-    const day = parseInt(parts[2], 10);
-    if (isNaN(year) || isNaN(monthIndex) || isNaN(day)) return null;
-    return { year, monthIndex, day, dateKey: formatted };
+    if (isNaN(date.getTime())) {
+      result = null;
+    } else if (bangkokDateFormatter) {
+      const formatted = bangkokDateFormatter.format(date);
+      const parts = formatted.split('-');
+      if (parts.length === 3) {
+        const year = parseInt(parts[0], 10);
+        const monthIndex = parseInt(parts[1], 10) - 1;
+        const day = parseInt(parts[2], 10);
+        if (!isNaN(year) && !isNaN(monthIndex) && !isNaN(day)) {
+          result = { year, monthIndex, day, dateKey: formatted };
+        }
+      }
+    } else {
+      const y = date.getFullYear();
+      const m = date.getMonth();
+      const d = date.getDate();
+      result = {
+        year: y,
+        monthIndex: m,
+        day: d,
+        dateKey: `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+      };
+    }
   } catch {
-    const date = input instanceof Date ? input : input !== undefined ? new Date(input) : new Date();
-    if (isNaN(date.getTime())) return null;
-    const y = date.getFullYear();
-    const m = date.getMonth();
-    const d = date.getDate();
-    return {
-      year: y,
-      monthIndex: m,
-      day: d,
-      dateKey: `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
-    };
+    try {
+      const date = input instanceof Date ? input : input !== undefined ? new Date(input) : new Date();
+      if (!isNaN(date.getTime())) {
+        const y = date.getFullYear();
+        const m = date.getMonth();
+        const d = date.getDate();
+        result = {
+          year: y,
+          monthIndex: m,
+          day: d,
+          dateKey: `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+        };
+      }
+    } catch {
+      result = null;
+    }
   }
+
+  if (typeof input === 'string' && input) {
+    if (bangkokPartsCache.size > 4000) {
+      bangkokPartsCache.clear();
+    }
+    bangkokPartsCache.set(input, result);
+  }
+  return result;
 }
 
 export function getOrCreateDeviceId(): string {

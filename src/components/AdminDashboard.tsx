@@ -169,10 +169,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [managingPrivilegeTeacher, setManagingPrivilegeTeacher] = useState<TeacherPrivilegeAdminItem | null>(null);
 
   // Yearly Stats & Certificate Filter
-  const [selectedYear, setSelectedYear] = useState<string>('2026');
+  const [selectedYear, setSelectedYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
 
   // 1. Visitor logs filter by year and search
-  const [visitorYear, setVisitorYear] = useState<string>('2026');
+  const [visitorYear, setVisitorYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
   const [visitorSearchTerm, setVisitorSearchTerm] = useState('');
 
   // 2. Online Certificate Verification Filter & Target state
@@ -212,6 +212,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [banner2Preview, setBanner2Preview] = useState<string | null>(null);
   const [banner1Title, setBanner1Title] = useState('ภาพประชาสัมพันธ์ 1');
   const [banner2Title, setBanner2Title] = useState('ภาพประชาสัมพันธ์ 2 (พระราชดำรัสฯ ด้าน AI)');
+  const bannerTitlesDirtyRef = React.useRef(false);
   const [isSavingBanner, setIsSavingBanner] = useState(false);
   const [bannerStatusMsg, setBannerStatusMsg] = useState<string | null>(null);
   const banner1FileInputRef = React.useRef<HTMLInputElement>(null);
@@ -244,6 +245,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Copy & export feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [toastType, setToastType] = useState<'success' | 'error'>('success');
+
+  // Inline confirmation modal state (replaces window.confirm for reset/delete actions)
+  const [confirmResetModal, setConfirmResetModal] = useState<{
+    type: 'logo' | 'certLogo' | 'banners' | 'clearAdminMedia';
+    title: string;
+    description: string;
+  } | null>(null);
 
   // User Management & Email Audit Modals
   const [showUserManagementModal, setShowUserManagementModal] = useState(false);
@@ -280,26 +289,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const posterFileInputRef = React.useRef<HTMLInputElement>(null);
 
   // Show Toast
-  const showToast = (msg: string) => {
+  const showToast = (msg: string, type: 'success' | 'error' = 'success') => {
+    setToastType(type);
     setToastMsg(msg);
-    setTimeout(() => setToastMsg(null), 3000);
+    setTimeout(() => setToastMsg((cur) => (cur === msg ? null : cur)), 3500);
   };
 
-  // Direct delete user account handler
-  const handleDirectDeleteUser = async (targetEmail: string, targetName?: string) => {
+  // Direct delete user account trigger (opens confirmation modal)
+  const handleDirectDeleteUser = (targetEmail: string, targetName?: string) => {
     const norm = targetEmail.trim().toLowerCase();
     if (norm === SUPER_ADMIN_EMAIL.toLowerCase()) {
-      alert('ไม่อนุญาตให้ลบบัญชีผู้ดูแลระบบหลัก (Super Admin)');
+      showToast('ไม่อนุญาตให้ลบบัญชีผู้ดูแลระบบหลัก (Super Admin)', 'error');
       return;
     }
-
     const cleanName = getCleanRealName(targetName, targetEmail);
-    const confirmed = window.confirm(
-      `ยืนยันการลบบัญชีผู้ใช้: ${cleanName} (${norm})\n\nคำเตือน: การลบนี้จะนำข้อมูลโปรไฟล์ ประวัติการเข้าชม สื่อนวัตกรรม และการใช้ห้องเรียนของบัญชีนี้ออกจากฐานข้อมูลระบบทั้งหมดอย่างถาวร!`
-    );
+    setDirectDeleteTarget({ email: norm, name: cleanName });
+  };
 
-    if (!confirmed) return;
-
+  const handleConfirmDirectDeleteUser = async () => {
+    if (!directDeleteTarget) return;
+    const { email: norm } = directDeleteTarget;
     setIsDeletingUserDirect(true);
     try {
       const res = await deleteUserAccountCompletely(norm, SUPER_ADMIN_EMAIL, {
@@ -310,34 +319,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       });
 
       if (res.success) {
+        setDirectDeleteTarget(null);
         showToast(`ลบบัญชีผู้ใช้ ${norm} สำเร็จเรียบร้อยแล้ว`);
       } else {
-        alert(res.error || 'ไม่สามารถลบบัญชีผู้ใช้ได้');
+        setDirectDeleteTarget(null);
+        showToast(res.error || 'ไม่สามารถลบบัญชีผู้ใช้ได้', 'error');
       }
     } catch (err: any) {
-      alert('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'));
+      setDirectDeleteTarget(null);
+      showToast('เกิดข้อผิดพลาดในการลบบัญชี: ' + (err?.message || 'โปรดลองใหม่'), 'error');
     } finally {
       setIsDeletingUserDirect(false);
     }
   };
 
   // Delete ONLY Admin's (weerapong1625@acu.ac.th) own media submissions (never touches other users)
-  const handleClearAdminOwnMedia = async () => {
-    const confirmed = window.confirm(
-      `ยืนยันการลบสื่อทั้งหมดของบัญชี Admin (${SUPER_ADMIN_EMAIL}) ใช่หรือไม่?\n\nระบบจะลบเฉพาะสื่อของ Admin และรีเซ็ตสถานะการส่งสื่อของ ${SUPER_ADMIN_EMAIL} ให้เป็น "ยังไม่ได้ส่งสื่อ (0/5)" โดยจะไม่แก้ไขหรือลบข้อมูลของครูท่านอื่นเด็ดขาด`
-    );
-    if (!confirmed) return;
+  const handleClearAdminOwnMedia = () => {
+    setConfirmResetModal({
+      type: 'clearAdminMedia',
+      title: `ยืนยันการลบสื่อทั้งหมดของบัญชี Admin (${SUPER_ADMIN_EMAIL})`,
+      description: `ระบบจะลบเฉพาะสื่อของ Admin และรีเซ็ตสถานะการส่งสื่อของ ${SUPER_ADMIN_EMAIL} ให้เป็น "ยังไม่ได้ส่งสื่อ (0/5)" โดยจะไม่แก้ไขหรือลบข้อมูลของครูท่านอื่นเด็ดขาด`,
+    });
+  };
 
+  const executeClearAdminOwnMedia = async () => {
     setIsClearingAdminMedia(true);
     try {
       const res = await clearAdminOwnMedia(SUPER_ADMIN_EMAIL);
+      setConfirmResetModal(null);
       if (res.success) {
         showToast(`ลบสื่อของ Admin (${SUPER_ADMIN_EMAIL}) เรียบร้อยแล้ว (${res.deletedCount} รายการ)`);
       } else {
-        alert(res.error || 'ไม่สามารถลบสื่อของ Admin ได้');
+        showToast(res.error || 'ไม่สามารถลบสื่อของ Admin ได้', 'error');
       }
     } catch (err: any) {
-      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'โปรดลองใหม่'));
+      setConfirmResetModal(null);
+      showToast('เกิดข้อผิดพลาด: ' + (err?.message || 'โปรดลองใหม่'), 'error');
     } finally {
       setIsClearingAdminMedia(false);
     }
@@ -378,8 +395,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     const unsubBanner = subscribePopupBanner((cfg) => {
       if (cfg) {
         setBannerConfig(cfg);
-        if (cfg.title) setBanner1Title(cfg.title);
-        if (cfg.title2) setBanner2Title(cfg.title2);
+        if (!bannerTitlesDirtyRef.current) {
+          if (cfg.title) setBanner1Title(cfg.title);
+          if (cfg.title2) setBanner2Title(cfg.title2);
+        }
       }
     });
 
@@ -430,10 +449,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         }
       }
 
-      // Filter by Innovation Year
+      // Filter by Innovation Year (Bangkok calendar)
       if (innovationYear !== 'all') {
-        const d = new Date(item.submittedAt);
-        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        const parts = item.submittedAt ? getBangkokDateParts(item.submittedAt) : null;
+        const yr = parts ? String(parts.year) : String(CURRENT_CALENDAR_YEAR);
         if (yr !== innovationYear) return false;
       }
 
@@ -511,17 +530,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, [innovations, teacherSummaries, facilities]);
 
-  // Handle Logo Upload
+  // Handle Logo Upload (MAX_DIM 360 + WebP fallback if PNG exceeds 240KB)
   const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)', 'error');
+      return;
+    }
 
     const reader = new FileReader();
     reader.onload = (event) => {
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_DIM = 500;
+        const MAX_DIM = 360;
         let width = img.width;
         let height = img.height;
         if (width > height) {
@@ -540,8 +563,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL('image/png');
+          let compressed = canvas.toDataURL('image/png');
+          if (compressed.length > 240000) {
+            const webp = canvas.toDataURL('image/webp', 0.88);
+            compressed = webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/jpeg', 0.85);
+          }
           setLogoPreview(compressed);
+          setLogoStatusMsg(null);
         }
       };
       img.src = event.target?.result as string;
@@ -562,28 +590,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       showToast('บันทึกโลโก้โรงเรียนเรียบร้อย');
     } else {
       setLogoStatusMsg(res.message);
+      showToast(res.message, 'error');
     }
   };
 
-  const handleResetLogo = async () => {
-    if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นตราดั้งเดิม (ACU N.png) ใช่หรือไม่?')) return;
+  const handleResetLogo = () => {
+    setConfirmResetModal({
+      type: 'logo',
+      title: 'ยืนยันรีเซ็ตโลโก้โรงเรียน',
+      description: 'ยืนยันรีเซ็ตโลโก้กลับเป็นตราดั้งเดิม (ACU N.png) ใช่หรือไม่?',
+    });
+  };
+
+  const executeResetLogo = async () => {
     setIsSavingLogo(true);
     const res = await resetSchoolLogo(SUPER_ADMIN_EMAIL);
     setIsSavingLogo(false);
+    setConfirmResetModal(null);
     if (res.success) {
       setLogoPreview(null);
       setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
       showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
+    } else {
+      showToast(res.message || 'รีเซ็ตโลโก้ไม่สำเร็จ', 'error');
     }
   };
 
-  // Handle Certificate Logo Upload
+  // Handle Certificate Logo Upload (MAX_DIM 360 + WebP size guard)
   const handleCertLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
-      alert('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)');
+      showToast('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, SVG, WebP)', 'error');
       return;
     }
 
@@ -592,7 +631,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const img = new Image();
       img.onload = () => {
         const canvas = document.createElement('canvas');
-        const MAX_DIM = 500;
+        const MAX_DIM = 360;
         let width = img.width;
         let height = img.height;
 
@@ -613,7 +652,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, width, height);
-          const compressed = canvas.toDataURL('image/png');
+          let compressed = canvas.toDataURL('image/png');
+          if (compressed.length > 240000) {
+            const webp = canvas.toDataURL('image/webp', 0.88);
+            compressed = webp.startsWith('data:image/webp') ? webp : canvas.toDataURL('image/jpeg', 0.85);
+          }
           setCertLogoPreview(compressed);
           setCertLogoStatusMsg(null);
         }
@@ -636,20 +679,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
     } else {
       setCertLogoStatusMsg(res.message);
+      showToast(res.message, 'error');
     }
   };
 
-  const handleResetCertLogo = async () => {
-    if (!confirm('ยืนยันรีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพตราสัญลักษณ์โรงเรียนเริ่มต้น ใช่หรือไม่?')) return;
+  const handleResetCertLogo = () => {
+    setConfirmResetModal({
+      type: 'certLogo',
+      title: 'ยืนยันรีเซ็ตโลโก้บนเกียรติบัตร',
+      description: 'ยืนยันรีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพตราสัญลักษณ์โรงเรียนเริ่มต้น ใช่หรือไม่?',
+    });
+  };
+
+  const executeResetCertLogo = async () => {
     setIsSavingCertLogo(true);
     const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
     setIsSavingCertLogo(false);
+    setConfirmResetModal(null);
     if (res.success) {
       setCertLogoPreview(null);
       setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
       showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
     } else {
       setCertLogoStatusMsg(res.message);
+      showToast(res.message, 'error');
     }
   };
 
@@ -714,15 +767,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Filtered facilities list
   const filteredFacilities = useMemo(() => {
+    const q = facilitySearchTerm.trim().toLowerCase();
     return facilities.filter((fac) => {
-      // Filter by Facility Year
       if (facilityYear !== 'all') {
-        const d = new Date(fac.createdAt || fac.usageDateTime);
-        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        const parts = getBangkokDateParts(fac.createdAt || fac.usageDateTime);
+        const yr = parts ? String(parts.year) : String(CURRENT_CALENDAR_YEAR);
         if (yr !== facilityYear) return false;
       }
-      if (facilitySearchTerm.trim()) {
-        const q = facilitySearchTerm.toLowerCase();
+      if (q) {
         return (
           fac.teacherName.toLowerCase().includes(q) ||
           fac.subjectGroup.toLowerCase().includes(q) ||
@@ -742,7 +794,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     if (success) {
       showToast('คัดลอกตารางแล้ว! สามารถเปิด Google Sheets แล้วกด Ctrl+V (วาง) ได้ทันที');
     } else {
-      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็นไฟล์ CSV แทน');
+      showToast('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็นไฟล์ CSV แทน', 'error');
     }
   };
 
@@ -792,72 +844,79 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return counts;
   }, [loginLogs]);
 
-  // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี
+  // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี (Single O(N) pass)
   const certificateYearlyBreakdown = useMemo(() => {
-    const result: Record<string, { total: number; eligible: number }> = {};
-    ADVANCE_YEAR_OPTIONS.forEach((opt) => {
-      const yr = opt.yearNum;
-      const visitsByEmail: Record<string, number> = {};
-      loginLogs.forEach((log) => {
-        if (!log.email) return;
-        const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
-        if (parts && parts.year === yr) {
-          const em = log.email.toLowerCase().trim();
-          visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
-        }
-      });
-      if (yr === CURRENT_CALENDAR_YEAR) {
-        Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
-          const em = emKey.toLowerCase().trim();
-          if (!visitsByEmail[em] && (prof?.stats?.totalViews || 0) > 0) {
-            visitsByEmail[em] = prof.stats.totalViews;
-          }
-        });
+    const visitsByYearAndEmail = new Map<number, Record<string, number>>();
+    for (const log of loginLogs) {
+      if (!log.email) continue;
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      if (!parts) continue;
+      let yearMap = visitsByYearAndEmail.get(parts.year);
+      if (!yearMap) {
+        yearMap = {};
+        visitsByYearAndEmail.set(parts.year, yearMap);
       }
-      const eligible = Object.values(visitsByEmail).filter((v) => v >= 100).length;
-      result[opt.value] = {
-        total: Object.keys(visitsByEmail).length,
-        eligible,
-      };
-    });
+      const em = log.email.toLowerCase().trim();
+      yearMap[em] = (yearMap[em] || 0) + 1;
+    }
+
+    const currentYearMap = visitsByYearAndEmail.get(CURRENT_CALENDAR_YEAR) || {};
+    for (const [emKey, prof] of Object.entries(userProfilesMap)) {
+      const em = emKey.toLowerCase().trim();
+      if (!currentYearMap[em] && (prof?.stats?.totalViews || 0) > 0) {
+        currentYearMap[em] = prof.stats.totalViews;
+      }
+    }
+    visitsByYearAndEmail.set(CURRENT_CALENDAR_YEAR, currentYearMap);
+
+    const result: Record<string, { total: number; eligible: number }> = {};
+    for (const opt of ADVANCE_YEAR_OPTIONS) {
+      const yearMap = visitsByYearAndEmail.get(opt.yearNum) || {};
+      const counts = Object.values(yearMap);
+      let eligible = 0;
+      for (const c of counts) {
+        if (c >= 100) eligible++;
+      }
+      result[opt.value] = { total: counts.length, eligible };
+    }
     return result;
   }, [loginLogs, userProfilesMap]);
 
-  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
+  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี (Bangkok calendar)
   const innovationYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
-    innovations.forEach((item) => {
-      const d = new Date(item.submittedAt);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+    for (const item of innovations) {
+      const parts = item.submittedAt ? getBangkokDateParts(item.submittedAt) : null;
+      const yr = parts ? String(parts.year) : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
-    });
+    }
     return counts;
   }, [innovations]);
 
-  // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี
+  // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี (Bangkok calendar)
   const facilityYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
-    facilities.forEach((fac) => {
-      const d = new Date(fac.createdAt || fac.usageDateTime);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+    for (const fac of facilities) {
+      const parts = getBangkokDateParts(fac.createdAt || fac.usageDateTime);
+      const yr = parts ? String(parts.year) : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
-    });
+    }
     return counts;
   }, [facilities]);
 
-  // Compute certificate candidate users based on login logs and user profiles for selectedYear
+  // Compute certificate candidate users based on login logs and user profiles for selectedYear (O(1) Map lookups)
   const certificateCandidates = useMemo(() => {
     const yr = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
     const isCurrentSelectedYear = yr === CURRENT_CALENDAR_YEAR;
-    
-    // 1. Group login logs by email for the selectedYear (Bangkok calendar)
+
     const visitCountsByEmail: Record<string, { count: number; lastLogin: string; avatarUrl?: string; displayName?: string }> = {};
-    loginLogs.forEach((log) => {
-      if (!log.email) return;
+    for (const log of loginLogs) {
+      if (!log.email) continue;
       const email = log.email.toLowerCase().trim();
       const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
       if (parts && parts.year === yr) {
-        if (!visitCountsByEmail[email]) {
+        const cur = visitCountsByEmail[email];
+        if (!cur) {
           visitCountsByEmail[email] = {
             count: 1,
             lastLogin: log.loginTimestamp,
@@ -865,40 +924,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             displayName: log.displayName || '',
           };
         } else {
-          visitCountsByEmail[email].count++;
-          if (new Date(log.loginTimestamp) > new Date(visitCountsByEmail[email].lastLogin)) {
-            visitCountsByEmail[email].lastLogin = log.loginTimestamp;
-            if (log.avatarUrl) visitCountsByEmail[email].avatarUrl = log.avatarUrl;
+          cur.count++;
+          if (log.loginTimestamp > cur.lastLogin) {
+            cur.lastLogin = log.loginTimestamp;
+            if (log.avatarUrl) cur.avatarUrl = log.avatarUrl;
           }
         }
       }
-    });
+    }
 
-    // 2. Gather all unique emails from logs, profiles, teacher summaries, facilities, and privileges
+    const summaryByEmail = new Map<string, TeacherSummaryItem>();
+    for (const t of teacherSummaries) {
+      if (t.email) summaryByEmail.set(t.email.toLowerCase().trim(), t);
+    }
+    const privilegeByEmail = new Map<string, TeacherPrivilegeAdminItem>();
+    for (const p of privilegeSummaries) {
+      if (p.email) privilegeByEmail.set(p.email.toLowerCase().trim(), p);
+    }
+
     const allEmails = new Set<string>();
-    Object.keys(visitCountsByEmail).forEach((e) => allEmails.add(e));
-    Object.keys(userProfilesMap).forEach((e) => allEmails.add(e.toLowerCase().trim()));
-    teacherSummaries.forEach((t) => {
+    for (const e of Object.keys(visitCountsByEmail)) allEmails.add(e);
+    for (const e of Object.keys(userProfilesMap)) allEmails.add(e.toLowerCase().trim());
+    for (const t of teacherSummaries) {
       if (t.email) allEmails.add(t.email.toLowerCase().trim());
-    });
-    facilities.forEach((f) => {
+    }
+    for (const f of facilities) {
       if (f.userEmail) allEmails.add(f.userEmail.toLowerCase().trim());
-    });
-    privilegeSummaries.forEach((p) => {
+    }
+    for (const p of privilegeSummaries) {
       if (p.email) allEmails.add(p.email.toLowerCase().trim());
-    });
+    }
 
-    // 3. Construct candidate list
     const candidates = Array.from(allEmails).map((email) => {
       const profile = userProfilesMap[email];
-      const summary = teacherSummaries.find((t) => t.email?.toLowerCase().trim() === email);
-      const priv = privilegeSummaries.find((p) => p.email?.toLowerCase().trim() === email);
+      const summary = summaryByEmail.get(email);
+      const priv = privilegeByEmail.get(email);
       const visitData = visitCountsByEmail[email] || { count: 0, lastLogin: '' };
-      
-      // Determine real full name (เฉพาะชื่อ-นามสกุลจริงเท่านั้น)
+
       const rawName = profile?.fullName || summary?.teacherName || priv?.name || profile?.displayName || visitData.displayName || '';
       const realName = getCleanRealName(rawName, email);
-      
+
       const profileViews = profile?.stats?.totalViews || 0;
       const visits = visitData.count > 0
         ? visitData.count
@@ -919,7 +984,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       };
     });
 
-    // Sort: eligible first, then by visit count descending
     return candidates.sort((a, b) => {
       if (a.isEligible && !b.isEligible) return -1;
       if (!a.isEligible && b.isEligible) return 1;
@@ -989,7 +1053,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     if (ok) {
       showToast('คัดลอกรายชื่อสำหรับ Google Sheets เรียบร้อยแล้ว (กด Ctrl+V วางได้ทันที)');
     } else {
-      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+      showToast('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน', 'error');
     }
   };
 
@@ -1052,85 +1116,87 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     if (ok) {
       showToast('คัดลอกข้อมูลสิทธิพิเศษเรียบร้อยแล้ว! วางลง Google Sheets ได้ทันที (Ctrl+V)');
     } else {
-      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+      showToast('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน', 'error');
     }
   };
 
-  // Yearly Stats calculation
+  // Yearly Stats calculation (Single O(N) 12-bucket pass using Bangkok timezone)
   const yearlyStats = useMemo(() => {
-    const targetYear = parseInt(selectedYear) || 2026;
+    const targetYear = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
 
-    const yearInnovations = innovations.filter(i => {
-      const d = new Date(i.submittedAt);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
-    });
+    const visitBuckets = new Array<number>(12).fill(0);
+    const mediaBuckets = new Array<number>(12).fill(0);
+    const facBuckets = new Array<number>(12).fill(0);
+    const uniqueVisitorEmailsSet = new Set<string>();
+    const allSystemAccounts = new Set<string>();
 
-    const yearFacilities = facilities.filter(f => {
-      const d = new Date(f.createdAt || f.usageDateTime);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
-    });
+    let totalVisits = 0;
+    let totalMedia = 0;
+    let totalFacilities = 0;
 
-    const yearLogs = loginLogs.filter(l => {
+    for (const l of loginLogs) {
+      if (l.email) allSystemAccounts.add(l.email.trim().toLowerCase());
       const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
-      return Boolean(parts && parts.year === targetYear);
-    });
+      if (parts && parts.year === targetYear) {
+        totalVisits++;
+        if (l.email) uniqueVisitorEmailsSet.add(l.email.trim().toLowerCase());
+        if (parts.monthIndex >= 0 && parts.monthIndex < 12) {
+          visitBuckets[parts.monthIndex]++;
+        }
+      }
+    }
 
-    const uniqueVisitorEmails = new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size;
+    for (const i of innovations) {
+      const parts = i.submittedAt ? getBangkokDateParts(i.submittedAt) : null;
+      if (parts && parts.year === targetYear) {
+        totalMedia++;
+        if (parts.monthIndex >= 0 && parts.monthIndex < 12) {
+          mediaBuckets[parts.monthIndex]++;
+        }
+      }
+    }
+
+    for (const f of facilities) {
+      if (f.userEmail) allSystemAccounts.add(f.userEmail.trim().toLowerCase());
+      const parts = getBangkokDateParts(f.createdAt || f.usageDateTime);
+      if (parts && parts.year === targetYear) {
+        totalFacilities++;
+        if (parts.monthIndex >= 0 && parts.monthIndex < 12) {
+          facBuckets[parts.monthIndex]++;
+        }
+      }
+    }
+
+    for (const e of Object.keys(userProfilesMap)) {
+      if (e) allSystemAccounts.add(e.trim().toLowerCase());
+    }
+    for (const t of teacherSummaries) {
+      if (t.email) allSystemAccounts.add(t.email.trim().toLowerCase());
+    }
+    for (const p of privilegeSummaries) {
+      if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
+    }
 
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
-    const monthlyBreakdown = monthNames.map((name, idx) => {
-      const visits = yearLogs.filter(l => {
-        const parts = getBangkokDateParts(l.loginTimestamp);
-        return parts ? parts.monthIndex === idx : false;
-      }).length;
-      const mediaCount = yearInnovations.filter(i => {
-        const d = new Date(i.submittedAt);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
-      }).length;
-      const facCount = yearFacilities.filter(f => {
-        const d = new Date(f.createdAt || f.usageDateTime);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
-      }).length;
-
-      return {
-        monthName: name,
-        monthIndex: idx + 1,
-        visits,
-        mediaCount,
-        facCount,
-      };
-    });
-
-    // Compute total unique registered user accounts across system
-    const allSystemAccounts = new Set<string>();
-    loginLogs.forEach(l => {
-      if (l.email) allSystemAccounts.add(l.email.trim().toLowerCase());
-    });
-    Object.keys(userProfilesMap).forEach(e => {
-      if (e) allSystemAccounts.add(e.trim().toLowerCase());
-    });
-    teacherSummaries.forEach(t => {
-      if (t.email) allSystemAccounts.add(t.email.trim().toLowerCase());
-    });
-    facilities.forEach(f => {
-      if (f.userEmail) allSystemAccounts.add(f.userEmail.trim().toLowerCase());
-    });
-    privilegeSummaries.forEach(p => {
-      if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
-    });
-    const totalAccountsCount = allSystemAccounts.size;
+    const monthlyBreakdown = monthNames.map((name, idx) => ({
+      monthName: name,
+      monthIndex: idx + 1,
+      visits: visitBuckets[idx],
+      mediaCount: mediaBuckets[idx],
+      facCount: facBuckets[idx],
+    }));
 
     return {
       targetYear,
-      totalVisits: yearLogs.length,
-      uniqueVisitors: uniqueVisitorEmails,
-      totalAccounts: totalAccountsCount,
-      totalMedia: yearInnovations.length,
-      totalFacilities: yearFacilities.length,
+      totalVisits,
+      uniqueVisitors: uniqueVisitorEmailsSet.size,
+      totalAccounts: allSystemAccounts.size,
+      totalMedia,
+      totalFacilities,
       monthlyBreakdown,
     };
   }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
@@ -1161,7 +1227,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       showToast('บันทึกการแก้ไขข้อมูลสื่อเรียบร้อยแล้ว');
       setEditingInnovation(null);
     } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ');
+      showToast(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ', 'error');
     }
   };
 
@@ -1176,7 +1242,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setDeletingInnovationId(null);
       setDeletingInnovationTitle('');
     } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
+      showToast(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ', 'error');
     }
   };
 
@@ -1202,7 +1268,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       showToast('บันทึกการแก้ไขข้อมูลแหล่งเรียนรู้เรียบร้อย');
       setEditingFacility(null);
     } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
+      showToast(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้', 'error');
     }
   };
 
@@ -1217,7 +1283,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setDeletingFacilityId(null);
       setDeletingFacilityTitle('');
     } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
+      showToast(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้', 'error');
     }
   };
 
@@ -1290,17 +1356,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
     setIsSavingBanner(false);
     if (success) {
+      bannerTitlesDirtyRef.current = false;
       setBannerStatusMsg('บันทึกภาพป๊อปอัปประชาสัมพันธ์หน้าแรกสำเร็จ อัปเดตทันที');
       showToast('บันทึกภาพป๊อปอัปหน้าแรกเรียบร้อย');
       setBanner1Preview(null);
       setBanner2Preview(null);
     } else {
       setBannerStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป');
+      showToast('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป', 'error');
     }
   };
 
-  const handleResetBanners = async () => {
-    if (!confirm('ต้องการรีเซ็ตภาพป๊อปอัปประชาสัมพันธ์กลับเป็นค่าเริ่มต้นใช่หรือไม่?')) return;
+  const handleResetBanners = () => {
+    setConfirmResetModal({
+      type: 'banners',
+      title: 'ยืนยันรีเซ็ตภาพป๊อปอัปประชาสัมพันธ์',
+      description: 'ต้องการรีเซ็ตภาพป๊อปอัปประชาสัมพันธ์ทั้ง 2 รูปกลับเป็นค่าเริ่มต้นใช่หรือไม่?',
+    });
+  };
+
+  const executeResetBanners = async () => {
     setIsSavingBanner(true);
     const success = await savePopupBannerConfig({
       bannerImageUrl: DEFAULT_BANNER_IMAGE,
@@ -1310,7 +1385,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       updatedBy: userEmail,
     });
     setIsSavingBanner(false);
+    setConfirmResetModal(null);
     if (success) {
+      bannerTitlesDirtyRef.current = false;
       setBanner1Preview(null);
       setBanner2Preview(null);
       setBanner1Title('พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี');
@@ -1327,7 +1404,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     if (ok) {
       showToast('คัดลอกสถิติผู้เข้าชมสำเร็จ! วางลง Google Sheets ได้ทันที (Ctrl+V)');
     } else {
-      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+      showToast('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน', 'error');
     }
   };
 
@@ -1353,10 +1430,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         setShowResetConfirmModal(false);
         showToast(`รีเซ็ตสถิติการเข้าชมของ Admin (${SUPER_ADMIN_EMAIL}) เป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
       } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        showToast(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต', 'error');
       }
     } catch (err: any) {
-      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+      showToast('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'), 'error');
     } finally {
       setIsResettingLogs(false);
     }
@@ -1382,10 +1459,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         setShowResetConfirmModal(false);
         showToast(`รีเซ็ตสถิติผู้เข้าชมทุกคนในระบบเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
       } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+        showToast(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต', 'error');
       }
     } catch (err: any) {
-      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+      showToast('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'), 'error');
     } finally {
       setIsResettingLogs(false);
     }
@@ -1439,8 +1516,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       {/* Toast Notification */}
       {toastMsg && (
         <div className="fixed top-5 right-5 z-[200] animate-in fade-in slide-in-from-top-3 duration-200">
-          <div className="px-4 py-3 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 text-white text-xs font-semibold shadow-2xl border border-white/20 flex items-center gap-2.5">
-            <CheckCircle2 className="w-4 h-4 flex-shrink-0" />
+          <div className={`px-4 py-3 rounded-2xl text-white text-xs font-semibold shadow-2xl border border-white/20 flex items-center gap-2.5 ${
+            toastType === 'error'
+              ? 'bg-gradient-to-r from-rose-600 to-red-600'
+              : 'bg-gradient-to-r from-emerald-600 to-teal-600'
+          }`}>
+            {toastType === 'error' ? <AlertCircle className="w-4 h-4 flex-shrink-0" /> : <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
             <span>{toastMsg}</span>
           </div>
         </div>
@@ -1510,16 +1591,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               <span>ตรวจสอบอีเมล</span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => window.open(googleSheetsUrl || DEFAULT_NEW_SHEET_URL, '_blank')}
+            <a
+              href={googleSheetsUrl || DEFAULT_NEW_SHEET_URL}
+              target="_blank"
+              rel="noopener noreferrer"
               className="px-3.5 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md shadow-emerald-950/40 transition-all cursor-pointer"
               title="เปิด Google Sheets เปรดชีตใหม่"
             >
               <FileSpreadsheet className="w-3.5 h-3.5" />
               <span>เปิด Google Sheets</span>
               <ExternalLink className="w-3 h-3 opacity-70" />
-            </button>
+            </a>
 
             <button
               type="button"
@@ -4317,149 +4399,156 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                   <div>
                     <label className="block text-[11px] text-slate-400 mb-1">ข้อความหัวข้อภาพที่ 1</label>
-                    <input
-                      type="text"
-                      value={banner1Title}
-                      onChange={(e) => setBanner1Title(e.target.value)}
-                      placeholder="เช่น ประกาศ/ภาพประชาสัมพันธ์ 1"
-                      className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
-                    />
-                  </div>
-                </div>
-
-                {/* Banner 2 */}
-                <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700/60 space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
-                      <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[11px] font-bold">2</span>
-                      <span>ภาพป๊อปอัปที่ 2 (พระราชดำรัสฯ ด้าน AI)</span>
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 text-[10px] font-medium">
-                      {banner2Preview ? 'เลือกภาพใหม่แล้ว' : 'ภาพปัจจุบัน'}
-                    </span>
-                  </div>
-
-                  {/* Preview Banner 2 */}
-                  <div
-                    onClick={() => {
-                      const img = banner2Preview || bannerConfig.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2;
-                      setPreviewModalImg({ url: img, title: banner2Title || 'ภาพป๊อปอัปที่ 2' });
-                    }}
-                    className="w-full h-44 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden cursor-pointer group relative"
-                  >
-                    <img
-                      src={banner2Preview || bannerConfig.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2}
-                      alt="Banner 2 Preview"
-                      className="w-full h-full object-cover group-hover:scale-105 transition-transform"
-                    />
-                    <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity">
-                      <Eye className="w-5 h-5" />
+                      <input
+                        type="text"
+                        value={banner1Title}
+                        onChange={(e) => {
+                          bannerTitlesDirtyRef.current = true;
+                          setBanner1Title(e.target.value);
+                        }}
+                        placeholder="เช่น ประกาศ/ภาพประชาสัมพันธ์ 1"
+                        className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-amber-500"
+                      />
                     </div>
                   </div>
 
-                  <input
-                    ref={banner2FileInputRef}
-                    type="file"
-                    accept="image/*"
-                    onChange={handleBanner2FileChange}
-                    className="hidden"
-                  />
+                  {/* Banner 2 */}
+                  <div className="p-5 rounded-2xl bg-slate-800/50 border border-slate-700/60 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-indigo-300 flex items-center gap-1.5">
+                        <span className="w-5 h-5 rounded-full bg-indigo-500/20 text-indigo-300 flex items-center justify-center text-[11px] font-bold">2</span>
+                        <span>ภาพป๊อปอัปที่ 2 (พระราชดำรัสฯ ด้าน AI)</span>
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 text-[10px] font-medium">
+                        {banner2Preview ? 'เลือกภาพใหม่แล้ว' : 'ภาพปัจจุบัน'}
+                      </span>
+                    </div>
+
+                    {/* Preview Banner 2 */}
+                    <div
+                      onClick={() => {
+                        const img = banner2Preview || bannerConfig.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2;
+                        setPreviewModalImg({ url: img, title: banner2Title || 'ภาพป๊อปอัปที่ 2' });
+                      }}
+                      className="w-full h-44 rounded-xl bg-slate-900 border border-slate-700 flex items-center justify-center overflow-hidden cursor-pointer group relative"
+                    >
+                      <img
+                        src={banner2Preview || bannerConfig.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2}
+                        alt="Banner 2 Preview"
+                        className="w-full h-full object-cover group-hover:scale-105 transition-transform"
+                      />
+                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white transition-opacity">
+                        <Eye className="w-5 h-5" />
+                      </div>
+                    </div>
+
+                    <input
+                      ref={banner2FileInputRef}
+                      type="file"
+                      accept="image/*"
+                      onChange={handleBanner2FileChange}
+                      className="hidden"
+                    />
+
+                    <button
+                      type="button"
+                      onClick={() => banner2FileInputRef.current?.click()}
+                      className="w-full py-2 px-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <UploadCloud className="w-4 h-4" />
+                      <span>เปลี่ยนภาพป๊อปอัปที่ 2</span>
+                    </button>
+
+                    <div>
+                      <label className="block text-[11px] text-slate-400 mb-1">ข้อความหัวข้อภาพที่ 2</label>
+                      <input
+                        type="text"
+                        value={banner2Title}
+                        onChange={(e) => {
+                          bannerTitlesDirtyRef.current = true;
+                          setBanner2Title(e.target.value);
+                        }}
+                        placeholder="เช่น ประกาศ/ภาพประชาสัมพันธ์ 2 (พระราชดำรัสฯ ด้าน AI)"
+                        className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Banner Actions */}
+                <div className="mt-6 pt-4 border-t border-slate-800 flex items-center gap-3 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleSaveBanners}
+                    disabled={isSavingBanner}
+                    className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 transition-all cursor-pointer disabled:opacity-50"
+                  >
+                    <Check className="w-4 h-4" />
+                    <span>{isSavingBanner ? 'กำลังบันทึกป๊อปอัป...' : 'บันทึกการตั้งค่าภาพป๊อปอัปทั้ง 2 รูป'}</span>
+                  </button>
 
                   <button
                     type="button"
-                    onClick={() => banner2FileInputRef.current?.click()}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-slate-200 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    onClick={handleResetBanners}
+                    className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
                   >
-                    <UploadCloud className="w-4 h-4" />
-                    <span>เปลี่ยนภาพป๊อปอัปที่ 2</span>
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>รีเซ็ตกลับเป็นค่าเริ่มต้น</span>
                   </button>
 
+                  {bannerStatusMsg && (
+                    <div className="px-3 py-2 rounded-xl bg-emerald-500/20 text-emerald-300 text-xs flex items-center gap-1.5 border border-emerald-500/30">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      <span>{bannerStatusMsg}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Section 4: ลิงก์เชื่อมโยง Google Sheets (Google Sheets Integration Config) */}
+              <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl">
+                <div className="flex items-center gap-3 pb-4 border-b border-slate-800 mb-6">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-400/30 text-emerald-300 flex items-center justify-center">
+                    <FileSpreadsheet className="w-5 h-5" />
+                  </div>
                   <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">ข้อความหัวข้อภาพที่ 2</label>
-                    <input
-                      type="text"
-                      value={banner2Title}
-                      onChange={(e) => setBanner2Title(e.target.value)}
-                      placeholder="เช่น ประกาศ/ภาพประชาสัมพันธ์ 2 (พระราชดำรัสฯ ด้าน AI)"
-                      className="w-full px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
-                    />
+                    <h3 className="text-base font-bold text-white">ตั้งค่าและเชื่อมโยง Google Sheets (เปรดชีต)</h3>
+                    <p className="text-xs text-slate-400">กำหนดหรือบันทึกลิงก์ Google Spreadsheet กลางของโรงเรียน เพื่อให้ผู้ดูแลระบบเปิดใช้งานและซิงค์ข้อมูลได้ตลอดเวลา</p>
                   </div>
                 </div>
-              </div>
 
-              {/* Banner Actions */}
-              <div className="mt-6 pt-4 border-t border-slate-800 flex items-center gap-3 flex-wrap">
-                <button
-                  type="button"
-                  onClick={handleSaveBanners}
-                  disabled={isSavingBanner}
-                  className="px-5 py-2.5 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg shadow-amber-950/40 transition-all cursor-pointer disabled:opacity-50"
-                >
-                  <Check className="w-4 h-4" />
-                  <span>{isSavingBanner ? 'กำลังบันทึกป๊อปอัป...' : 'บันทึกการตั้งค่าภาพป๊อปอัปทั้ง 2 รูป'}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleResetBanners}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                  <span>รีเซ็ตกลับเป็นค่าเริ่มต้น</span>
-                </button>
-
-                {bannerStatusMsg && (
-                  <div className="px-3 py-2 rounded-xl bg-emerald-500/20 text-emerald-300 text-xs flex items-center gap-1.5 border border-emerald-500/30">
-                    <CheckCircle2 className="w-3.5 h-3.5" />
-                    <span>{bannerStatusMsg}</span>
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1.5">
+                      URL ของ Google Spreadsheet (เปรดชีต)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="url"
+                        value={googleSheetsUrl}
+                        onChange={(e) => setGoogleSheetsUrl(e.target.value)}
+                        placeholder="https://docs.google.com/spreadsheets/d/..."
+                        className="flex-grow px-3.5 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleSaveSheetUrl}
+                        disabled={isSavingSheetUrl}
+                        className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors disabled:opacity-50 cursor-pointer"
+                      >
+                        {isSavingSheetUrl ? 'กำลังบันทึก...' : 'บันทึกลิงก์'}
+                      </button>
+                      <a
+                        href={googleSheetsUrl || DEFAULT_NEW_SHEET_URL}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                      >
+                        <span>เปิดชีต</span>
+                        <ExternalLink className="w-3.5 h-3.5" />
+                      </a>
+                    </div>
                   </div>
-                )}
-              </div>
-            </div>
-
-            {/* Section 4: ลิงก์เชื่อมโยง Google Sheets (Google Sheets Integration Config) */}
-            <div className="p-6 rounded-3xl bg-slate-900 border border-slate-800 shadow-xl">
-              <div className="flex items-center gap-3 pb-4 border-b border-slate-800 mb-6">
-                <div className="w-10 h-10 rounded-xl bg-emerald-600/20 border border-emerald-400/30 text-emerald-300 flex items-center justify-center">
-                  <FileSpreadsheet className="w-5 h-5" />
-                </div>
-                <div>
-                  <h3 className="text-base font-bold text-white">ตั้งค่าและเชื่อมโยง Google Sheets (เปรดชีต)</h3>
-                  <p className="text-xs text-slate-400">กำหนดหรือบันทึกลิงก์ Google Spreadsheet กลางของโรงเรียน เพื่อให้ผู้ดูแลระบบเปิดใช้งานและซิงค์ข้อมูลได้ตลอดเวลา</p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-xs font-semibold text-slate-300 mb-1.5">
-                    URL ของ Google Spreadsheet (เปรดชีต)
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="url"
-                      value={googleSheetsUrl}
-                      onChange={(e) => setGoogleSheetsUrl(e.target.value)}
-                      placeholder="https://docs.google.com/spreadsheets/d/..."
-                      className="flex-grow px-3.5 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-emerald-500"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleSaveSheetUrl}
-                      disabled={isSavingSheetUrl}
-                      className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold transition-colors disabled:opacity-50 cursor-pointer"
-                    >
-                      {isSavingSheetUrl ? 'กำลังบันทึก...' : 'บันทึกลิงก์'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => window.open(googleSheetsUrl || DEFAULT_NEW_SHEET_URL, '_blank')}
-                      className="px-3.5 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
-                    >
-                      <span>เปิดชีต</span>
-                      <ExternalLink className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
 
                 {sheetUrlMsg && (
                   <div className="text-xs text-emerald-400 flex items-center gap-1.5">
@@ -5057,6 +5146,102 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             setManagingPrivilegeTeacher(null);
           }}
         />
+      )}
+
+      {/* Direct Delete User Confirmation Modal */}
+      {directDeleteTarget && (
+        <div
+          className="fixed inset-0 z-[175] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => !isDeletingUserDirect && setDirectDeleteTarget(null)}
+        >
+          <div
+            className="relative w-full max-w-md bg-slate-900 border border-rose-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center justify-center flex-shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">ยืนยันการลบบัญชีผู้ใช้</h3>
+                <p className="text-xs text-slate-400">{directDeleteTarget.name} ({directDeleteTarget.email})</p>
+              </div>
+            </div>
+            <p className="text-xs text-rose-200/90 bg-rose-950/40 p-3.5 rounded-2xl border border-rose-500/30 leading-relaxed">
+              คำเตือน: การลบนี้จะนำข้อมูลโปรไฟล์ ประวัติการเข้าชม สื่อนวัตกรรม และการใช้ห้องเรียนของบัญชีนี้ออกจากฐานข้อมูลระบบทั้งหมดอย่างถาวร
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeletingUserDirect}
+                onClick={() => setDirectDeleteTarget(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingUserDirect}
+                onClick={handleConfirmDirectDeleteUser}
+                className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
+              >
+                {isDeletingUserDirect ? 'กำลังลบบัญชี...' : 'ยืนยันลบบัญชีถาวร'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Generic Reset / Clear Admin Media Confirmation Modal */}
+      {confirmResetModal && (
+        <div
+          className="fixed inset-0 z-[175] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => {
+            if (!isSavingLogo && !isSavingCertLogo && !isSavingBanner && !isClearingAdminMedia) {
+              setConfirmResetModal(null);
+            }
+          }}
+        >
+          <div
+            className="relative w-full max-w-md bg-slate-900 border border-amber-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center justify-center flex-shrink-0">
+                <RotateCcw className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">{confirmResetModal.title}</h3>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300 bg-slate-800/60 p-3.5 rounded-2xl border border-slate-700/70 leading-relaxed">
+              {confirmResetModal.description}
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isSavingLogo || isSavingCertLogo || isSavingBanner || isClearingAdminMedia}
+                onClick={() => setConfirmResetModal(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium cursor-pointer"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                disabled={isSavingLogo || isSavingCertLogo || isSavingBanner || isClearingAdminMedia}
+                onClick={() => {
+                  if (confirmResetModal.type === 'logo') executeResetLogo();
+                  else if (confirmResetModal.type === 'certLogo') executeResetCertLogo();
+                  else if (confirmResetModal.type === 'banners') executeResetBanners();
+                  else if (confirmResetModal.type === 'clearAdminMedia') executeClearAdminOwnMedia();
+                }}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-bold cursor-pointer"
+              >
+                ยืนยันดำเนินการ
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Admin View Full User Profile Modal (สามารถเข้าดูโปรไฟล์และรูปภาพของผู้ใช้งานทุกคนได้) */}

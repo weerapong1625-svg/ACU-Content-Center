@@ -241,6 +241,11 @@ export function subscribeFullUserProfile(
   email: string,
   onUpdate: (profile: FullUserProfile) => void
 ): () => void {
+  const initialCached = getCachedUserProfile(email);
+  if (initialCached) {
+    onUpdate(initialCached);
+  }
+
   try {
     const safeDocId = getSafeDocId(email);
     const profileRef = doc(db, 'user_profiles', safeDocId);
@@ -444,6 +449,15 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
     praises: profile.praises || DEFAULT_INITIAL_PRAISES,
     updatedAt: new Date().toISOString(),
   };
+
+  // Update multiplexed shared map in memory if active
+  if (sharedAllProfilesMap) {
+    sharedAllProfilesMap = {
+      ...sharedAllProfilesMap,
+      [profile.email.trim().toLowerCase()]: sanitizedProfile,
+    };
+    broadcastAllProfiles(sharedAllProfilesMap);
+  }
 
   // Sync current session display name if saving active user profile
   if (typeof window !== 'undefined') {
@@ -703,68 +717,128 @@ export async function resetUserProfileVisitStats(
   }
 }
 
+// Multiplexed shared state for all user profiles (prevents redundant Firestore listeners)
+let sharedAllProfilesMap: Record<string, FullUserProfile> | null = null;
+const allProfilesListeners = new Set<(profilesMap: Record<string, FullUserProfile>) => void>();
+let unsubSharedProfilesFs: (() => void) | null = null;
+
+function broadcastAllProfiles(map: Record<string, FullUserProfile>): void {
+  sharedAllProfilesMap = map;
+  allProfilesListeners.forEach((cb) => {
+    try {
+      cb(map);
+    } catch (e) {
+      console.warn('AllProfiles listener error:', e);
+    }
+  });
+}
+
 /**
  * Subscribe to all user profiles in Firestore for Admin Dashboard and Certificate verification
+ * Multiplexed with 0ms instant RAM/localStorage cache emission.
  */
 export function subscribeAllUserProfiles(
   callback: (profilesMap: Record<string, FullUserProfile>) => void
 ): () => void {
-  // Emit local cached profiles immediately
-  const initialLocal = getAllLocalUserProfilesMap();
-  if (Object.keys(initialLocal).length > 0) {
-    callback(initialLocal);
+  allProfilesListeners.add(callback);
+
+  // Emit RAM or local cached profiles immediately
+  const initialMap = sharedAllProfilesMap || getAllLocalUserProfilesMap();
+  if (Object.keys(initialMap).length > 0) {
+    callback(initialMap);
+  } else {
+    callback({});
   }
 
-  try {
-    const colRef = collection(db, 'user_profiles');
-    return onSnapshot(
-      colRef,
-      (snapshot) => {
-        const deletedEmails = getDeletedUserEmails();
-        const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
-        snapshot.forEach((docSnap) => {
-          const d = docSnap.data();
-          if (d.email) {
-            const normEmail = d.email.toLowerCase().trim();
-            if (deletedEmails.has(normEmail)) {
-              return; // skip deleted user
-            }
-            map[normEmail] = {
-              email: d.email,
-              fullName: d.fullName || d.displayName || d.email.split('@')[0],
-              nickname: d.nickname || '',
-              school: d.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-              displayName: d.displayName || d.fullName || d.email.split('@')[0],
-              avatarUrl: d.avatarUrl || '',
-              role: d.role || 'ครูผู้สอน',
-              innovations: sanitizeInnovations(d.innovations),
-              stats: d.stats || {
-                totalViews: 0,
-                uniqueVisitors: 0,
-                points: 0,
-                averageRating: 0,
-                totalRatings: 0,
-              },
-              praises: d.praises || [],
-              updatedAt: d.updatedAt,
-            };
-          }
-        });
-        callback(map);
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-        }
-        console.warn('Realtime user profiles subscription fallback (quota/network):', err);
-        callback(getAllLocalUserProfilesMap());
-      }
-    );
-  } catch (err) {
-    console.warn('Error subscribing to all user profiles:', err);
-    callback(getAllLocalUserProfilesMap());
-    return () => {};
+  const handleLocalChange = () => {
+    const merged = { ...getAllLocalUserProfilesMap(), ...(sharedAllProfilesMap || {}) };
+    callback(merged);
+  };
+
+  const handleUserDeleted = (ev: Event) => {
+    const detail = (ev as CustomEvent)?.detail;
+    const deletedEmail = detail?.email ? String(detail.email).toLowerCase().trim() : '';
+    if (deletedEmail && sharedAllProfilesMap && sharedAllProfilesMap[deletedEmail]) {
+      const copy = { ...sharedAllProfilesMap };
+      delete copy[deletedEmail];
+      broadcastAllProfiles(copy);
+    } else {
+      handleLocalChange();
+    }
+  };
+
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_user_profiles_changed', handleLocalChange);
+    window.addEventListener('acu_profile_updated', handleLocalChange);
+    window.addEventListener('acu_user_deleted', handleUserDeleted);
   }
+
+  if (!unsubSharedProfilesFs) {
+    try {
+      const colRef = collection(db, 'user_profiles');
+      unsubSharedProfilesFs = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const deletedEmails = getDeletedUserEmails();
+          const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
+          snapshot.forEach((docSnap) => {
+            const d = docSnap.data();
+            if (d.email) {
+              const normEmail = d.email.toLowerCase().trim();
+              if (deletedEmails.has(normEmail)) {
+                return; // skip deleted user
+              }
+              map[normEmail] = {
+                email: d.email,
+                fullName: d.fullName || d.displayName || d.email.split('@')[0],
+                nickname: d.nickname || '',
+                school: d.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+                displayName: d.displayName || d.fullName || d.email.split('@')[0],
+                avatarUrl: d.avatarUrl || '',
+                role: d.role || 'ครูผู้สอน',
+                innovations: sanitizeInnovations(d.innovations),
+                stats: d.stats || {
+                  totalViews: 0,
+                  uniqueVisitors: 0,
+                  points: 0,
+                  averageRating: 0,
+                  totalRatings: 0,
+                },
+                praises: d.praises || [],
+                updatedAt: d.updatedAt,
+              };
+            }
+          });
+          broadcastAllProfiles(map);
+        },
+        (err) => {
+          if (isQuotaExceededError(err)) {
+            notifyQuotaExceeded();
+          }
+          console.warn('Realtime user profiles subscription fallback (quota/network):', err);
+          broadcastAllProfiles(sharedAllProfilesMap || getAllLocalUserProfilesMap());
+        }
+      );
+    } catch (err) {
+      console.warn('Error subscribing to all user profiles:', err);
+      broadcastAllProfiles(sharedAllProfilesMap || getAllLocalUserProfilesMap());
+    }
+  }
+
+  return () => {
+    allProfilesListeners.delete(callback);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_user_profiles_changed', handleLocalChange);
+      window.removeEventListener('acu_profile_updated', handleLocalChange);
+      window.removeEventListener('acu_user_deleted', handleUserDeleted);
+    }
+    if (allProfilesListeners.size === 0 && unsubSharedProfilesFs) {
+      try {
+        unsubSharedProfilesFs();
+      } catch {}
+      unsubSharedProfilesFs = null;
+    }
+  };
 }
 
 /**
