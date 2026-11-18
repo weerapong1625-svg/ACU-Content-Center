@@ -19,7 +19,12 @@ import {
 } from './hooks/useInactivityTimeout';
 import { signOut } from 'firebase/auth';
 import { auth } from './firebase';
-import { logUserLogin } from './services/auditService';
+import {
+  getBangkokDateParts,
+  logUserLogin,
+  subscribeAllLoginLogs,
+  flushPendingLoginLogs,
+} from './services/auditService';
 import { getCachedUserProfile } from './services/userProfileService';
 
 export default function App() {
@@ -64,16 +69,45 @@ export default function App() {
     }
   });
 
-  // Unified single-point visit recorder to strictly guarantee 1 visit = 1 count
-  const recordLoginVisit = useCallback((email: string, method: string) => {
+  // Keep shared login_logs listener warm & flush pending outbox whenever user is active
+  React.useEffect(() => {
+    if (!loggedInUser) return;
+    flushPendingLoginLogs().catch(() => {});
+    const unsub = subscribeAllLoginLogs(() => {});
+    return () => unsub();
+  }, [loggedInUser]);
+
+  // Unified single-point visit recorder to guarantee consistent logging across devices
+  const recordLoginVisit = useCallback((email: string, method: string, isExplicitLogin = false) => {
     const norm = email.toLowerCase().trim();
     if (!norm) return;
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = getBangkokDateParts()?.dateKey || new Date().toISOString().split('T')[0];
     const sessionKey = `acu_visit_logged_${norm}_${todayStr}`;
-    
+    const deviceStampKey = `acu_last_auto_visit_${norm}`;
+    const now = Date.now();
+
     if (typeof window !== 'undefined') {
-      if (sessionStorage.getItem(sessionKey)) {
-        return; // Already logged today in this session
+      if (!isExplicitLogin) {
+        if (sessionStorage.getItem(sessionKey)) {
+          return; // Already logged today in this tab session
+        }
+        try {
+          const lastAutoMs = Number(localStorage.getItem(deviceStampKey) || 0);
+          // Prevent simultaneous multi-tab opening on the same device from double-counting
+          if (lastAutoMs > 0 && now - lastAutoMs < 60000) {
+            sessionStorage.setItem(sessionKey, '1');
+            return;
+          }
+          localStorage.setItem(deviceStampKey, String(now));
+        } catch {
+          // ignore storage errors
+        }
+      } else {
+        try {
+          localStorage.setItem(deviceStampKey, String(now));
+        } catch {
+          // ignore
+        }
       }
       sessionStorage.setItem(sessionKey, '1');
     }
@@ -92,7 +126,7 @@ export default function App() {
   // Auto-record visit for active or returning session
   React.useEffect(() => {
     if (!loggedInUser) return;
-    recordLoginVisit(loggedInUser, 'Session Visit');
+    recordLoginVisit(loggedInUser, 'Session Visit', false);
   }, [loggedInUser, recordLoginVisit]);
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
@@ -123,7 +157,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    recordLoginVisit(normalized, loginMethod || 'Direct Login');
+    recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 
   // Modern translucent gray popup open state for Page 1 (default open on visit)

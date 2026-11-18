@@ -35,6 +35,7 @@ import {
   FullUserProfile, 
   InnovationItem, 
   fetchFullUserProfile, 
+  subscribeFullUserProfile,
   saveFullUserProfile, 
   addVisitorPraiseAndRating, 
   getCachedUserProfile,
@@ -54,7 +55,8 @@ import {
   LoginLogEntry, 
   resetAllLoginLogs,
   resetAdminLoginLogs,
-  resetUserLoginLogsByEmail
+  resetUserLoginLogsByEmail,
+  getBangkokDateParts
 } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
@@ -140,9 +142,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isSubmittingPraise, setIsSubmittingPraise] = useState<boolean>(false);
   const [praiseSuccessNotice, setPraiseSuccessNotice] = useState<string | null>(null);
 
-  // Real-time verified login logs & Year selector
+  // Real-time verified login logs & Year selector (aligned to Asia/Bangkok)
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
-  const [selectedYear, setSelectedYear] = useState<string>(new Date().getFullYear().toString());
+  const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
   const [liveUserSubmissions, setLiveUserSubmissions] = useState<InnovationSubmission[]>([]);
   const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
@@ -263,27 +265,50 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
-  // Sync profile data on mount / target change (without mutating visitor counts or overwriting saved avatar)
+  // Sync profile data in real-time across all devices (without clobbering active unsaved inputs)
+  const initializedFormKeyRef = useRef<string>('');
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      initializedFormKeyRef.current = '';
+      return;
+    }
 
     const normEmail = userEmail.toLowerCase().trim();
+    const formKey = `${normEmail}::open`;
     const localAvatar = typeof window !== 'undefined'
       ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
       : '';
 
+    const applyProfileSnapshot = (incoming: FullUserProfile, allowFormReset: boolean) => {
+      const latestCached = getCachedUserProfile(userEmail);
+      const latestLocalAvatar = typeof window !== 'undefined'
+        ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
+        : '';
+      const effectiveAvatar =
+        incoming.avatarUrl ||
+        latestCached?.avatarUrl ||
+        latestLocalAvatar ||
+        localAvatar ||
+        avatarUrl ||
+        '';
+      const mergedData: FullUserProfile = {
+        ...incoming,
+        avatarUrl: effectiveAvatar,
+      };
+      setProfile(mergedData);
+      if (allowFormReset) {
+        setFullNameInput(mergedData.fullName || userName || '');
+        setNicknameInput(mergedData.nickname || '');
+        setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
+        setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+      }
+    };
+
     const cached = getCachedUserProfile(userEmail);
     if (cached) {
-      const mergedCached: FullUserProfile = {
-        ...cached,
-        avatarUrl: cached.avatarUrl || localAvatar || avatarUrl || '',
-      };
-      setProfile(mergedCached);
-      setFullNameInput(mergedCached.fullName || userName || '');
-      setNicknameInput(mergedCached.nickname || '');
-      setSchoolInput(mergedCached.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-      setRoleInput(mergedCached.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
-    } else {
+      applyProfileSnapshot(cached, initializedFormKeyRef.current !== formKey);
+      initializedFormKeyRef.current = formKey;
+    } else if (initializedFormKeyRef.current !== formKey) {
       setFullNameInput(isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (userName || userEmail.split('@')[0]));
       setNicknameInput('');
       setSchoolInput('โรงเรียนอัสสัมชัญอุบลราชธานี');
@@ -291,39 +316,27 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
 
     let isMounted = true;
-    const loadData = async () => {
-      try {
-        const fullData = await fetchFullUserProfile(userEmail, userName, avatarUrl);
-        if (isMounted && fullData) {
-          const latestCached = getCachedUserProfile(userEmail);
-          const latestLocalAvatar = typeof window !== 'undefined'
-            ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
-            : '';
-          const effectiveAvatar =
-            fullData.avatarUrl ||
-            latestCached?.avatarUrl ||
-            latestLocalAvatar ||
-            avatarUrl ||
-            '';
-          const mergedData: FullUserProfile = {
-            ...fullData,
-            avatarUrl: effectiveAvatar,
-          };
-          setProfile(mergedData);
-          setFullNameInput(mergedData.fullName || userName || '');
-          setNicknameInput(mergedData.nickname || '');
-          setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-          setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
-        }
-      } catch (err) {
+    fetchFullUserProfile(userEmail, userName, avatarUrl)
+      .then((fullData) => {
+        if (!isMounted || !fullData) return;
+        const shouldInitForm = initializedFormKeyRef.current !== formKey;
+        applyProfileSnapshot(fullData, shouldInitForm);
+        initializedFormKeyRef.current = formKey;
+      })
+      .catch((err) => {
         console.error('Error loading full profile:', err);
-      }
-    };
+      });
 
-    loadData();
+    const unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
+      if (!isMounted || !liveProf) return;
+      const shouldInitForm = initializedFormKeyRef.current !== formKey;
+      applyProfileSnapshot(liveProf, shouldInitForm);
+      initializedFormKeyRef.current = formKey;
+    });
 
     return () => {
       isMounted = false;
+      unsubProfile();
     };
   }, [isOpen, userEmail, userName, isMasterWeerapong]);
 
@@ -400,17 +413,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   }, [isOpen, userEmail, userName, profile?.fullName, isMasterWeerapong]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
-  const targetYearNum = parseInt(selectedYear) || new Date().getFullYear();
+  const targetYearNum = parseInt(selectedYear, 10) || getBangkokDateParts()?.year || new Date().getFullYear();
 
   const myMediaWorks = React.useMemo(() => {
     const norm = userEmail.toLowerCase().trim();
     return teacherMediaList.filter((m) => {
       if (m.submittedByEmail?.toLowerCase().trim() !== norm) return false;
-      // Filter strictly by the selected academic/calendar year
+      // Filter strictly by the selected academic/calendar year (Asia/Bangkok)
       if (m.createdAt) {
-        const d = new Date(m.createdAt);
-        if (!isNaN(d.getTime())) {
-          return d.getFullYear() === targetYearNum;
+        const parts = getBangkokDateParts(m.createdAt);
+        if (parts) {
+          return parts.year === targetYearNum;
         }
       }
       return true;
@@ -422,23 +435,22 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     return myMediaWorks.reduce((sum, item) => sum + (item.likes || 0), 0);
   }, [myMediaWorks]);
 
-  // Real-time verified visitor statistics based on authentic login logs (no artificial floors)
+  // Real-time verified visitor statistics based on authentic Firestore login logs (consistent Bangkok timezone across all devices)
   const verifiedStats = React.useMemo(() => {
-    const targetYearNum = parseInt(selectedYear, 10) || new Date().getFullYear();
-    const now = new Date();
-    const isCurrentYear = now.getFullYear() === targetYearNum;
-    const currentMonthIdx = now.getMonth();
+    const nowParts = getBangkokDateParts() || {
+      year: new Date().getFullYear(),
+      monthIndex: new Date().getMonth(),
+      day: new Date().getDate(),
+      dateKey: new Date().toISOString().split('T')[0],
+    };
+    const yearNum = parseInt(selectedYear, 10) || nowParts.year;
+    const isCurrentYear = nowParts.year === yearNum;
+    const currentMonthIdx = nowParts.monthIndex;
     const normTargetEmail = (userEmail || '').toLowerCase().trim();
 
-    const isSameLocalDay = (ts?: string) => {
-      if (!ts) return false;
-      const d = new Date(ts);
-      if (isNaN(d.getTime())) return false;
-      return (
-        d.getFullYear() === now.getFullYear() &&
-        d.getMonth() === now.getMonth() &&
-        d.getDate() === now.getDate()
-      );
+    const isSameBangkokDay = (ts?: string) => {
+      const parts = ts ? getBangkokDateParts(ts) : null;
+      return Boolean(parts && parts.dateKey === nowParts.dateKey);
     };
 
     // Filter by user's email
@@ -446,18 +458,16 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       (l) => l.email?.toLowerCase().trim() === normTargetEmail
     );
 
-    // All logs that fall in selected target year
+    // All logs that fall in selected target year (Bangkok calendar)
     const allYearLogs = loginLogs.filter((l) => {
-      if (!l.loginTimestamp) return false;
-      const d = new Date(l.loginTimestamp);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYearNum;
+      const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+      return Boolean(parts && parts.year === yearNum);
     });
 
-    // User's logs in selected target year
+    // User's logs in selected target year (Bangkok calendar)
     const myYearLogs = myLogs.filter((l) => {
-      if (!l.loginTimestamp) return false;
-      const d = new Date(l.loginTimestamp);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYearNum;
+      const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+      return Boolean(parts && parts.year === yearNum);
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
@@ -472,12 +482,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
     const monthlyData = monthNames.map((name, idx) => {
       let myCount = myYearLogs.filter((l) => {
-        const d = new Date(l.loginTimestamp);
-        return d.getMonth() === idx;
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
       }).length;
       let allCount = allYearLogs.filter((l) => {
-        const d = new Date(l.loginTimestamp);
-        return d.getMonth() === idx;
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
       }).length;
 
       if (useProfileViewsFallback && idx === currentMonthIdx) {
@@ -497,14 +507,14 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
 
     const myTodayVisits = isCurrentYear
-      ? myYearLogs.filter((l) => isSameLocalDay(l.loginTimestamp)).length
+      ? myYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
       : 0;
     const myMonthVisits = isCurrentYear
       ? (monthlyData[currentMonthIdx]?.myCount || 0)
       : 0;
 
     const allTodayVisits = isCurrentYear
-      ? allYearLogs.filter((l) => isSameLocalDay(l.loginTimestamp)).length
+      ? allYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
       : 0;
     const allMonthVisits = isCurrentYear
       ? (monthlyData[currentMonthIdx]?.allCount || 0)

@@ -118,7 +118,8 @@ import {
   generateLoginLogsTSV,
   generateLoginLogsCSV,
   resetAllLoginLogs,
-  resetAdminLoginLogs
+  resetAdminLoginLogs,
+  getBangkokDateParts
 } from '../services/auditService';
 import {
   PopupBannerConfig,
@@ -128,7 +129,7 @@ import {
   DEFAULT_BANNER_IMAGE_2
 } from '../services/bannerService';
 
-const CURRENT_CALENDAR_YEAR = new Date().getFullYear() || 2026;
+const CURRENT_CALENDAR_YEAR = getBangkokDateParts()?.year || new Date().getFullYear() || 2026;
 // ลิสต์ปีการศึกษาล่วงหน้า 10 ปีข้างหน้า และปีย้อนหลัง (พ.ศ. 2579 ลงมาถึง 2567 / 2036 ลงมาถึง 2024)
 export const ADVANCE_YEAR_OPTIONS = Array.from(
   { length: (CURRENT_CALENDAR_YEAR + 10) - 2024 + 1 },
@@ -761,12 +762,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Filtered visitor login logs with visitorYear
+  // Filtered visitor login logs with visitorYear (Bangkok calendar)
   const filteredLoginLogs = useMemo(() => {
     return loginLogs.filter((l) => {
       if (visitorYear !== 'all') {
-        const d = new Date(l.loginTimestamp);
-        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+        const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
         if (yr !== visitorYear) return false;
       }
       if (visitorSearchTerm.trim()) {
@@ -784,8 +785,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const visitorYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
     loginLogs.forEach((log) => {
-      const d = new Date(log.loginTimestamp);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
     });
     return counts;
@@ -799,8 +800,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const visitsByEmail: Record<string, number> = {};
       loginLogs.forEach((log) => {
         if (!log.email) return;
-        const d = new Date(log.loginTimestamp);
-        if (!isNaN(d.getTime()) && d.getFullYear() === yr) {
+        const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+        if (parts && parts.year === yr) {
           const em = log.email.toLowerCase().trim();
           visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
         }
@@ -849,13 +850,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     const yr = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
     const isCurrentSelectedYear = yr === CURRENT_CALENDAR_YEAR;
     
-    // 1. Group login logs by email for the selectedYear
+    // 1. Group login logs by email for the selectedYear (Bangkok calendar)
     const visitCountsByEmail: Record<string, { count: number; lastLogin: string; avatarUrl?: string; displayName?: string }> = {};
     loginLogs.forEach((log) => {
       if (!log.email) return;
       const email = log.email.toLowerCase().trim();
-      const logYear = new Date(log.loginTimestamp).getFullYear();
-      if (logYear === yr) {
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      if (parts && parts.year === yr) {
         if (!visitCountsByEmail[email]) {
           visitCountsByEmail[email] = {
             count: 1,
@@ -1070,8 +1071,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
 
     const yearLogs = loginLogs.filter(l => {
-      const d = new Date(l.loginTimestamp);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
+      const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+      return Boolean(parts && parts.year === targetYear);
     });
 
     const uniqueVisitorEmails = new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size;
@@ -1083,8 +1084,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
     const monthlyBreakdown = monthNames.map((name, idx) => {
       const visits = yearLogs.filter(l => {
-        const d = new Date(l.loginTimestamp);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
       }).length;
       const mediaCount = yearInnovations.filter(i => {
         const d = new Date(i.submittedAt);
