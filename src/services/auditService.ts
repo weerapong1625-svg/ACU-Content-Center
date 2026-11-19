@@ -457,7 +457,7 @@ export async function logUserLogin(data: {
     clientLogId: logId,
     deviceId,
     email: normEmail,
-    displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (data.displayName || normEmail.split('@')[0]),
+    displayName: data.displayName || normEmail.split('@')[0],
     role: data.role || (isAdmin ? 'admin' : 'teacher'),
     loginMethod: data.loginMethod || 'Email Login',
     status: 'online',

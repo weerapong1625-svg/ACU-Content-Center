@@ -122,7 +122,7 @@ export default function App() {
         : '';
     logUserLogin({
       email: norm,
-      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0]),
+      displayName: cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0],
       role: isAdmin ? 'admin' : 'teacher',
       loginMethod: method,
       avatarUrl: safeAvatarUrl,

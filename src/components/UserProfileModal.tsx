@@ -37,6 +37,7 @@ import {
   fetchFullUserProfile, 
   subscribeFullUserProfile,
   saveFullUserProfile, 
+  saveUserAvatarUrl,
   addVisitorPraiseAndRating, 
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS,
@@ -103,12 +104,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const isViewerAdmin = isSuperAdmin(activeViewerEmail);
   const isAdmin = isViewerAdmin;
   const [profile, setProfile] = useState<FullUserProfile>(() => {
+    const fallbackName = userName || userEmail.split('@')[0];
     return getCachedUserProfile(userEmail) || {
       email: userEmail,
-      fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (userName || userEmail.split('@')[0]),
-      nickname: isMasterWeerapong ? 'ครูปอย' : '',
+      fullName: fallbackName,
+      nickname: '',
       school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-      displayName: userName || userEmail.split('@')[0],
+      displayName: fallbackName,
       avatarUrl: avatarUrl,
       role: isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
       innovations: DEFAULT_INNOVATION_ITEMS,
@@ -133,6 +135,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   // Status states
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [showAvatarEditModal, setShowAvatarEditModal] = useState<boolean>(false);
   const [editingInnovationId, setEditingInnovationId] = useState<number | null>(null);
 
@@ -281,38 +284,44 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   };
 
   // Sync profile data in real-time across all devices (without clobbering active unsaved inputs)
-  const initializedFormKeyRef = useRef<string>('');
+  const isFormDirtyRef = useRef<boolean>(false);
+  const hasLoadedFromServerRef = useRef<boolean>(false);
   useEffect(() => {
     if (!isOpen) {
-      initializedFormKeyRef.current = '';
+      isFormDirtyRef.current = false;
+      hasLoadedFromServerRef.current = false;
+      setSaveError(null);
       return;
     }
 
     const normEmail = userEmail.toLowerCase().trim();
-    const formKey = `${normEmail}::open`;
     const localAvatar = typeof window !== 'undefined'
       ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
       : '';
 
-    const applyProfileSnapshot = (incoming: FullUserProfile, allowFormReset: boolean) => {
+    const applyProfileSnapshot = (incoming: FullUserProfile, allowFormSync: boolean, isFromServer = false) => {
       const latestCached = getCachedUserProfile(userEmail);
       const latestLocalAvatar = typeof window !== 'undefined'
         ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
         : '';
-      const effectiveAvatar =
-        incoming.avatarUrl ||
-        latestCached?.avatarUrl ||
-        latestLocalAvatar ||
-        localAvatar ||
-        avatarUrl ||
-        '';
+      const rawServerAvatar = incoming.avatarUrl && !incoming.avatarUrl.includes('ui-avatars.com') ? incoming.avatarUrl : '';
+      const effectiveAvatar = isFromServer
+        ? rawServerAvatar
+        : (
+            rawServerAvatar ||
+            latestCached?.avatarUrl ||
+            latestLocalAvatar ||
+            localAvatar ||
+            avatarUrl ||
+            ''
+          );
       const mergedData: FullUserProfile = {
         ...incoming,
         avatarUrl: effectiveAvatar,
       };
       setProfile(mergedData);
-      if (allowFormReset) {
-        setFullNameInput(mergedData.fullName || userName || '');
+      if (allowFormSync) {
+        setFullNameInput(mergedData.fullName || userName || normEmail.split('@')[0]);
         setNicknameInput(mergedData.nickname || '');
         setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
         setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
@@ -321,10 +330,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
     const cached = getCachedUserProfile(userEmail);
     if (cached) {
-      applyProfileSnapshot(cached, initializedFormKeyRef.current !== formKey);
-      initializedFormKeyRef.current = formKey;
-    } else if (initializedFormKeyRef.current !== formKey) {
-      setFullNameInput(isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (userName || userEmail.split('@')[0]));
+      applyProfileSnapshot(cached, !isFormDirtyRef.current, false);
+    } else if (!isFormDirtyRef.current) {
+      setFullNameInput(userName || normEmail.split('@')[0]);
       setNicknameInput('');
       setSchoolInput('โรงเรียนอัสสัมชัญอุบลราชธานี');
       setRoleInput(isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
@@ -334,9 +342,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     fetchFullUserProfile(userEmail, userName, avatarUrl)
       .then((fullData) => {
         if (!isMounted || !fullData) return;
-        const shouldInitForm = initializedFormKeyRef.current !== formKey;
-        applyProfileSnapshot(fullData, shouldInitForm);
-        initializedFormKeyRef.current = formKey;
+        hasLoadedFromServerRef.current = true;
+        applyProfileSnapshot(fullData, !isFormDirtyRef.current, true);
       })
       .catch((err) => {
         console.error('Error loading full profile:', err);
@@ -344,16 +351,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
     const unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
       if (!isMounted || !liveProf) return;
-      const shouldInitForm = initializedFormKeyRef.current !== formKey;
-      applyProfileSnapshot(liveProf, shouldInitForm);
-      initializedFormKeyRef.current = formKey;
+      hasLoadedFromServerRef.current = true;
+      applyProfileSnapshot(liveProf, !isFormDirtyRef.current, true);
     });
 
     return () => {
       isMounted = false;
       unsubProfile();
     };
-  }, [isOpen, userEmail, userName, isMasterWeerapong]);
+  }, [isOpen, userEmail, isMasterWeerapong]);
 
   // Synchronize user innovations dynamically from Firestore in real-time
   useEffect(() => {
@@ -411,7 +417,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             innovations: updatedInnovations,
           };
 
-          if (isMasterWeerapong && hadStaleSlotForMaster) {
+          if (isMasterWeerapong && hadStaleSlotForMaster && hasLoadedFromServerRef.current) {
             saveFullUserProfile({
               ...nextProfile,
               updatedAt: new Date().toISOString(),
@@ -571,6 +577,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const handleSaveProfile = async () => {
     setIsSaving(true);
     setSaveSuccess(false);
+    setSaveError(null);
 
     try {
       const normEmail = userEmail.toLowerCase().trim();
@@ -585,9 +592,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         avatarUrl ||
         '';
 
+      const cleanFullName = fullNameInput.trim() || profile.fullName || userName || normEmail.split('@')[0];
       const updatedProfile: FullUserProfile = {
         ...profile,
-        fullName: fullNameInput.trim() || userName,
+        email: normEmail,
+        fullName: cleanFullName,
+        displayName: cleanFullName,
         nickname: nicknameInput.trim(),
         school: schoolInput.trim() || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         role: roleInput.trim() || 'ครูผู้สอน',
@@ -597,6 +607,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
       const success = await saveFullUserProfile(updatedProfile);
       if (success) {
+        isFormDirtyRef.current = false;
         setProfile(updatedProfile);
         if (preservedAvatar) {
           try {
@@ -609,9 +620,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           onProfileUpdated(updatedProfile);
         }
         setTimeout(() => setSaveSuccess(false), 3500);
+      } else {
+        setSaveError('ไม่สามารถซิงค์ข้อมูลขึ้นฐานข้อมูลคลาวด์ได้ กรุณาตรวจสอบอินเทอร์เน็ตแล้วลองบันทึกใหม่อีกครั้ง');
       }
     } catch (err) {
       console.error('Failed to save profile:', err);
+      setSaveError('เกิดข้อผิดพลาดในการบันทึกข้อมูล กรุณาลองใหม่อีกครั้ง');
     } finally {
       setIsSaving(false);
     }
@@ -760,7 +774,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             <div className="relative group flex-shrink-0">
               <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl overflow-hidden p-0.5 bg-gradient-to-tr from-blue-500 via-indigo-500 to-red-500 shadow-lg">
                 <img
-                  src={profile.avatarUrl || avatarUrl}
+                  src={
+                    profile.avatarUrl ||
+                    avatarUrl ||
+                    `https://ui-avatars.com/api/?name=${encodeURIComponent(
+                      profile.fullName || userName
+                    )}&background=1d4ed8&color=ffffff&size=128&bold=true`
+                  }
                   alt={profile.fullName || userName}
                   className="w-full h-full object-cover rounded-[14px] bg-slate-800"
                   onError={(e) => {
@@ -923,6 +943,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                 </div>
               )}
 
+              {saveError && (
+                <div className="p-3.5 rounded-2xl bg-red-950/70 border border-red-500/50 text-red-200 text-xs flex items-center gap-2 shadow-lg">
+                  <AlertCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+                  <span>{saveError}</span>
+                </div>
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {/* 1. ชื่อ-นามสกุล */}
                 <div className="space-y-1.5">
@@ -934,7 +961,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       type="text"
                       id="input-profile-fullname"
                       value={fullNameInput}
-                      onChange={(e) => setFullNameInput(e.target.value)}
+                      onChange={(e) => {
+                        isFormDirtyRef.current = true;
+                        setFullNameInput(e.target.value);
+                      }}
                       placeholder="ระบุชื่อ-นามสกุลจริง"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                     />
@@ -951,7 +981,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     type="text"
                     id="input-profile-nickname"
                     value={nicknameInput}
-                    onChange={(e) => setNicknameInput(e.target.value)}
+                    onChange={(e) => {
+                      isFormDirtyRef.current = true;
+                      setNicknameInput(e.target.value);
+                    }}
                     placeholder="ระบุชื่อเล่น (ถ้ามี)"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                   />
@@ -968,7 +1001,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       type="text"
                       id="input-profile-school"
                       value={schoolInput}
-                      onChange={(e) => setSchoolInput(e.target.value)}
+                      onChange={(e) => {
+                        isFormDirtyRef.current = true;
+                        setSchoolInput(e.target.value);
+                      }}
                       placeholder="โรงเรียนอัสสัมชัญอุบลราชธานี"
                       className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                     />
@@ -985,7 +1021,10 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     type="text"
                     id="input-profile-role"
                     value={roleInput}
-                    onChange={(e) => setRoleInput(e.target.value)}
+                    onChange={(e) => {
+                      isFormDirtyRef.current = true;
+                      setRoleInput(e.target.value);
+                    }}
                     placeholder="ครูผู้สอน / บุคลากรทางการศึกษา / นักเรียน"
                     className="w-full px-3.5 py-2.5 rounded-xl bg-slate-800/80 border border-slate-700 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 text-white text-sm transition-all"
                   />
@@ -1935,10 +1974,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           currentAvatarUrl={profile.avatarUrl || avatarUrl}
           onSaveAvatar={async (newAvatarUrl) => {
             const normEmail = userEmail.toLowerCase().trim();
-            if (newAvatarUrl && typeof window !== 'undefined') {
-              try {
-                localStorage.setItem(`acu_user_avatar_${normEmail}`, newAvatarUrl);
-              } catch {}
+            const savedOk = await saveUserAvatarUrl(normEmail, newAvatarUrl);
+            if (!savedOk) {
+              throw new Error('ไม่สามารถบันทึกรูปโปรไฟล์ขึ้นระบบคลาวด์ได้');
             }
             const updatedProfile: FullUserProfile = {
               ...profile,
@@ -1946,12 +1984,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               updatedAt: new Date().toISOString(),
             };
             setProfile(updatedProfile);
-            await saveFullUserProfile(updatedProfile);
             onAvatarUpdated(newAvatarUrl);
             if (onProfileUpdated) {
               onProfileUpdated(updatedProfile);
             }
             setSaveSuccess(true);
+            setSaveError(null);
             setTimeout(() => setSaveSuccess(false), 3500);
             setShowAvatarEditModal(false);
           }}

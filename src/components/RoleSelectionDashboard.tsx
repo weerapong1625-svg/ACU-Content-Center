@@ -35,7 +35,6 @@ import {
   LoginLogEntry, 
   fetchUserProfile 
 } from '../services/auditService';
-import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
@@ -67,23 +66,21 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     ? userEmail.split('@')[0]
     : userEmail;
 
-  // Real profile picture state: check localStorage & cached profile, otherwise preset authentic educator avatar
+  // Real profile picture state: check localStorage & cached profile, fallback empty so UI shows initials until server profile loads
   const getInitialAvatar = () => {
     try {
       const norm = userEmail.toLowerCase().trim();
       const saved = localStorage.getItem(`acu_user_avatar_${norm}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`);
-      if (saved) return saved;
+      if (saved && !saved.includes('ui-avatars.com')) return saved;
       const cached = getCachedUserProfile(userEmail);
-      if (cached?.avatarUrl) return cached.avatarUrl;
+      if (cached?.avatarUrl && !cached.avatarUrl.includes('ui-avatars.com')) return cached.avatarUrl;
     } catch {
       // ignore
     }
-    // Default to realistic educator portrait matching the email account
-    return PRESET_AVATARS[0].url;
+    return '';
   };
 
   const [avatarUrl, setAvatarUrl] = useState<string>(getInitialAvatar);
-  const [showEditProfileModal, setShowEditProfileModal] = useState<boolean>(false);
   const [showUserProfileModal, setShowUserProfileModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
@@ -94,38 +91,46 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [profileSchool, setProfileSchool] = useState<string>(() => cachedProfile?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
 
   const handleProfileUpdated = (updated: FullUserProfile) => {
-    if (updated.fullName) setProfileName(updated.fullName);
+    setProfileName(updated.fullName || updated.displayName || userName);
     setProfileNickname(updated.nickname || '');
     if (updated.school) setProfileSchool(updated.school);
-    if (updated.avatarUrl) {
-      setAvatarUrl(updated.avatarUrl);
-      try {
-        localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, updated.avatarUrl);
-      } catch {
-        // ignore
+    const nextAvatar = updated.avatarUrl || '';
+    setAvatarUrl(nextAvatar);
+    try {
+      const norm = userEmail.toLowerCase().trim();
+      if (nextAvatar) {
+        localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
+      } else {
+        localStorage.removeItem(`acu_user_avatar_${norm}`);
       }
+    } catch {
+      // ignore
     }
   };
 
   // Synchronize profile real-time from Firestore across all devices (mobile & desktop)
   useEffect(() => {
     const unsubscribe = subscribeFullUserProfile(userEmail, (fullProf) => {
-      if (fullProf.avatarUrl) {
-        setAvatarUrl(fullProf.avatarUrl);
-        try {
-          localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, fullProf.avatarUrl);
-        } catch {
-          // ignore
+      const nextAvatar = fullProf.avatarUrl || '';
+      setAvatarUrl(nextAvatar);
+      try {
+        const norm = userEmail.toLowerCase().trim();
+        if (nextAvatar) {
+          localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
+        } else {
+          localStorage.removeItem(`acu_user_avatar_${norm}`);
         }
+      } catch {
+        // ignore
       }
-      if (fullProf.fullName) setProfileName(fullProf.fullName);
+      setProfileName(fullProf.fullName || fullProf.displayName || userName);
       setProfileNickname(fullProf.nickname || '');
       if (fullProf.school) setProfileSchool(fullProf.school);
     });
     return () => {
       unsubscribe();
     };
-  }, [userEmail]);
+  }, [userEmail, userName]);
 
   // Format current login time
   const [loginTimeStr, setLoginTimeStr] = useState('');
@@ -304,7 +309,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                 title="คลิกที่รูปเพื่อเปิดหน้าโปรไฟล์และข้อมูลส่วนตัว"
               >
                 <img
-                  src={avatarUrl}
+                  src={avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(profileName || userName)}&background=1d4ed8&color=ffffff&size=128&bold=true`}
                   alt={profileName || userName}
                   className="w-full h-full object-cover rounded-full bg-slate-800"
                   onError={(e) => {

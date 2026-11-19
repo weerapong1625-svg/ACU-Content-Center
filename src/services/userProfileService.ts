@@ -247,6 +247,57 @@ function normalizeProfileStats(rawStats: any): UserStats {
   };
 }
 
+function stripUndefinedDeep<T>(value: T): T {
+  if (Array.isArray(value)) {
+    return value.map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(value as Record<string, any>)) {
+      if (v !== undefined) {
+        out[k] = stripUndefinedDeep(v);
+      }
+    }
+    return out as T;
+  }
+  return value;
+}
+
+function getTimeMs(ts?: string): number {
+  if (!ts) return 0;
+  const ms = new Date(ts).getTime();
+  return isNaN(ms) ? 0 : ms;
+}
+
+function mapDocToFullProfile(data: any, fallbackEmail: string): FullUserProfile {
+  const normEmail = (data?.email || fallbackEmail || '').toLowerCase().trim();
+  const cached = getCachedUserProfile(normEmail);
+  const resolvedAvatar =
+    (typeof data?.avatarUrl === 'string' && data.avatarUrl.trim()) ||
+    cached?.avatarUrl ||
+    getStoredAvatarUrl(normEmail) ||
+    '';
+  const resolvedFullName =
+    (typeof data?.fullName === 'string' && data.fullName.trim()) ||
+    (typeof data?.displayName === 'string' && data.displayName.trim()) ||
+    normEmail.split('@')[0];
+  return {
+    email: normEmail,
+    fullName: resolvedFullName,
+    nickname: typeof data?.nickname === 'string' ? data.nickname : '',
+    school: (typeof data?.school === 'string' && data.school.trim()) || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+    displayName:
+      (typeof data?.displayName === 'string' && data.displayName.trim()) ||
+      resolvedFullName,
+    avatarUrl: resolvedAvatar,
+    role: (typeof data?.role === 'string' && data.role.trim()) || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+    innovations: sanitizeInnovations(data?.innovations),
+    stats: normalizeProfileStats(data?.stats),
+    praises: Array.isArray(data?.praises) ? data.praises : DEFAULT_INITIAL_PRAISES,
+    updatedAt: data?.updatedAt || '',
+  };
+}
+
 /**
  * Real-time subscription to full user profile in Firestore.
  * Automatically synchronizes profile data and avatar across all mobile and desktop devices.
@@ -272,24 +323,10 @@ export function subscribeFullUserProfile(
           attempts = 0;
           if (snapshot.exists()) {
             const data = snapshot.data();
-            const cached = getCachedUserProfile(email);
-            const resolvedAvatar = data.avatarUrl || cached?.avatarUrl || getStoredAvatarUrl(email) || '';
-            const loadedProfile: FullUserProfile = {
-              email: data.email || email,
-              fullName: data.fullName || 'คุณครูอัสสัมชัญ',
-              nickname: data.nickname || '',
-              school: data.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-              displayName: data.displayName || data.fullName || email.split('@')[0],
-              avatarUrl: resolvedAvatar,
-              role: data.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
-              innovations: sanitizeInnovations(data.innovations),
-              stats: normalizeProfileStats(data.stats),
-              praises: Array.isArray(data.praises) ? data.praises : DEFAULT_INITIAL_PRAISES,
-              updatedAt: data.updatedAt || new Date().toISOString(),
-            };
+            const loadedProfile = mapDocToFullProfile(data, email);
             setCachedUserProfile(loadedProfile);
-            if (resolvedAvatar) {
-              setStoredAvatarUrl(email, resolvedAvatar);
+            if (loadedProfile.avatarUrl) {
+              setStoredAvatarUrl(email, loadedProfile.avatarUrl);
             }
             onUpdate(loadedProfile);
           } else if (!snapshot.metadata.fromCache) {
@@ -343,8 +380,41 @@ export function subscribeFullUserProfile(
 
   attach();
 
+  // Immediately verify authoritative server state (also resolves legacy doc IDs / fresh-device state)
+  fetchFullUserProfile(email).then((p) => {
+    if (!isCancelled) onUpdate(p);
+  }).catch(() => {});
+
+  // Also refresh authoritative server state when tab/device returns to foreground or profile updates locally
+  const handleResume = () => {
+    if (isCancelled) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+    fetchFullUserProfile(email).then((p) => {
+      if (!isCancelled) onUpdate(p);
+    }).catch(() => {});
+  };
+  const handleLocalProfileUpdate = (e: Event) => {
+    if (isCancelled) return;
+    const detail = (e as CustomEvent)?.detail;
+    if (detail?.email && detail.email.toLowerCase().trim() === email.toLowerCase().trim()) {
+      onUpdate(mapDocToFullProfile(detail, email));
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('focus', handleResume);
+    window.addEventListener('online', handleResume);
+    document.addEventListener('visibilitychange', handleResume);
+    window.addEventListener('acu_user_profile_updated', handleLocalProfileUpdate);
+  }
+
   return () => {
     isCancelled = true;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', handleResume);
+      window.removeEventListener('online', handleResume);
+      document.removeEventListener('visibilitychange', handleResume);
+      window.removeEventListener('acu_user_profile_updated', handleLocalProfileUpdate);
+    }
     if (reconnectTimer !== null) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
@@ -357,54 +427,121 @@ export function subscribeFullUserProfile(
 }
 
 /**
- * Fetch full profile from Firestore with fallback to default and localStorage
+ * Fetch full profile from Firestore (searching canonical ID, unencoded email ID, and email field query)
+ * with fallback to localStorage; never overwrites existing profiles or injects hardcoded nicknames.
  */
 export async function fetchFullUserProfile(
   email: string, 
   initialDisplayName?: string,
   initialAvatar?: string
 ): Promise<FullUserProfile> {
-  const cached = getCachedUserProfile(email);
-  const safeDocId = getSafeDocId(email);
+  const normEmail = email.toLowerCase().trim();
+  const cached = getCachedUserProfile(normEmail);
+  const safeDocId = getSafeDocId(normEmail);
   const profileRef = doc(db, 'user_profiles', safeDocId);
 
   let isQuotaExceeded = false;
   let fetchSucceededAndMissing = false;
   try {
-    let snapshot;
-    try {
-      snapshot = await getDocFromServer(profileRef);
-    } catch (serverErr) {
-      if (isQuotaExceededError(serverErr)) {
-        throw serverErr;
+    const readServerOrCache = async (ref: ReturnType<typeof doc>) => {
+      try {
+        return await getDocFromServer(ref);
+      } catch (serverErr) {
+        if (isQuotaExceededError(serverErr)) throw serverErr;
+        return await getDoc(ref);
       }
-      snapshot = await getDoc(profileRef);
+    };
+
+    const candidates: Array<{ id: string; data: any; fromCache: boolean }> = [];
+    const primarySnap = await readServerOrCache(profileRef);
+    if (primarySnap.exists()) {
+      candidates.push({ id: primarySnap.id, data: primarySnap.data(), fromCache: primarySnap.metadata.fromCache });
     }
-    if (snapshot.exists()) {
-      const data = snapshot.data();
-      const resolvedAvatar = data.avatarUrl || cached?.avatarUrl || getStoredAvatarUrl(email) || initialAvatar || '';
+
+    // Also check legacy unencoded doc ID or email query if canonical doc is missing or lacks avatar/updatedAt
+    const primaryData = primarySnap.exists() ? primarySnap.data() : null;
+    const needsAlternateLookup = !primarySnap.exists() || !primaryData?.avatarUrl || !primaryData?.fullName;
+    if (needsAlternateLookup) {
+      const altLookups: Promise<void>[] = [];
+      if (normEmail !== safeDocId) {
+        altLookups.push(
+          readServerOrCache(doc(db, 'user_profiles', normEmail)).then((snap) => {
+            if (snap.exists()) {
+              candidates.push({ id: snap.id, data: snap.data(), fromCache: snap.metadata.fromCache });
+            }
+          }).catch((e) => {
+            if (isQuotaExceededError(e)) throw e;
+          })
+        );
+      }
+      altLookups.push(
+        getDocs(query(collection(db, 'user_profiles'), where('email', '==', normEmail))).then((qSnap) => {
+          qSnap.forEach((d) => {
+            if (!candidates.some((c) => c.id === d.id)) {
+              candidates.push({ id: d.id, data: d.data(), fromCache: qSnap.metadata.fromCache });
+            }
+          });
+        }).catch((e) => {
+          if (isQuotaExceededError(e)) throw e;
+        })
+      );
+      await Promise.all(altLookups);
+    }
+
+    if (candidates.length > 0) {
+      // Pick newest updatedAt (breaking ties in favor of canonical safeDocId & docs with avatarUrl)
+      candidates.sort((a, b) => {
+        const tDiff = getTimeMs(b.data?.updatedAt) - getTimeMs(a.data?.updatedAt);
+        if (tDiff !== 0) return tDiff;
+        const aHasAvatar = a.data?.avatarUrl ? 1 : 0;
+        const bHasAvatar = b.data?.avatarUrl ? 1 : 0;
+        if (bHasAvatar !== aHasAvatar) return bHasAvatar - aHasAvatar;
+        return a.id === safeDocId ? -1 : b.id === safeDocId ? 1 : 0;
+      });
+
+      const best = candidates[0].data;
+      const fallbackAvatarFromAny = candidates.find((c) => typeof c.data?.avatarUrl === 'string' && c.data.avatarUrl.trim())?.data?.avatarUrl || '';
+      const resolvedAvatar =
+        (typeof best.avatarUrl === 'string' && best.avatarUrl.trim()) ||
+        fallbackAvatarFromAny ||
+        cached?.avatarUrl ||
+        getStoredAvatarUrl(normEmail) ||
+        initialAvatar ||
+        '';
+      const resolvedFullName =
+        (typeof best.fullName === 'string' && best.fullName.trim()) ||
+        (typeof best.displayName === 'string' && best.displayName.trim()) ||
+        initialDisplayName?.trim() ||
+        normEmail.split('@')[0];
+
       const loadedProfile: FullUserProfile = {
-        email: data.email || email,
-        fullName: data.fullName || (data.displayName || initialDisplayName || 'คุณครูอัสสัมชัญ'),
-        nickname: data.nickname || '',
-        school: data.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-        displayName: data.displayName || initialDisplayName || email.split('@')[0],
+        email: normEmail,
+        fullName: resolvedFullName,
+        nickname: typeof best.nickname === 'string' ? best.nickname : '',
+        school: (typeof best.school === 'string' && best.school.trim()) || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+        displayName: (typeof best.displayName === 'string' && best.displayName.trim()) || resolvedFullName,
         avatarUrl: resolvedAvatar,
-        role: data.role || 'ครูผู้สอน',
-        innovations: sanitizeInnovations(data.innovations),
-        stats: normalizeProfileStats(data.stats),
-        praises: Array.isArray(data.praises) && data.praises.length > 0 
-          ? data.praises 
+        role: (typeof best.role === 'string' && best.role.trim()) || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+        innovations: sanitizeInnovations(best.innovations),
+        stats: normalizeProfileStats(best.stats),
+        praises: Array.isArray(best.praises) && best.praises.length > 0
+          ? best.praises
           : (cached?.praises || DEFAULT_INITIAL_PRAISES),
-        updatedAt: data.updatedAt || new Date().toISOString(),
+        updatedAt: best.updatedAt || new Date().toISOString(),
       };
 
       setCachedUserProfile(loadedProfile);
       if (resolvedAvatar) {
-        setStoredAvatarUrl(email, resolvedAvatar);
+        setStoredAvatarUrl(normEmail, resolvedAvatar);
       }
+
+      // If the authoritative data came from a legacy doc ID, heal/sync canonical doc so onSnapshot works across devices
+      if (!primarySnap.exists() || candidates[0].id !== safeDocId) {
+        setDoc(profileRef, stripUndefinedDeep(loadedProfile), { merge: true }).catch(() => {});
+      }
+
       return loadedProfile;
-    } else if (!snapshot.metadata.fromCache) {
+    } else if (!primarySnap.metadata.fromCache) {
       // Strictly confirm doc truly does not exist on server before initializing default
       fetchSucceededAndMissing = true;
     }
@@ -418,20 +555,20 @@ export async function fetchFullUserProfile(
     }
   }
 
-  // If not yet in Firestore or quota/network error, construct fallback locally
-  const isMasterWeerapong = email.toLowerCase().trim() === 'weerapong1625@acu.ac.th';
-  const fallbackAvatar = cached?.avatarUrl || getStoredAvatarUrl(email) || initialAvatar || '';
+  // If not yet in Firestore or quota/network error, construct clean neutral fallback locally (no hardcoded nickname/name)
+  const fallbackAvatar = cached?.avatarUrl || getStoredAvatarUrl(normEmail) || initialAvatar || '';
+  const cleanInitialName = (initialDisplayName && initialDisplayName.trim()) || normEmail.split('@')[0];
   const defaultProfile: FullUserProfile = cached ? {
     ...cached,
     avatarUrl: fallbackAvatar,
   } : {
-    email: email,
-    fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (initialDisplayName || email.split('@')[0]),
-    nickname: isMasterWeerapong ? 'ครูปอย' : '',
+    email: normEmail,
+    fullName: cleanInitialName,
+    nickname: '',
     school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-    displayName: initialDisplayName || email.split('@')[0],
+    displayName: cleanInitialName,
     avatarUrl: fallbackAvatar,
-    role: isMasterWeerapong ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+    role: normEmail === 'weerapong1625@acu.ac.th' ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
     innovations: DEFAULT_INNOVATION_ITEMS,
     stats: {
       totalViews: 0,
@@ -446,7 +583,6 @@ export async function fetchFullUserProfile(
 
   setCachedUserProfile(defaultProfile);
   // CRITICAL: Only write initial document to Firestore when server confirmed doc does not exist!
-  // Never overwrite existing Firestore profiles when offline or on transient read errors.
   if (fetchSucceededAndMissing && !isQuotaExceeded) {
     saveFullUserProfile(defaultProfile).catch((e) => {
       if (isQuotaExceededError(e)) {
@@ -461,51 +597,91 @@ export async function fetchFullUserProfile(
 }
 
 /**
+ * Update ONLY the user's avatarUrl in Firestore & local cache without touching fullName/nickname/stats/innovations.
+ */
+export async function saveUserAvatarUrl(email: string, newAvatarUrl: string): Promise<boolean> {
+  const normEmail = email.toLowerCase().trim();
+  const cleanAvatar = (newAvatarUrl || '').trim();
+  if (!normEmail || !cleanAvatar) return false;
+
+  const nowIso = new Date().toISOString();
+  const existing = getCachedUserProfile(normEmail);
+  if (existing) {
+    setCachedUserProfile({ ...existing, avatarUrl: cleanAvatar, updatedAt: nowIso });
+  }
+  setStoredAvatarUrl(normEmail, cleanAvatar);
+
+  const payload = {
+    email: normEmail,
+    avatarUrl: cleanAvatar,
+    updatedAt: nowIso,
+  };
+
+  if (typeof window !== 'undefined') {
+    try {
+      window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
+      window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: payload }));
+    } catch {}
+  }
+
+  try {
+    const safeDocId = getSafeDocId(normEmail);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    await setDoc(profileRef, payload, { merge: true });
+    return true;
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return true;
+    }
+    console.warn('Failed to save user avatar to Firestore:', err);
+    return false;
+  }
+}
+
+/**
  * Save Full User Profile to Firestore & Cache
  */
 export async function saveFullUserProfile(profile: FullUserProfile): Promise<boolean> {
-  const existingCached = getCachedUserProfile(profile.email);
+  const normEmail = profile.email.toLowerCase().trim();
+  const existingCached = getCachedUserProfile(normEmail);
   const resolvedAvatar =
     (profile.avatarUrl && profile.avatarUrl.trim()) ||
     (existingCached?.avatarUrl && existingCached.avatarUrl.trim()) ||
-    getStoredAvatarUrl(profile.email) ||
+    getStoredAvatarUrl(normEmail) ||
     '';
 
   const sanitizedProfile: FullUserProfile = {
     ...profile,
+    email: normEmail,
     avatarUrl: resolvedAvatar,
     innovations: sanitizeInnovations(profile.innovations),
+    stats: normalizeProfileStats(profile.stats),
   };
   setCachedUserProfile(sanitizedProfile);
   if (resolvedAvatar) {
-    setStoredAvatarUrl(profile.email, resolvedAvatar);
+    setStoredAvatarUrl(normEmail, resolvedAvatar);
   }
 
-  const payload = {
-    email: sanitizedProfile.email,
+  const payload = stripUndefinedDeep({
+    email: normEmail,
     fullName: sanitizedProfile.fullName || '',
     nickname: sanitizedProfile.nickname || '',
     school: sanitizedProfile.school || '',
-    displayName: sanitizedProfile.displayName || '',
+    displayName: sanitizedProfile.displayName || sanitizedProfile.fullName || '',
     avatarUrl: resolvedAvatar,
     role: sanitizedProfile.role || 'ครูผู้สอน',
     innovations: sanitizedProfile.innovations,
-    stats: profile.stats || {
-      totalViews: 0,
-      uniqueVisitors: 0,
-      points: 0,
-      averageRating: 0,
-      totalRatings: 0,
-    },
-    praises: profile.praises || DEFAULT_INITIAL_PRAISES,
+    stats: sanitizedProfile.stats,
+    praises: Array.isArray(sanitizedProfile.praises) ? sanitizedProfile.praises : DEFAULT_INITIAL_PRAISES,
     updatedAt: new Date().toISOString(),
-  };
+  });
 
   // Sync current session display name if saving active user profile
   if (typeof window !== 'undefined') {
     try {
       const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
-      if (currentEmail === profile.email.trim().toLowerCase()) {
+      if (currentEmail === normEmail) {
         if (profile.fullName) {
           localStorage.setItem('acu_current_user_name', profile.fullName);
           localStorage.setItem('acu_user_name', profile.fullName);
@@ -519,7 +695,7 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
   }
 
   try {
-    const safeDocId = getSafeDocId(profile.email);
+    const safeDocId = getSafeDocId(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
 
     await setDoc(profileRef, payload, { merge: true });
@@ -796,19 +972,26 @@ export function subscribeAllUserProfiles(
               if (deletedEmails.has(normEmail)) {
                 return; // skip deleted user
               }
-              map[normEmail] = {
-                email: d.email,
-                fullName: d.fullName || d.displayName || d.email.split('@')[0],
-                nickname: d.nickname || '',
-                school: d.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-                displayName: d.displayName || d.fullName || d.email.split('@')[0],
-                avatarUrl: d.avatarUrl || localMap[normEmail]?.avatarUrl || '',
-                role: d.role || 'ครูผู้สอน',
-                innovations: sanitizeInnovations(d.innovations),
-                stats: normalizeProfileStats(d.stats),
-                praises: d.praises || [],
-                updatedAt: d.updatedAt,
-              };
+              const prev = map[normEmail];
+              const isNewer = !prev || getTimeMs(d.updatedAt) >= getTimeMs(prev.updatedAt) || docSnap.id === getSafeDocId(normEmail);
+              const candidateAvatar = (typeof d.avatarUrl === 'string' && d.avatarUrl.trim()) || prev?.avatarUrl || localMap[normEmail]?.avatarUrl || '';
+              if (isNewer || !prev) {
+                map[normEmail] = {
+                  email: normEmail,
+                  fullName: d.fullName || d.displayName || prev?.fullName || normEmail.split('@')[0],
+                  nickname: typeof d.nickname === 'string' ? d.nickname : (prev?.nickname || ''),
+                  school: d.school || prev?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+                  displayName: d.displayName || d.fullName || prev?.displayName || normEmail.split('@')[0],
+                  avatarUrl: candidateAvatar,
+                  role: d.role || prev?.role || 'ครูผู้สอน',
+                  innovations: sanitizeInnovations(d.innovations),
+                  stats: normalizeProfileStats(d.stats),
+                  praises: d.praises || prev?.praises || [],
+                  updatedAt: d.updatedAt || prev?.updatedAt,
+                };
+              } else if (candidateAvatar && !prev.avatarUrl) {
+                prev.avatarUrl = candidateAvatar;
+              }
             }
           });
           callback(map);
@@ -1389,10 +1572,10 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
         missingProfilesCreated++;
         const newProfileDoc: FullUserProfile = {
           email: normEmail,
-          fullName: isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cleanRealName || normEmail.split('@')[0]),
-          nickname: isMaster ? 'ครูปอย' : '',
+          fullName: cleanRealName || normEmail.split('@')[0],
+          nickname: '',
           school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-          displayName: isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cleanRealName || normEmail.split('@')[0]),
+          displayName: cleanRealName || normEmail.split('@')[0],
           avatarUrl: record.avatarUrl || '',
           role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : (record.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม'),
           innovations: DEFAULT_INNOVATION_ITEMS,

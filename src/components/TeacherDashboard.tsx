@@ -143,6 +143,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   useEffect(() => {
     const unsubscribe = subscribeFullUserProfile(userEmail, (loaded) => {
       setProfile(loaded);
+      try {
+        const norm = userEmail.toLowerCase().trim();
+        if (loaded.avatarUrl && !loaded.avatarUrl.includes('ui-avatars.com')) {
+          localStorage.setItem(`acu_user_avatar_${norm}`, loaded.avatarUrl);
+        } else {
+          localStorage.removeItem(`acu_user_avatar_${norm}`);
+        }
+      } catch {
+        // ignore
+      }
     });
     return () => {
       unsubscribe();
@@ -299,11 +309,14 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setNewIdeaDesc('');
   };
 
-  // Avatar calculation
+  // Avatar calculation: once Firestore profile is loaded, prefer its exact avatarUrl cleanly
   const storedLocalAvatar = typeof window !== 'undefined'
     ? (localStorage.getItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`) || '')
     : '';
-  const avatarSrc = profile?.avatarUrl || storedLocalAvatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(
+  const realAvatarUrl = profile
+    ? (profile.avatarUrl && !profile.avatarUrl.includes('ui-avatars.com') ? profile.avatarUrl : '')
+    : (storedLocalAvatar && !storedLocalAvatar.includes('ui-avatars.com') ? storedLocalAvatar : '');
+  const avatarSrc = realAvatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(
     profile?.fullName || userEmail
   )}&background=1e40af&color=ffffff&size=160&bold=true`;
 
@@ -871,11 +884,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         onClose={() => setIsProfileModalOpen(false)}
         userEmail={userEmail}
         userName={profile?.fullName || profile?.displayName || userEmail}
-        avatarUrl={avatarSrc}
+        avatarUrl={realAvatarUrl}
         currentUserEmail={userEmail}
         onAvatarUpdated={(newAvatar) => {
           try {
-            localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, newAvatar);
+            const norm = userEmail.toLowerCase().trim();
+            if (newAvatar) {
+              localStorage.setItem(`acu_user_avatar_${norm}`, newAvatar);
+            } else {
+              localStorage.removeItem(`acu_user_avatar_${norm}`);
+            }
           } catch {}
           setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
         }}
