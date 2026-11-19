@@ -1553,6 +1553,7 @@ export interface SharedIdeaItem {
   category: string;
   categoryLabel: string;
   url?: string;
+  imageUrl?: string;
   tags: string[];
   creatorEmail: string;
   creatorName: string;
@@ -1571,7 +1572,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     description: 'เทคนิคการใช้ AI ใน Canva เจนเนอเรทสไลด์สอน สรุปเนื้อหา และสร้างภาพประกอบบทเรียนอย่างรวดเร็ว',
     category: 'canva_ai',
     categoryLabel: 'Canva AI',
-    url: 'https://www.canva.com/education/',
+    url: 'https://www.canva.com/th_th/education/',
     tags: ['Canva', 'AI', 'การสร้างสื่อ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
     creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
@@ -1586,7 +1587,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     description: 'รวมแบบทดสอบวัดผลสัมฤทธิ์ทางการศึกษา และคลังข้อสอบมาตรฐานพร้อมเฉลยละเอียด',
     category: 'exams',
     categoryLabel: 'คลังข้อสอบ',
-    url: 'https://www.niets.or.th',
+    url: 'https://www.niets.or.th/',
     tags: ['ข้อสอบ', 'O-NET', 'วัดผล'],
     creatorEmail: ADMIN_TARGET_EMAIL,
     creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
@@ -1601,7 +1602,7 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     description: 'สืบค้นงานวิจัยทางการศึกษา นวัตกรรมการจัดการเรียนรู้ และบทความทางวิชาการ',
     category: 'research',
     categoryLabel: 'วิจัยในชั้นเรียน',
-    url: 'https://tdc.thailis.or.th',
+    url: 'https://tdc.thailis.or.th/tdc/basic.php',
     tags: ['งานวิจัย', 'R&D', 'วิชาการ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
     creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
@@ -1612,11 +1613,11 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
   },
   {
     id: 'idea-seed-4',
-    title: 'เพจครูแชร์สื่อ & ชุมชนการเรียนรู้วิชาชีพ (PLC)',
-    description: 'รวมกลุ่มและเพจยอดนิยมที่แบ่งปันใบงาน สื่อการสอน PowerPoint และแผนการจัดการเรียนรู้',
+    title: 'insKru & ชุมชนครู PLC แบ่งปันสื่อการสอน',
+    description: 'แหล่งรวมไอเดีย Active Learning ใบงาน สื่อการสอน PowerPoint และแผนการจัดการเรียนรู้ที่เข้าชมได้จริง',
     category: 'facebook',
-    categoryLabel: 'เพจเฟซบุ๊กเพื่อการศึกษา',
-    url: 'https://www.facebook.com',
+    categoryLabel: 'ชุมชนครู & แหล่งแชร์ไอเดีย',
+    url: 'https://inskru.com/',
     tags: ['PLC', 'ชุมชนครู', 'แชร์สื่อ'],
     creatorEmail: ADMIN_TARGET_EMAIL,
     creatorName: '(Admin) ม.วีระพงษ์ มีทรัพย์',
@@ -1626,6 +1627,30 @@ const DEFAULT_SEED_IDEAS: SharedIdeaItem[] = [
     userRatings: { 'weerapong1625_acu_ac_th': 5 },
   },
 ];
+
+function sanitizeSharedIdeaRecord(item: SharedIdeaItem): SharedIdeaItem {
+  const rawUrl = (item.url || '').trim();
+  const isBareFb = /^https?:\/\/(www\.|m\.|web\.)?facebook\.com\/?(\?.*)?$/i.test(rawUrl) || /^https?:\/\/fb\.com\/?$/i.test(rawUrl);
+
+  let nextUrl = rawUrl;
+  let nextTitle = item.title;
+  let nextCategoryLabel = item.categoryLabel;
+
+  if (item.id === 'idea-seed-4' && (!rawUrl || isBareFb)) {
+    nextUrl = 'https://inskru.com/';
+    nextTitle = 'insKru & ชุมชนครู PLC แบ่งปันสื่อการสอน';
+    nextCategoryLabel = 'ชุมชนครู & แหล่งแชร์ไอเดีย';
+  } else if (isBareFb) {
+    nextUrl = 'https://inskru.com/';
+  }
+
+  return {
+    ...item,
+    title: nextTitle,
+    categoryLabel: nextCategoryLabel,
+    url: nextUrl,
+  };
+}
 
 /**
  * Subscribe to Shared Ideas in real time
@@ -1640,7 +1665,7 @@ export function subscribeSharedIdeas(
       (snapshot) => {
         const liveList: SharedIdeaItem[] = [];
         snapshot.forEach((docSnap) => {
-          liveList.push(docSnap.data() as SharedIdeaItem);
+          liveList.push(sanitizeSharedIdeaRecord(docSnap.data() as SharedIdeaItem));
         });
 
         // Merge default seeds if not present
@@ -1674,6 +1699,7 @@ export async function saveSharedIdea(data: {
   category: string;
   categoryLabel: string;
   url?: string;
+  imageUrl?: string;
   tags?: string[];
   creatorEmail: string;
   creatorName: string;
@@ -1689,6 +1715,7 @@ export async function saveSharedIdea(data: {
       category: data.category,
       categoryLabel: data.categoryLabel,
       url: data.url?.trim() || '',
+      ...(data.imageUrl?.trim() ? { imageUrl: data.imageUrl.trim() } : {}),
       tags: data.tags && data.tags.length > 0 ? data.tags : ['ไอเดียใหม่', 'แบ่งปันโดยครู ACU'],
       creatorEmail: data.creatorEmail.trim(),
       creatorName: data.creatorName.trim() || data.creatorEmail,

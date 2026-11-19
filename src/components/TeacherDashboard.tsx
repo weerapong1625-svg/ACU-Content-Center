@@ -226,7 +226,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       number: '6',
       title: 'คลังไอเดีย (IDEA)',
       badge: 'พอร์ทัลคลังความรู้ & ไอเดียการสอน',
-      description: 'รวมเว็บไซต์หลักทางการ สสวท. สพฐ. สช. คู่มือ AI ศธ. คลังวิจัย ThaiLIS/TCI ข้อสอบ และเพจแชร์สื่อ',
+      description: 'รวมเว็บไซต์หลักทางการ สสวท. สพฐ. สช. คู่มือ AI คลังวิจัย ThaiLIS/TCI ข้อสอบ และชุมชนครู insKru / Starfish Labz',
       icon: Lightbulb,
       gradient: 'from-yellow-500 via-amber-500 to-orange-500',
       bgLight: 'bg-yellow-50/70 hover:bg-yellow-50',
