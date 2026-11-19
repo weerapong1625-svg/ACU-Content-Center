@@ -37,18 +37,31 @@ import {
   fetchFullUserProfile, 
   subscribeFullUserProfile,
   saveFullUserProfile, 
+  saveUserPhotoToFirestore,
   addVisitorPraiseAndRating, 
   getCachedUserProfile,
   DEFAULT_INNOVATION_ITEMS,
   getCleanRealName
 } from '../services/userProfileService';
+import {
+  resolveDisplayAvatarUrl,
+  sanitizeAvatarUrl,
+  getMatchingAuthPhotoUrl,
+  buildFallbackAvatarUrl,
+  isUiAvatarPlaceholder,
+} from '../utils/avatarUtils';
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
-  subscribeUserInnovations, 
+  subscribeAllInnovations,
   deleteInnovationSubmission,
+  deleteTeacherMedia,
   InnovationSubmission,
   subscribeTeacherMedia, 
-  TeacherMediaWork 
+  TeacherMediaWork,
+  isValidActiveMediaRecord,
+  doesMediaRecordBelongToTeacher,
+  getUnifiedTeacherMediaRecords,
+  syncUserSubmissionCountIfOutOfSync
 } from '../services/submissionService';
 import { 
   subscribeAllLoginLogs, 
@@ -146,7 +159,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
-  const [liveUserSubmissions, setLiveUserSubmissions] = useState<InnovationSubmission[]>([]);
+  const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>([]);
   const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
@@ -284,16 +297,22 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       const latestLocalAvatar = typeof window !== 'undefined'
         ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
         : '';
-      const effectiveAvatar =
-        incoming.avatarUrl ||
-        latestCached?.avatarUrl ||
-        latestLocalAvatar ||
-        localAvatar ||
-        avatarUrl ||
-        '';
+      const resolvedRaw = resolveDisplayAvatarUrl({
+        customPhotoUrl: incoming.photoURL,
+        firestoreAvatarUrl: incoming.avatarUrl,
+        authPhotoUrl: getMatchingAuthPhotoUrl(userEmail),
+        localCachedAvatarUrl:
+          sanitizeAvatarUrl(latestCached?.avatarUrl) ||
+          sanitizeAvatarUrl(latestLocalAvatar) ||
+          sanitizeAvatarUrl(localAvatar) ||
+          sanitizeAvatarUrl(avatarUrl),
+        fallbackSeedName: incoming.fullName || userName,
+      });
+      const effectiveAvatar = isUiAvatarPlaceholder(resolvedRaw) ? '' : resolvedRaw;
       const mergedData: FullUserProfile = {
         ...incoming,
         avatarUrl: effectiveAvatar,
+        photoURL: effectiveAvatar,
       };
       setProfile(mergedData);
       if (allowFormReset) {
@@ -340,85 +359,93 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     };
   }, [isOpen, userEmail, userName, isMasterWeerapong]);
 
-  // Synchronize user innovations dynamically from Firestore in real-time
+  // Subscribe to all innovations via shared multiplexed stream (zero extra Firestore reads & no re-subscribe on name edits)
   useEffect(() => {
     if (!isOpen || !userEmail) return;
-
-    const teacherNameLookup = profile?.fullName || userName || '';
-    const unsubscribe = subscribeUserInnovations(
-      userEmail,
-      (userInnos) => {
-        setLiveUserSubmissions(userInnos);
-        setProfile((prev) => {
-          let hadStaleSlotForMaster = false;
-
-          // Map real submissions into the 5 slots
-          const updatedInnovations = DEFAULT_INNOVATION_ITEMS.map((defItem) => {
-            const match = userInnos.find((u) => Number(u.itemNumber) === defItem.id);
-            if (match) {
-              return {
-                id: defItem.id,
-                title: match.mediaTitle,
-                category: match.mediaType,
-                status: 'submitted' as const,
-                submittedDate: match.submittedAt
-                  ? new Date(match.submittedAt).toLocaleDateString('th-TH', {
-                      day: 'numeric',
-                      month: 'short',
-                      year: 'numeric',
-                    })
-                  : 'ส่งแล้ว',
-                linkUrl: match.onlineUrl || '',
-                coverImageUrl: match.imageUrl || '',
-                notes: `${match.productionType}${match.usageDetails ? ` • ${match.usageDetails}` : ''}`,
-              };
-            }
-
-            const existing = prev.innovations?.find((ex) => ex.id === defItem.id);
-            if (isMasterWeerapong) {
-              // Strictly clear stale/fake slots for weerapong1625@acu.ac.th when no real submission exists
-              if (existing && (existing.title || existing.status !== 'pending')) {
-                hadStaleSlotForMaster = true;
-              }
-              return defItem;
-            }
-
-            // Preserve other users' existing profile slot state untouched
-            if (existing && existing.title && existing.status !== 'pending') {
-              return existing;
-            }
-
-            return defItem;
-          });
-
-          const nextProfile: FullUserProfile = {
-            ...prev,
-            innovations: updatedInnovations,
-          };
-
-          if (isMasterWeerapong && hadStaleSlotForMaster) {
-            saveFullUserProfile({
-              ...nextProfile,
-              updatedAt: new Date().toISOString(),
-            }).catch((err) => console.warn('Sync master admin empty slots:', err));
-          }
-
-          return nextProfile;
-        });
-      },
-      teacherNameLookup
-    );
-
+    const unsubscribe = subscribeAllInnovations((allInnos) => {
+      setAllInnovationsList(allInnos);
+    });
     return () => unsubscribe();
-  }, [isOpen, userEmail, userName, profile?.fullName, isMasterWeerapong]);
+  }, [isOpen, userEmail]);
+
+  const liveUserSubmissions = React.useMemo(() => {
+    const teacherMatcher = {
+      uid: profile?.uid,
+      email: userEmail,
+      fullName: profile?.fullName || userName,
+      displayName: profile?.displayName,
+    };
+    return allInnovationsList
+      .filter((item) => isValidActiveMediaRecord(item) && doesMediaRecordBelongToTeacher(item, teacherMatcher))
+      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+  }, [allInnovationsList, profile?.uid, profile?.fullName, profile?.displayName, userEmail, userName]);
+
+  // Unified submissions across BOTH teacher_innovations_submissions and teacher_media_repository (deduplicated)
+  const unifiedMedia = React.useMemo(() => {
+    return getUnifiedTeacherMediaRecords(
+      {
+        uid: profile?.uid,
+        email: userEmail,
+        fullName: profile?.fullName || userName,
+        displayName: profile?.displayName,
+      },
+      allInnovationsList,
+      teacherMediaList
+    );
+  }, [profile?.uid, profile?.fullName, profile?.displayName, userEmail, userName, allInnovationsList, teacherMediaList]);
+
+  // Merge unified 5-slot display items cleanly (preserving valid legacy profile slots for non-master accounts when needed)
+  const mergedInnovations: InnovationItem[] = React.useMemo(() => {
+    return DEFAULT_INNOVATION_ITEMS.map((defItem, idx) => {
+      const unifiedSlot = unifiedMedia.slots[idx];
+      if (unifiedSlot && (unifiedSlot.title || unifiedSlot.status !== 'pending')) {
+        return unifiedSlot;
+      }
+      if (!isMasterWeerapong) {
+        const existing = profile.innovations?.find((ex) => ex.id === defItem.id);
+        if (existing && existing.title && existing.status !== 'pending') {
+          return existing;
+        }
+      }
+      return defItem;
+    });
+  }, [unifiedMedia.slots, profile.innovations, isMasterWeerapong]);
+
+  // Calculate dynamic completed count (prefer unified media count across both collections)
+  const completedInnovationsCount = Math.max(
+    unifiedMedia.submittedCount,
+    mergedInnovations.filter(
+      (i) => i.status === 'approved' || i.status === 'submitted' || i.status === 'under_review' || (i.title && i.status !== 'pending')
+    ).length
+  );
+  const progressPercent = Math.min(100, Math.round((completedInnovationsCount / 5) * 100));
+
+  // Self-healing sync: keep user_profiles stats.submissionCount in sync with dynamic count when out of sync
+  useEffect(() => {
+    if (!isOpen || !userEmail) return;
+    if (completedInnovationsCount !== profile?.stats?.submissionCount) {
+      syncUserSubmissionCountIfOutOfSync(
+        userEmail,
+        completedInnovationsCount,
+        profile?.stats?.submissionCount,
+        profile?.uid
+      );
+    }
+  }, [isOpen, userEmail, completedInnovationsCount, profile?.stats?.submissionCount, profile?.uid]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear, 10) || getBangkokDateParts()?.year || new Date().getFullYear();
 
   const myMediaWorks = React.useMemo(() => {
-    const norm = userEmail.toLowerCase().trim();
+    const teacherMatcher = {
+      uid: profile?.uid,
+      email: userEmail,
+      fullName: profile?.fullName || userName,
+      displayName: profile?.displayName,
+    };
     return teacherMediaList.filter((m) => {
-      if (m.submittedByEmail?.toLowerCase().trim() !== norm) return false;
+      if (!isValidActiveMediaRecord(m)) return false;
+      if (!doesMediaRecordBelongToTeacher(m, teacherMatcher)) return false;
       // Filter strictly by the selected academic/calendar year (Asia/Bangkok)
       if (m.createdAt) {
         const parts = getBangkokDateParts(m.createdAt);
@@ -428,7 +455,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       }
       return true;
     });
-  }, [teacherMediaList, userEmail, targetYearNum]);
+  }, [teacherMediaList, profile?.uid, profile?.fullName, profile?.displayName, userEmail, userName, targetYearNum]);
 
   // Real-time points accumulated from praise/likes given to teacher's media at repository (starts at 0, strictly year-by-year)
   const teacherKudosPoints = React.useMemo(() => {
@@ -563,12 +590,17 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         ? (localStorage.getItem(`acu_user_avatar_${normEmail}`) || localStorage.getItem(`acu_user_avatar_${userEmail.trim()}`) || '')
         : '';
       const cachedNow = getCachedUserProfile(userEmail);
-      const preservedAvatar =
-        (profile.avatarUrl && profile.avatarUrl.trim()) ||
-        (cachedNow?.avatarUrl && cachedNow.avatarUrl.trim()) ||
-        localStoredAvatar ||
-        avatarUrl ||
-        '';
+      const rawPreserved = resolveDisplayAvatarUrl({
+        customPhotoUrl: profile.photoURL,
+        firestoreAvatarUrl: profile.avatarUrl,
+        authPhotoUrl: getMatchingAuthPhotoUrl(userEmail),
+        localCachedAvatarUrl:
+          sanitizeAvatarUrl(cachedNow?.avatarUrl) ||
+          sanitizeAvatarUrl(localStoredAvatar) ||
+          sanitizeAvatarUrl(avatarUrl),
+        fallbackSeedName: fullNameInput.trim() || userName,
+      });
+      const preservedAvatar = isUiAvatarPlaceholder(rawPreserved) ? '' : rawPreserved;
 
       const updatedProfile: FullUserProfile = {
         ...profile,
@@ -577,6 +609,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         school: schoolInput.trim() || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         role: roleInput.trim() || 'ครูผู้สอน',
         avatarUrl: preservedAvatar,
+        photoURL: preservedAvatar,
         updatedAt: new Date().toISOString(),
       };
 
@@ -640,13 +673,30 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
     setDeletingSlotId(slotId);
     try {
-      const matchingSubs = liveUserSubmissions.filter((s) => Number(s.itemNumber) === slotId);
       const actorEmail = activeViewerEmail || userEmail;
+      const trimmedTitle = (itemTitle || '').trim();
+      const matchingSubs = liveUserSubmissions.filter(
+        (s) => Number(s.itemNumber) === slotId || (trimmedTitle && s.mediaTitle?.trim() === trimmedTitle)
+      );
       for (const sub of matchingSubs) {
         const res = await deleteInnovationSubmission(sub.id, actorEmail);
         if (!res.success) {
           alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
           return;
+        }
+      }
+
+      // Also delete any direct teacher_media_repository record mapped to this slot or title
+      const matchingMediaRecords = unifiedMedia.records.filter(
+        (rec) => rec.mediaWorkId && !rec.innovationId && (rec.itemNumber === slotId || (trimmedTitle && rec.title === trimmedTitle))
+      );
+      for (const rec of matchingMediaRecords) {
+        if (rec.mediaWorkId) {
+          const res = await deleteTeacherMedia(rec.mediaWorkId, actorEmail);
+          if (!res.success) {
+            alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อในคลังสื่อ');
+            return;
+          }
         }
       }
 
@@ -661,7 +711,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         coverImageUrl: '',
       };
 
-      const updatedInnovations = profile.innovations.map((item) =>
+      const updatedInnovations = mergedInnovations.map((item) =>
         item.id === slotId ? defaultSlot : item
       );
 
@@ -712,12 +762,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
   };
 
-  // Calculate completed innovations
-  const completedInnovationsCount = profile.innovations.filter(
-    (i) => i.status === 'approved' || i.status === 'submitted' || i.status === 'under_review' || (i.title && i.status !== 'pending')
-  ).length;
-  const progressPercent = Math.round((completedInnovationsCount / 5) * 100);
-
   // Quick comment templates for visitors
   const QUICK_PRAISE_TEMPLATES = [
     'สื่อนวัตกรรมยอดเยี่ยม ใช้งานได้จริงในห้องเรียน',
@@ -745,13 +789,19 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             <div className="relative group flex-shrink-0">
               <div className="w-14 h-14 sm:w-16 sm:h-16 rounded-2xl overflow-hidden p-0.5 bg-gradient-to-tr from-blue-500 via-indigo-500 to-red-500 shadow-lg">
                 <img
-                  src={profile.avatarUrl || avatarUrl}
+                  src={resolveDisplayAvatarUrl({
+                    customPhotoUrl: profile.photoURL,
+                    firestoreAvatarUrl: profile.avatarUrl || avatarUrl,
+                    authPhotoUrl: getMatchingAuthPhotoUrl(userEmail),
+                    fallbackSeedName: profile.fullName || userName,
+                    size: 128,
+                  })}
                   alt={profile.fullName || userName}
                   className="w-full h-full object-cover rounded-[14px] bg-slate-800"
                   onError={(e) => {
-                    (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                      profile.fullName || userName
-                    )}&background=1d4ed8&color=ffffff&size=128&bold=true`;
+                    const el = e.target as HTMLImageElement;
+                    const fallback = buildFallbackAvatarUrl(profile.fullName || userName, 128);
+                    if (el.src !== fallback) el.src = fallback;
                   }}
                 />
               </div>
@@ -1060,7 +1110,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
               {/* 5 Innovation Items List */}
               <div className="space-y-3">
-                {profile.innovations.map((item, idx) => {
+                {mergedInnovations.map((item, idx) => {
                   const isEditing = editingInnovationId === item.id;
                   let statusBadge = (
                     <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[11px] font-medium">
@@ -1917,22 +1967,18 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           onClose={() => setShowAvatarEditModal(false)}
           userEmail={userEmail}
           displayName={profile.fullName || userName}
-          currentAvatarUrl={profile.avatarUrl || avatarUrl}
+          currentAvatarUrl={sanitizeAvatarUrl(profile.photoURL || profile.avatarUrl || avatarUrl)}
           onSaveAvatar={async (newAvatarUrl) => {
-            const normEmail = userEmail.toLowerCase().trim();
-            if (newAvatarUrl && typeof window !== 'undefined') {
-              try {
-                localStorage.setItem(`acu_user_avatar_${normEmail}`, newAvatarUrl);
-              } catch {}
-            }
+            const savedPhotoUrl = await saveUserPhotoToFirestore(userEmail, newAvatarUrl, profile.uid);
             const updatedProfile: FullUserProfile = {
               ...profile,
-              avatarUrl: newAvatarUrl,
+              avatarUrl: savedPhotoUrl,
+              photoURL: savedPhotoUrl,
               updatedAt: new Date().toISOString(),
             };
             setProfile(updatedProfile);
             await saveFullUserProfile(updatedProfile);
-            onAvatarUpdated(newAvatarUrl);
+            onAvatarUpdated(savedPhotoUrl);
             if (onProfileUpdated) {
               onProfileUpdated(updatedProfile);
             }

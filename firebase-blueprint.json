@@ -17,6 +17,22 @@
       },
       "required": ["email", "role", "loginTimestamp"]
     },
+    "users": {
+      "title": "User Identity & Cross-Device Profile Photo",
+      "description": "Single source of truth for user profile pictures (photoURL) matched by UID and normalized lowercase email across devices",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" },
+        "avatarUrl": { "type": "string" },
+        "displayName": { "type": "string" },
+        "fullName": { "type": "string" },
+        "role": { "type": "string" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email"]
+    },
     "user_profiles": {
       "title": "User Profile Customizations & Innovation Portfolio",
       "description": "Stores user personal information, 5 innovation submission statuses, visit statistics, and star praises",

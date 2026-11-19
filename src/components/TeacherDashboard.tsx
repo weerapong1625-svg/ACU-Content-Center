@@ -15,6 +15,12 @@ import { TeacherMediaRepositoryModal } from './TeacherMediaRepositoryModal';
 import { IdeaBankModal } from './IdeaBankModal';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
+import {
+  resolveDisplayAvatarUrl,
+  sanitizeAvatarUrl,
+  getMatchingAuthPhotoUrl,
+  buildFallbackAvatarUrl,
+} from '../utils/avatarUtils';
 import { 
   UploadCloud, 
   BookOpenCheck, 
@@ -50,7 +56,14 @@ import {
   Camera,
   Gift
 } from 'lucide-react';
-import { ADMIN_TARGET_EMAIL, subscribeUserInnovations } from '../services/submissionService';
+import {
+  ADMIN_TARGET_EMAIL,
+  subscribeAllInnovations,
+  subscribeTeacherMedia,
+  InnovationSubmission,
+  TeacherMediaWork,
+  getUnifiedTeacherMediaRecords,
+} from '../services/submissionService';
 
 interface TeacherDashboardProps {
   userEmail: string;
@@ -86,25 +99,35 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
   const [innovationInitialTab, setInnovationInitialTab] = useState<'form' | 'status'>('form');
-  const [userInnovationsCount, setUserInnovationsCount] = useState<number>(0);
+  const [allInnovations, setAllInnovations] = useState<InnovationSubmission[]>([]);
+  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
 
-  // Real-time subscribe to user's 5-item submission count for dynamic badge
+  // Real-time subscribe to user's unified 5-item submission count across both collections (shared multiplexed listeners)
   useEffect(() => {
-    const unsub = subscribeUserInnovations(
-      userEmail,
-      (list) => {
-        const distinctSlots = new Set(
-          list
-            .filter((item) => item.mediaTitle && item.mediaTitle.trim().length > 0)
-            .map((item) => Number(item.itemNumber))
-            .filter((num) => num >= 1 && num <= 5)
-        );
-        setUserInnovationsCount(distinctSlots.size);
+    const unsubInnos = subscribeAllInnovations((list) => {
+      setAllInnovations(list);
+    });
+    const unsubMedia = subscribeTeacherMedia((works) => {
+      setTeacherMedia(works);
+    });
+    return () => {
+      unsubInnos();
+      unsubMedia();
+    };
+  }, [userEmail]);
+
+  const userInnovationsCount = React.useMemo(() => {
+    return getUnifiedTeacherMediaRecords(
+      {
+        uid: profile?.uid,
+        email: userEmail,
+        fullName: profile?.fullName,
+        displayName: profile?.displayName,
       },
-      profile?.fullName
-    );
-    return () => unsub();
-  }, [userEmail, profile?.fullName]);
+      allInnovations,
+      teacherMedia
+    ).submittedCount;
+  }, [profile?.uid, profile?.fullName, profile?.displayName, userEmail, allInnovations, teacherMedia]);
 
   // Search & Filter state for Media Repository
   const [searchMedia, setSearchMedia] = useState('');
@@ -300,13 +323,18 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setNewIdeaDesc('');
   };
 
-  // Avatar calculation
+  // Avatar calculation with strict display priority (Firestore users/profile > Auth photoURL > localStorage > initials fallback)
   const storedLocalAvatar = typeof window !== 'undefined'
     ? (localStorage.getItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`) || '')
     : '';
-  const avatarSrc = profile?.avatarUrl || storedLocalAvatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(
-    profile?.fullName || userEmail
-  )}&background=1e40af&color=ffffff&size=160&bold=true`;
+  const avatarSrc = resolveDisplayAvatarUrl({
+    customPhotoUrl: profile?.photoURL,
+    firestoreAvatarUrl: profile?.avatarUrl,
+    authPhotoUrl: getMatchingAuthPhotoUrl(userEmail),
+    localCachedAvatarUrl: storedLocalAvatar,
+    fallbackSeedName: profile?.fullName || profile?.displayName || userEmail,
+    size: 160,
+  });
 
   return (
     <div
@@ -410,7 +438,9 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                     alt={profile?.fullName || userEmail}
                     className="w-full h-full object-cover"
                     onError={(e) => {
-                      (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(userEmail)}&background=2563eb&color=ffffff&size=160&bold=true`;
+                      const el = e.target as HTMLImageElement;
+                      const fallback = buildFallbackAvatarUrl(profile?.fullName || userEmail, 160);
+                      if (el.src !== fallback) el.src = fallback;
                     }}
                   />
                 </div>
@@ -875,10 +905,16 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         avatarUrl={avatarSrc}
         currentUserEmail={userEmail}
         onAvatarUpdated={(newAvatar) => {
+          const clean = sanitizeAvatarUrl(newAvatar);
           try {
-            localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, newAvatar);
+            const norm = userEmail.toLowerCase().trim();
+            if (clean) {
+              localStorage.setItem(`acu_user_avatar_${norm}`, clean);
+            } else {
+              localStorage.removeItem(`acu_user_avatar_${norm}`);
+            }
           } catch {}
-          setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
+          setProfile(prev => prev ? { ...prev, avatarUrl: clean, photoURL: clean } : null);
         }}
         onProfileUpdated={(updated) => {
           setProfile(updated);

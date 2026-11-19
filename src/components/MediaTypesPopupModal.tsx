@@ -41,6 +41,10 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<string | null>(null);
+  const [errorNotice, setErrorNotice] = useState<string | null>(null);
+  const [confirmResetOpen, setConfirmResetOpen] = useState(false);
+  const [showAdminVerifyModal, setShowAdminVerifyModal] = useState(false);
+  const [verifyEmailInput, setVerifyEmailInput] = useState('weerapong1625@acu.ac.th');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -70,9 +74,10 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setErrorNotice(null);
 
     if (!file.type.startsWith('image/')) {
-      alert('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, WebP)');
+      setErrorNotice('กรุณาเลือกไฟล์รูปภาพเท่านั้น (PNG, JPG, WebP)');
       return;
     }
 
@@ -116,6 +121,7 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
     if (!newImagePreview) return;
     setIsSaving(true);
     setSaveSuccessNotice(null);
+    setErrorNotice(null);
 
     // 1. Immediately reflect the change on the screen
     setPosterUrl(newImagePreview);
@@ -133,22 +139,23 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
         setSaveSuccessNotice(null);
       }, 900);
     } else {
-      alert(res.message);
+      setErrorNotice(res.message);
     }
   };
 
-  const handleResetDefault = async () => {
+  const handleResetConfirm = async () => {
     const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
-    if (!confirm('ยืนยันรีเซ็ตกลับเป็นภาพดั้งเดิม (ประเภทสื่อ .png) ใช่หรือไม่?')) return;
     setIsSaving(true);
+    setErrorNotice(null);
     setPosterUrl(DEFAULT_CRITERIA_POSTER);
     const res = await resetCriteriaPoster(emailToUse);
     setIsSaving(false);
+    setConfirmResetOpen(false);
     if (res.success) {
       setNewImagePreview(null);
       setIsAdminUploadOpen(false);
     } else {
-      alert(res.message);
+      setErrorNotice(res.message);
     }
   };
 
@@ -228,17 +235,8 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
                 type="button"
                 id="btn-verify-admin-criteria-poster"
                 onClick={() => {
-                  const input = prompt('ยืนยันอีเมล Admin เพื่อแก้ไขภาพ (สิทธิ์: weerapong1625@acu.ac.th):', 'weerapong1625@acu.ac.th');
-                  if (input && input.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
-                    try {
-                      localStorage.setItem('acu_current_user_email', ADMIN_TARGET_EMAIL);
-                    } catch {
-                      // ignore
-                    }
-                    setIsAdminUploadOpen(true);
-                  } else if (input) {
-                    alert('ไม่อนุญาต: สิทธิ์เฉพาะ ' + ADMIN_TARGET_EMAIL + ' เท่านั้น');
-                  }
+                  setErrorNotice(null);
+                  setShowAdminVerifyModal(true);
                 }}
                 className="px-2.5 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-slate-400 hover:text-amber-300 text-xs flex items-center gap-1 border border-slate-700 transition-colors cursor-pointer"
                 title="เข้าสู่ระบบ Admin เพื่อเปลี่ยนภาพ"
@@ -366,13 +364,42 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleResetDefault}
+                  onClick={() => setConfirmResetOpen(true)}
                   className="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300 flex items-center gap-1 transition-colors"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
                   <span>รีเซ็ตค่าเดิม</span>
                 </button>
               </div>
+
+              {confirmResetOpen && (
+                <div className="mt-3 p-3 rounded-xl bg-amber-950/60 border border-amber-500/40 text-xs text-amber-200 flex items-center justify-between gap-2 w-full">
+                  <span>ยืนยันรีเซ็ตกลับเป็นภาพดั้งเดิม?</span>
+                  <div className="flex items-center gap-1.5 flex-shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setConfirmResetOpen(false)}
+                      className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"
+                    >
+                      ยกเลิก
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isSaving}
+                      onClick={handleResetConfirm}
+                      className="px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-500 text-white font-bold"
+                    >
+                      ยืนยันรีเซ็ต
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {errorNotice && (
+                <div className="mt-3 px-3 py-1.5 rounded-lg bg-rose-500/20 text-rose-300 border border-rose-500/30 text-xs">
+                  {errorNotice}
+                </div>
+              )}
 
               {saveSuccessNotice && (
                 <div className="mt-3 px-3 py-1.5 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-xs flex items-center gap-1.5">
@@ -402,6 +429,74 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
                   <span>{isSaving ? 'กำลังบันทึกลง Firebase...' : 'บันทึกภาพทันที'}</span>
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Inline Admin Verification Modal */}
+      {showAdminVerifyModal && (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => setShowAdminVerifyModal(false)}
+        >
+          <div
+            className="w-full max-w-sm bg-slate-900 border border-amber-500/50 rounded-3xl shadow-2xl p-6 text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <h4 className="text-sm font-bold flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4 text-amber-400" />
+                <span>ยืนยันสิทธิ์ผู้ดูแลระบบ (Admin)</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setShowAdminVerifyModal(false)}
+                className="w-7 h-7 rounded-full bg-slate-800 text-slate-400 hover:text-white flex items-center justify-center"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="text-xs space-y-2">
+              <label className="block text-slate-300">ระบุอีเมล Admin ({ADMIN_TARGET_EMAIL})</label>
+              <input
+                type="email"
+                value={verifyEmailInput}
+                onChange={(e) => setVerifyEmailInput(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
+              />
+              {errorNotice && (
+                <div className="p-2 rounded-lg bg-rose-500/20 border border-rose-500/30 text-rose-300">
+                  {errorNotice}
+                </div>
+              )}
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setShowAdminVerifyModal(false)}
+                className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs text-slate-300"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  if (verifyEmailInput.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
+                    try {
+                      localStorage.setItem('acu_current_user_email', ADMIN_TARGET_EMAIL);
+                    } catch {}
+                    setShowAdminVerifyModal(false);
+                    setErrorNotice(null);
+                    setIsAdminUploadOpen(true);
+                  } else {
+                    setErrorNotice('ไม่อนุญาต: สิทธิ์เฉพาะ ' + ADMIN_TARGET_EMAIL + ' เท่านั้น');
+                  }
+                }}
+                className="px-4 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold text-xs"
+              >
+                ยืนยันสิทธิ์
+              </button>
             </div>
           </div>
         </div>

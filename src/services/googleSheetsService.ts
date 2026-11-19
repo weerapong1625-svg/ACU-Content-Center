@@ -1,6 +1,14 @@
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 import { db } from '../firebase';
-import { InnovationSubmission, FacilitySubmission } from './submissionService';
+import {
+  extractMediaEmails,
+  FacilitySubmission,
+  getUnifiedTeacherMediaRecords,
+  InnovationSubmission,
+  isValidActiveMediaRecord,
+  TeacherMediaWork,
+} from './submissionService';
+import { FullUserProfile, getCleanRealName, resolveUserUid } from './userProfileService';
 
 export interface GoogleSheetsConfig {
   sheetUrl: string;
@@ -215,62 +223,103 @@ export interface TeacherSummaryItem {
   lastSubmittedAt: string;
 }
 
-export function aggregateTeacherSummary(list: InnovationSubmission[]): TeacherSummaryItem[] {
-  const map = new Map<string, TeacherSummaryItem>();
-
-  list.forEach((sub) => {
-    const key = sub.userEmail.toLowerCase().trim() || sub.teacherName.trim();
-    let current = map.get(key);
-    if (!current) {
-      current = {
-        teacherName: sub.teacherName || 'ไม่ระบุชื่อ',
-        email: sub.userEmail,
-        subjectGroup: sub.subjectGroup || 'ไม่ระบุกลุ่มสาระ',
-        gradeLevel: sub.gradeLevel || '-',
-        submittedCount: 0,
-        isComplete: false,
-        item1: '-',
-        item2: '-',
-        item3: '-',
-        item4: '-',
-        item5: '-',
-        lastSubmittedAt: sub.submittedAt,
-      };
-      map.set(key, current);
-    } else {
-      if (sub.subjectGroup && current.subjectGroup === 'ไม่ระบุกลุ่มสาระ') {
-        current.subjectGroup = sub.subjectGroup;
-      }
-    }
-
-    // Assign items only if title exists
-    const itemNum = Number(sub.itemNumber);
-    const hasTitle = Boolean(sub.mediaTitle && sub.mediaTitle.trim().length > 0);
-    if (hasTitle) {
-      const title = `${sub.mediaTitle.trim()} (${sub.mediaType || 'สื่อการสอน'})`;
-      if (itemNum === 1) current.item1 = title;
-      else if (itemNum === 2) current.item2 = title;
-      else if (itemNum === 3) current.item3 = title;
-      else if (itemNum === 4) current.item4 = title;
-      else if (itemNum === 5) current.item5 = title;
-    }
-
-    if (new Date(sub.submittedAt).getTime() > new Date(current.lastSubmittedAt).getTime()) {
-      current.lastSubmittedAt = sub.submittedAt;
+export function aggregateTeacherSummary(
+  list: InnovationSubmission[],
+  teacherMediaList: TeacherMediaWork[] = [],
+  userProfilesMap: Record<string, FullUserProfile> = {}
+): TeacherSummaryItem[] {
+  // Build lookup index of known profiles by uid and clean name so records without email still map accurately
+  const uidToEmail = new Map<string, string>();
+  const cleanNameToEmail = new Map<string, string>();
+  Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
+    const normEmail = emKey.trim().toLowerCase();
+    if (!normEmail) return;
+    if (prof.uid) uidToEmail.set(prof.uid.trim(), normEmail);
+    uidToEmail.set(resolveUserUid(normEmail), normEmail);
+    const clean = getCleanRealName(prof.fullName || prof.displayName, normEmail).trim().toLowerCase();
+    if (clean && clean !== normEmail.split('@')[0]) {
+      cleanNameToEmail.set(clean, normEmail);
     }
   });
 
-  // Calculate counts
-  const results = Array.from(map.values()).map((t) => {
-    let count = 0;
-    if (t.item1 !== '-') count++;
-    if (t.item2 !== '-') count++;
-    if (t.item3 !== '-') count++;
-    if (t.item4 !== '-') count++;
-    if (t.item5 !== '-') count++;
-    t.submittedCount = count;
-    t.isComplete = count >= 5;
-    return t;
+  // Discover distinct teacher descriptors from both innovations & teacherMedia
+  const descriptorMap = new Map<string, {
+    uid?: string;
+    email: string;
+    fullName?: string;
+    teacherName?: string;
+    displayName?: string;
+  }>();
+
+  const registerItemOwner = (rawItem: any) => {
+    if (!isValidActiveMediaRecord(rawItem)) return;
+    const itemEmails = extractMediaEmails(rawItem);
+    const itemUid = (rawItem.uid || rawItem.userId || '').toString().trim();
+    const rawName = (rawItem.teacherName || rawItem.authorName || '').toString().trim();
+    const cleanNameKey = rawName ? getCleanRealName(rawName).trim().toLowerCase() : '';
+
+    let canonicalEmail = itemEmails[0] || (itemUid ? uidToEmail.get(itemUid) || '' : '') || (cleanNameKey ? cleanNameToEmail.get(cleanNameKey) || '' : '');
+    const key = canonicalEmail || (itemUid ? `uid:${itemUid}` : `name:${cleanNameKey || rawName}`);
+    if (!key || key === 'name:') return;
+
+    const existing = descriptorMap.get(key);
+    const prof = canonicalEmail ? userProfilesMap[canonicalEmail] : undefined;
+    if (!existing) {
+      descriptorMap.set(key, {
+        uid: prof?.uid || itemUid || (canonicalEmail ? resolveUserUid(canonicalEmail) : undefined),
+        email: canonicalEmail,
+        fullName: prof?.fullName || rawName || '',
+        teacherName: rawName || prof?.fullName || '',
+        displayName: prof?.displayName || rawName || '',
+      });
+    } else {
+      if (!existing.uid && (itemUid || prof?.uid)) existing.uid = prof?.uid || itemUid;
+      if (!existing.teacherName && rawName) existing.teacherName = rawName;
+    }
+  };
+
+  list.forEach(registerItemOwner);
+  teacherMediaList.forEach(registerItemOwner);
+
+  const results: TeacherSummaryItem[] = [];
+
+  descriptorMap.forEach((descriptor) => {
+    const unified = getUnifiedTeacherMediaRecords(descriptor, list, teacherMediaList);
+    if (unified.submittedCount === 0) return;
+
+    const latestRecord = unified.records.reduce((latest, curr) => {
+      const latestMs = new Date(latest.submittedAt || 0).getTime();
+      const currMs = new Date(curr.submittedAt || 0).getTime();
+      return currMs > latestMs ? curr : latest;
+    }, unified.records[0]);
+
+    const firstWithGroup = unified.records.find((r) => r.subjectGroup && r.subjectGroup.trim()) || latestRecord;
+    const prof = descriptor.email ? userProfilesMap[descriptor.email] : undefined;
+    const displayTeacherName =
+      getCleanRealName(prof?.fullName || descriptor.fullName || latestRecord.teacherName, descriptor.email) ||
+      latestRecord.teacherName ||
+      'ไม่ระบุชื่อ';
+
+    const formatSlot = (slotIdx: number): string => {
+      const s = unified.slots[slotIdx];
+      if (!s || !s.title) return '-';
+      return `${s.title.trim()} (${s.category || 'สื่อการสอน'})`;
+    };
+
+    results.push({
+      teacherName: displayTeacherName,
+      email: descriptor.email || latestRecord.ownerEmail || '',
+      subjectGroup: firstWithGroup?.subjectGroup || 'ไม่ระบุกลุ่มสาระ',
+      gradeLevel: firstWithGroup?.gradeLevel || '-',
+      submittedCount: unified.submittedCount,
+      isComplete: unified.submittedCount >= 5,
+      item1: formatSlot(0),
+      item2: formatSlot(1),
+      item3: formatSlot(2),
+      item4: formatSlot(3),
+      item5: formatSlot(4),
+      lastSubmittedAt: latestRecord?.submittedAt || '',
+    });
   });
 
   results.sort((a, b) => b.submittedCount - a.submittedCount);

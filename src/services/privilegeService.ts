@@ -6,11 +6,12 @@ import {
   onSnapshot,
   query,
   where,
+  limit,
   updateDoc
 } from 'firebase/firestore';
 import { db } from '../firebase';
-import { ADMIN_TARGET_EMAIL } from './submissionService';
-import { getCleanRealName } from './userProfileService';
+import { ADMIN_TARGET_EMAIL, isValidActiveMediaRecord } from './submissionService';
+import { getCleanRealName, getDeletedUserEmails } from './userProfileService';
 
 export const TARGET_SHARE_COUNT = 20;
 export const PICKUP_LOCATION = 'ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์)';
@@ -207,7 +208,7 @@ export function subscribeUserPrivilegeStatus(
 
   // 1. Listen to shared ideas
   const unsubIdeas = onSnapshot(
-    query(collection(db, 'shared_ideas'), where('creatorEmail', '==', normEmail)),
+    query(collection(db, 'shared_ideas'), where('creatorEmail', '==', normEmail), limit(200)),
     (snap) => {
       ideasList = [];
       snap.forEach((d) => {
@@ -229,11 +230,12 @@ export function subscribeUserPrivilegeStatus(
 
   // 2. Listen to innovation submissions (5 items)
   const unsubInnovations = onSnapshot(
-    query(collection(db, 'teacher_innovations_submissions'), where('userEmail', '==', normEmail)),
+    query(collection(db, 'teacher_innovations_submissions'), where('userEmail', '==', normEmail), limit(200)),
     (snap) => {
       innovationsList = [];
       snap.forEach((d) => {
         const data = d.data();
+        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
         if (data.teacherName) teacherDisplayName = data.teacherName;
         innovationsList.push({
           id: d.id,
@@ -252,7 +254,7 @@ export function subscribeUserPrivilegeStatus(
 
   // 3. Listen to facility usage records (33 learning centers)
   const unsubFacilities = onSnapshot(
-    query(collection(db, 'system_test_submissions'), where('userEmail', '==', normEmail)),
+    query(collection(db, 'system_test_submissions'), where('userEmail', '==', normEmail), limit(200)),
     (snap) => {
       facilitiesList = [];
       snap.forEach((d) => {
@@ -276,12 +278,12 @@ export function subscribeUserPrivilegeStatus(
 
   // 4. Listen to teacher media repository (self-produced media)
   const unsubMedia = onSnapshot(
-    query(collection(db, 'teacher_media_repository'), where('submittedByEmail', '==', normEmail)),
+    query(collection(db, 'teacher_media_repository'), where('submittedByEmail', '==', normEmail), limit(200)),
     (snap) => {
       mediaList = [];
       snap.forEach((d) => {
         const data = d.data();
-        if (data.title && !d.id.startsWith('seed-')) {
+        if (isValidActiveMediaRecord({ ...data, id: data.id || d.id })) {
           mediaList.push({
             id: d.id,
             title: data.title,
@@ -562,7 +564,7 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 1. Shared ideas
   const unsubIdeas = onSnapshot(
-    collection(db, 'shared_ideas'),
+    query(collection(db, 'shared_ideas'), limit(500)),
     (snap) => {
       allIdeas = [];
       snap.forEach((d) => {
@@ -589,14 +591,16 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 2. Innovations
   const unsubInnov = onSnapshot(
-    collection(db, 'teacher_innovations_submissions'),
+    query(collection(db, 'teacher_innovations_submissions'), limit(500)),
     (snap) => {
       allInnovations = [];
       snap.forEach((d) => {
         const data = d.data();
-        if (data.userEmail) {
+        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
+        const ownerEmail = (data.userEmail || data.email || data.submittedByEmail || '').trim().toLowerCase();
+        if (ownerEmail) {
           allInnovations.push({
-            userEmail: data.userEmail.trim().toLowerCase(),
+            userEmail: ownerEmail,
             teacherName: data.teacherName,
             gradeLevel: data.gradeLevel,
             post: {
@@ -618,7 +622,7 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 3. Facilities
   const unsubFac = onSnapshot(
-    collection(db, 'system_test_submissions'),
+    query(collection(db, 'system_test_submissions'), limit(500)),
     (snap) => {
       allFacilities = [];
       snap.forEach((d) => {
@@ -646,14 +650,16 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 4. Teacher Media Repository
   const unsubMedia = onSnapshot(
-    collection(db, 'teacher_media_repository'),
+    query(collection(db, 'teacher_media_repository'), limit(500)),
     (snap) => {
       allMedia = [];
       snap.forEach((d) => {
         const data = d.data();
-        if (data.submittedByEmail && !d.id.startsWith('seed-')) {
+        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
+        const ownerEmail = (data.submittedByEmail || data.email || data.userEmail || '').trim().toLowerCase();
+        if (ownerEmail) {
           allMedia.push({
-            submittedByEmail: data.submittedByEmail.trim().toLowerCase(),
+            submittedByEmail: ownerEmail,
             post: {
               id: d.id,
               title: data.title || 'คลังสื่อผลิตเอง',
@@ -673,7 +679,7 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 5. Reward claims
   const unsubClaims = onSnapshot(
-    collection(db, CLAIMS_COLLECTION),
+    query(collection(db, CLAIMS_COLLECTION), limit(500)),
     (snap) => {
       claimsMap = {};
       snap.forEach((d) => {
@@ -689,13 +695,17 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   // 6. User profiles for real names and roles
   const unsubProfiles = onSnapshot(
-    collection(db, 'user_profiles'),
+    query(collection(db, 'user_profiles'), limit(500)),
     (snap) => {
+      const deletedUsers = getDeletedUserEmails();
       profilesMap = {};
       snap.forEach((d) => {
         const data = d.data();
         if (data.email) {
-          profilesMap[data.email.trim().toLowerCase()] = data;
+          const norm = data.email.trim().toLowerCase();
+          if (!deletedUsers.has(norm)) {
+            profilesMap[norm] = data;
+          }
         }
       });
       computeAll();

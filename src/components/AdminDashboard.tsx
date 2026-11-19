@@ -49,6 +49,12 @@ import {
   getCleanRealName,
   deleteUserAccountCompletely 
 } from '../services/userProfileService';
+import {
+  resolveDisplayAvatarUrl,
+  sanitizeAvatarUrl,
+  buildFallbackAvatarUrl,
+  isUiAvatarPlaceholder,
+} from '../utils/avatarUtils';
 import { AdminUserManagementModal } from './AdminUserManagementModal';
 import { AdminEmailAuditModal } from './AdminEmailAuditModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
@@ -80,8 +86,11 @@ import {
 import { 
   InnovationSubmission, 
   FacilitySubmission, 
+  TeacherMediaWork,
   subscribeAllInnovations, 
   subscribeAllSubmissions,
+  subscribeTeacherMedia,
+  syncUserSubmissionCountIfOutOfSync,
   saveCriteriaPoster,
   subscribeCriteriaPoster,
   getInitialCriteriaPosterUrl,
@@ -157,6 +166,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Real-time Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
+  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
@@ -355,6 +365,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setFacilities(list);
     });
 
+    const unsubTeacherMedia = subscribeTeacherMedia((works) => {
+      setTeacherMedia(works);
+    });
+
     const unsubLogo = subscribeSchoolLogo((url: string) => {
       setCurrentLogoUrl(url);
     });
@@ -395,6 +409,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return () => {
       unsubInnovations();
       unsubFacilities();
+      unsubTeacherMedia();
       unsubLogo();
       unsubCertLogo();
       unsubPoster();
@@ -405,10 +420,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, []);
 
-  // Compute aggregated summaries
+  // Compute aggregated summaries across BOTH teacher_innovations_submissions & teacher_media_repository
   const teacherSummaries = useMemo(() => {
-    return aggregateTeacherSummary(innovations);
-  }, [innovations]);
+    return aggregateTeacherSummary(innovations, teacherMedia, userProfilesMap);
+  }, [innovations, teacherMedia, userProfilesMap]);
+
+  // Self-healing sync: synchronize out-of-sync user_profiles stats.submissionCount in background (memo-guarded, zero N+1 reads)
+  useEffect(() => {
+    if (teacherSummaries.length === 0) return;
+    teacherSummaries.forEach((teacher) => {
+      const normEmail = (teacher.email || '').trim().toLowerCase();
+      if (!normEmail) return;
+      const prof = userProfilesMap[normEmail];
+      if (prof && prof.stats?.submissionCount !== teacher.submittedCount) {
+        syncUserSubmissionCountIfOutOfSync(
+          normEmail,
+          teacher.submittedCount,
+          prof.stats?.submissionCount,
+          prof.uid
+        );
+      }
+    });
+  }, [teacherSummaries, userProfilesMap]);
 
   // Filtered teachers list (Tab 3)
   const filteredTeacherSummaries = useMemo(() => {
@@ -453,7 +486,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Statistics calculation
   const stats = useMemo(() => {
-    const totalSubmissions = innovations.length;
+    const unifiedTotal = teacherSummaries.reduce((sum, t) => sum + t.submittedCount, 0);
+    const totalSubmissions = Math.max(innovations.length, unifiedTotal);
     const totalTeachers = teacherSummaries.length;
     const completed5Count = teacherSummaries.filter(t => t.isComplete).length;
     const inProgressCount = totalTeachers - completed5Count;
@@ -906,10 +940,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const isEligible = visits >= 100;
       const progressPercent = Math.min(100, Math.round((visits / 100) * 100));
 
+      const resolvedCandAvatar = resolveDisplayAvatarUrl({
+        customPhotoUrl: profile?.photoURL,
+        firestoreAvatarUrl: profile?.avatarUrl,
+        localCachedAvatarUrl: visitData.avatarUrl,
+        fallbackSeedName: realName || email,
+        size: 128,
+      });
+
       return {
         email,
         realName,
-        avatarUrl: profile?.avatarUrl || visitData.avatarUrl || '',
+        avatarUrl: isUiAvatarPlaceholder(resolvedCandAvatar) ? '' : resolvedCandAvatar,
         school: profile?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
         role: profile?.role || (email === SUPER_ADMIN_EMAIL.toLowerCase() ? 'ผู้ดูแลระบบ' : 'ครูผู้สอน'),
         visits,
@@ -2161,7 +2203,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
                         const normEmail = log.email.trim().toLowerCase();
                         const profileObj = userProfilesMap[normEmail];
-                        const userAvatar = profileObj?.avatarUrl || log.avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(log.displayName || log.email.split('@')[0])}&background=1d4ed8&color=ffffff&size=128&bold=true`;
+                        const userAvatar = resolveDisplayAvatarUrl({
+                          customPhotoUrl: profileObj?.photoURL,
+                          firestoreAvatarUrl: profileObj?.avatarUrl,
+                          localCachedAvatarUrl: sanitizeAvatarUrl(log.avatarUrl),
+                          fallbackSeedName: profileObj?.fullName || log.displayName || log.email.split('@')[0],
+                          size: 128,
+                        });
 
                         return (
                           <tr key={log.id || index} className="hover:bg-slate-800/40 transition-colors">
@@ -2182,7 +2230,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                   alt={log.displayName}
                                   className="w-10 h-10 rounded-full object-cover border-2 border-slate-700 group-hover:border-sky-400 group-hover:scale-110 transition-all shadow-md bg-slate-800 cursor-pointer"
                                   onError={(e) => {
-                                    (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(log.displayName || log.email.split('@')[0])}&background=1d4ed8&color=ffffff&size=128&bold=true`;
+                                    const el = e.target as HTMLImageElement;
+                                    const fallback = buildFallbackAvatarUrl(profileObj?.fullName || log.displayName || log.email.split('@')[0], 128);
+                                    if (el.src !== fallback) el.src = fallback;
                                   }}
                                 />
                                 <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-blue-600 border border-slate-900 flex items-center justify-center text-white text-[9px] group-hover:bg-sky-400">
@@ -2968,9 +3018,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               <div className="flex items-center gap-2.5">
                                 <div className="w-8 h-8 rounded-full overflow-hidden bg-slate-800 border border-slate-700 flex-shrink-0">
                                   <img
-                                    src={`https://ui-avatars.com/api/?name=${encodeURIComponent(item.name || item.email)}&background=2563eb&color=ffffff&size=80`}
+                                    src={(() => {
+                                      const prof = userProfilesMap[item.email.trim().toLowerCase()];
+                                      return resolveDisplayAvatarUrl({
+                                        customPhotoUrl: prof?.photoURL,
+                                        firestoreAvatarUrl: prof?.avatarUrl,
+                                        fallbackSeedName: item.name || item.email,
+                                        size: 80,
+                                      });
+                                    })()}
                                     alt={item.name}
                                     className="w-full h-full object-cover"
+                                    onError={(e) => {
+                                      const el = e.target as HTMLImageElement;
+                                      const fallback = buildFallbackAvatarUrl(item.name || item.email, 80);
+                                      if (el.src !== fallback) el.src = fallback;
+                                    }}
                                   />
                                 </div>
                                 <div>
@@ -3093,7 +3156,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                     setViewUserProfileTarget({
                                       email: item.email,
                                       name: prof?.fullName || item.name,
-                                      avatarUrl: prof?.avatarUrl || '',
+                                      avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
                                     });
                                   }}
                                   className="px-2.5 py-1 rounded-lg bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white text-[11px] font-bold inline-flex items-center gap-1 transition-all cursor-pointer"
@@ -3404,7 +3467,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                 setViewUserProfileTarget({
                                   email: item.userEmail,
                                   name: prof?.fullName || item.teacherName,
-                                  avatarUrl: prof?.avatarUrl || '',
+                                  avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
                                 });
                               }}
                               className="text-left hover:text-sky-300 transition-colors cursor-pointer group"
@@ -3610,7 +3673,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                 setViewUserProfileTarget({
                                   email: teacher.email,
                                   name: prof?.fullName || teacher.teacherName,
-                                  avatarUrl: prof?.avatarUrl || '',
+                                  avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
                                 });
                               }}
                               className="hover:text-sky-300 hover:underline cursor-pointer text-left"
@@ -3631,7 +3694,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               <div className="w-16 h-2 rounded-full bg-slate-800 overflow-hidden">
                                 <div
                                   className={`h-full rounded-full ${teacher.isComplete ? 'bg-emerald-500' : 'bg-blue-500'}`}
-                                  style={{ width: `${(teacher.submittedCount / 5) * 100}%` }}
+                                  style={{ width: `${Math.min(100, (teacher.submittedCount / 5) * 100)}%` }}
                                 />
                               </div>
                             </div>
@@ -3643,7 +3706,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                               </span>
                             ) : (
                               <span className="px-2.5 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-400/30 text-[10px]">
-                                ขาดอีก {5 - teacher.submittedCount} ชิ้น
+                                ขาดอีก {Math.max(0, 5 - teacher.submittedCount)} ชิ้น
                               </span>
                             )}
                           </td>
@@ -3662,7 +3725,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                   setViewUserProfileTarget({
                                     email: teacher.email,
                                     name: prof?.fullName || teacher.teacherName,
-                                    avatarUrl: prof?.avatarUrl || '',
+                                    avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
                                   });
                                 }}
                                 className="px-2.5 py-1 rounded-lg text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer"
@@ -3893,7 +3956,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                                   setViewUserProfileTarget({
                                     email: fac.userEmail,
                                     name: prof?.fullName || fac.teacherName,
-                                    avatarUrl: prof?.avatarUrl || '',
+                                    avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
                                   });
                                 }}
                                 className="hover:text-sky-300 hover:underline cursor-pointer text-left"
@@ -5011,6 +5074,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         userProfilesMap={userProfilesMap}
         loginLogs={loginLogs}
         innovations={innovations}
+        teacherMedia={teacherMedia}
         facilities={facilities}
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
@@ -5041,7 +5105,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           setViewUserProfileTarget({
             email: targetEmail,
             name: prof?.fullName || prof?.displayName || norm.split('@')[0],
-            avatarUrl: prof?.avatarUrl || '',
+            avatarUrl: sanitizeAvatarUrl(prof?.photoURL || prof?.avatarUrl),
           });
         }}
       />

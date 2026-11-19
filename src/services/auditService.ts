@@ -1,6 +1,7 @@
 import { collection, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
 import { db } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
+import { sanitizeAvatarUrl } from '../utils/avatarUtils';
 
 export interface LoginLogEntry {
   id?: string;
@@ -394,7 +395,7 @@ export async function logUserLogin(data: {
     loginDate: nowDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }),
     loginTime: nowDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     source: 'ACU Learning Media & Innovation Portal',
-    avatarUrl: data.avatarUrl || '',
+    avatarUrl: sanitizeAvatarUrl(data.avatarUrl),
   };
 
   // 1. Add to pending outbox + local cache immediately (0ms UI responsiveness)
@@ -783,8 +784,9 @@ function ensureSharedFirestoreSubscription(): void {
 
   try {
     const logsRef = collection(db, 'login_logs');
+    const logsQuery = query(logsRef, limit(1000));
     sharedUnsubscribeFirestore = onSnapshot(
-      logsRef,
+      logsQuery,
       (snapshot) => {
         const fsLogs: LoginLogEntry[] = [];
         const confirmedIds = new Set<string>();
@@ -824,7 +826,7 @@ function ensureSharedFirestoreSubscription(): void {
               d.loginTime ||
               (validDate ? tsDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'),
             source: d.source || 'ACU Portal',
-            avatarUrl: d.avatarUrl || '',
+            avatarUrl: sanitizeAvatarUrl(d.avatarUrl),
           });
         });
 
@@ -882,6 +884,27 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
       hasReceivedServerSnapshot = false;
     }
   };
+}
+
+/**
+ * Flush pending login logs and return current synchronized logs snapshot (quota-safe via shared listener)
+ */
+export async function syncLoginLogsFromServer(_force = false): Promise<LoginLogEntry[]> {
+  try {
+    await flushPendingLoginLogs();
+    ensureSharedFirestoreSubscription();
+  } catch {
+    // non-fatal fallback to local cache
+  }
+  return sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+}
+
+/**
+ * Acquire reference-counted live stats sync backed by the shared onSnapshot listener (zero polling reads)
+ */
+export function acquireLiveStatsSync(_intervalMs = 3500): () => void {
+  const noopListener = () => {};
+  return subscribeAllLoginLogs(noopListener);
 }
 
 /**
@@ -962,7 +985,7 @@ export async function fetchRecentLoginLogs(maxCount = 10): Promise<LoginLogEntry
         status: d.status || 'online',
         loginTimestamp: d.loginTimestamp || new Date().toISOString(),
         source: d.source || 'System Test',
-        avatarUrl: d.avatarUrl || '',
+        avatarUrl: sanitizeAvatarUrl(d.avatarUrl),
       });
     });
     return logs;
@@ -977,12 +1000,15 @@ export async function fetchRecentLoginLogs(maxCount = 10): Promise<LoginLogEntry
  */
 export async function saveUserProfile(profile: UserProfileData): Promise<boolean> {
   try {
-    const safeDocId = encodeURIComponent(profile.email.toLowerCase().trim());
+    const normEmail = profile.email.toLowerCase().trim();
+    const cleanAvatar = sanitizeAvatarUrl(profile.avatarUrl);
+    const safeDocId = encodeURIComponent(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
     await setDoc(profileRef, {
-      email: profile.email,
+      email: normEmail,
       displayName: profile.displayName,
-      avatarUrl: profile.avatarUrl,
+      avatarUrl: cleanAvatar,
+      photoURL: cleanAvatar,
       updatedAt: new Date().toISOString(),
     }, { merge: true });
     return true;

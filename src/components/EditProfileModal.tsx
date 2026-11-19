@@ -11,6 +11,12 @@ import {
   User,
   AlertCircle
 } from 'lucide-react';
+import {
+  compressAvatarFileToBase64,
+  isBlobUrl,
+  sanitizeAvatarUrl,
+  buildFallbackAvatarUrl,
+} from '../utils/avatarUtils';
 
 interface EditProfileModalProps {
   isOpen: boolean;
@@ -63,7 +69,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   currentAvatarUrl,
   onSaveAvatar,
 }) => {
-  const [selectedAvatar, setSelectedAvatar] = useState<string>(currentAvatarUrl);
+  const [selectedAvatar, setSelectedAvatar] = useState<string>(() => sanitizeAvatarUrl(currentAvatarUrl));
   const [customUrlInput, setCustomUrlInput] = useState<string>('');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
@@ -72,17 +78,18 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
 
   useEffect(() => {
     if (isOpen) {
-      setSelectedAvatar(currentAvatarUrl || '');
+      setSelectedAvatar(sanitizeAvatarUrl(currentAvatarUrl));
       setUploadError(null);
     }
   }, [isOpen, currentAvatarUrl]);
 
   if (!isOpen) return null;
 
-  // Handle local file upload and compress to clean Base64
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Handle local file upload and compress to persistent Base64 JPEG (<80KB, max 200x200px)
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
 
     if (!file.type.startsWith('image/')) {
@@ -90,66 +97,39 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
       return;
     }
 
-    if (file.size > 8 * 1024 * 1024) {
-      setUploadError('ขนาดไฟล์เกิน 8MB กรุณาเลือกรูปภาพที่มีขนาดเล็กลง');
+    if (file.size > 10 * 1024 * 1024) {
+      setUploadError('ขนาดไฟล์เกิน 10MB กรุณาเลือกรูปภาพที่มีขนาดเล็กลง');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const img = new Image();
-      img.onload = () => {
-        // Resize canvas to max 256x256 for instant cloud synchronization across devices
-        const canvas = document.createElement('canvas');
-        const MAX_DIM = 256;
-        let width = img.width;
-        let height = img.height;
-
-        if (width > height) {
-          if (width > MAX_DIM) {
-            height = Math.round((height * MAX_DIM) / width);
-            width = MAX_DIM;
-          }
-        } else {
-          if (height > MAX_DIM) {
-            width = Math.round((width * MAX_DIM) / height);
-            height = MAX_DIM;
-          }
-        }
-
-        canvas.width = width;
-        canvas.height = height;
-        const ctx = canvas.getContext('2d');
-        if (ctx) {
-          ctx.drawImage(img, 0, 0, width, height);
-          const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.80);
-          setSelectedAvatar(compressedDataUrl);
-        } else {
-          setSelectedAvatar(event.target?.result as string);
-        }
-      };
-      img.onerror = () => {
-        setUploadError('ไม่สามารถอ่านไฟล์รูปภาพนี้ได้ กรุณาลองเลือกไฟล์อื่น (JPG, PNG, WebP)');
-      };
-      img.src = event.target?.result as string;
-    };
-    reader.onerror = () => {
-      setUploadError('เกิดข้อผิดพลาดในการอ่านไฟล์รูปภาพ');
-    };
-    reader.readAsDataURL(file);
-    e.target.value = '';
+    setIsProcessing(true);
+    try {
+      const compressedDataUrl = await compressAvatarFileToBase64(file);
+      setSelectedAvatar(compressedDataUrl);
+    } catch (err: any) {
+      setUploadError(err?.message || 'ไม่สามารถอ่านหรือบีบอัดไฟล์รูปภาพได้ กรุณาลองเลือกไฟล์อื่น');
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const handleApplyUrl = () => {
-    if (!customUrlInput.trim()) return;
-    setSelectedAvatar(customUrlInput.trim());
+    setUploadError(null);
+    const trimmed = customUrlInput.trim();
+    if (!trimmed) return;
+    if (isBlobUrl(trimmed)) {
+      setUploadError('ไม่สามารถใช้ลิงก์ชั่วคราว (blob:) ได้ กรุณาอัปโหลดไฟล์รูปภาพหรือวางลิงก์ https:// ที่ถาวร');
+      return;
+    }
+    setSelectedAvatar(trimmed);
     setCustomUrlInput('');
   };
 
   const handleSave = async () => {
-    const avatarToSave = (selectedAvatar || currentAvatarUrl || '').trim();
-    if (!avatarToSave) {
-      setUploadError('กรุณาเลือกรูปโปรไฟล์หรืออัปโหลดรูปภาพก่อนกดบันทึก');
+    setUploadError(null);
+    const avatarToSave = sanitizeAvatarUrl(selectedAvatar || currentAvatarUrl);
+    if (!avatarToSave || isBlobUrl(avatarToSave)) {
+      setUploadError('กรุณาเลือกรูปโปรไฟล์หรืออัปโหลดรูปภาพที่ถูกต้องก่อนกดบันทึก');
       return;
     }
     setIsProcessing(true);
@@ -165,10 +145,8 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
   };
 
   const handleResetToDefault = () => {
-    // Standard Google / ACU default avatar
-    const defaultUrl = `https://ui-avatars.com/api/?name=${encodeURIComponent(
-      displayName || userEmail
-    )}&background=1d4ed8&color=ffffff&size=256&bold=true`;
+    setUploadError(null);
+    const defaultUrl = buildFallbackAvatarUrl(displayName || userEmail, 200);
     setSelectedAvatar(defaultUrl);
   };
 
@@ -216,14 +194,13 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
             <div className="relative group">
               <div className="w-28 h-28 rounded-full overflow-hidden p-1 bg-gradient-to-tr from-blue-600 via-indigo-500 to-red-500 shadow-xl">
                 <img
-                  src={selectedAvatar}
+                  src={sanitizeAvatarUrl(selectedAvatar) || buildFallbackAvatarUrl(displayName || userEmail, 200)}
                   alt={displayName}
                   className="w-full h-full object-cover rounded-full bg-slate-800"
                   onError={(e) => {
-                    // Fallback to UI avatars on broken image
-                    (e.target as HTMLImageElement).src = `https://ui-avatars.com/api/?name=${encodeURIComponent(
-                      displayName
-                    )}&background=1d4ed8&color=ffffff&size=256&bold=true`;
+                    const el = e.target as HTMLImageElement;
+                    const fallback = buildFallbackAvatarUrl(displayName || userEmail, 200);
+                    if (el.src !== fallback) el.src = fallback;
                   }}
                 />
               </div>

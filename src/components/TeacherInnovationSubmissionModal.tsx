@@ -27,15 +27,22 @@ import {
   INNOVATION_MEDIA_TYPES, 
   PRODUCTION_TYPES, 
   InnovationSubmission,
+  TeacherMediaWork,
   saveInnovationSubmission, 
   updateInnovationSubmission,
   deleteInnovationSubmission,
-  subscribeUserInnovations,
+  deleteTeacherMedia,
   subscribeAllInnovations,
+  subscribeTeacherMedia,
   exportInnovationsToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
-  canUserModify
+  canUserModify,
+  isValidActiveMediaRecord,
+  doesMediaRecordBelongToTeacher,
+  extractMediaEmails,
+  getUnifiedTeacherMediaRecords
 } from '../services/submissionService';
+import { resolveUserUid } from '../services/userProfileService';
 
 interface TeacherInnovationSubmissionModalProps {
   userEmail: string;
@@ -77,8 +84,8 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [submittedId, setSubmittedId] = useState('');
-  const [userSubmissions, setUserSubmissions] = useState<InnovationSubmission[]>([]);
   const [allSubmissions, setAllSubmissions] = useState<InnovationSubmission[]>([]);
+  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [copyNotice, setCopyNotice] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
 
@@ -88,62 +95,73 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Subscribe to real-time submissions with case-insensitivity & teacherName fallback
+  // Subscribe once via shared multiplexed streams (zero extra Firestore reads; never tear down on editingId change)
   useEffect(() => {
-    const targetName = defaultTeacherName || teacherName;
-    const unsubUser = subscribeUserInnovations(
-      userEmail,
-      (list) => {
-        setUserSubmissions(list);
-        if (list.length > 0) {
-          const prevGroup = list.find((s) => s.subjectGroup)?.subjectGroup;
-          if (prevGroup && !editingId) {
-            setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
-          }
-        }
-      },
-      targetName
-    );
     const unsubAll = subscribeAllInnovations((list) => {
       setAllSubmissions(list);
     });
+    const unsubMedia = subscribeTeacherMedia((works) => {
+      setTeacherMedia(works);
+    });
     return () => {
-      unsubUser();
       unsubAll();
+      unsubMedia();
     };
-  }, [userEmail, defaultTeacherName, editingId]);
+  }, [userEmail]);
 
-  // Match user submissions strictly by email when userEmail is present (prevents cross-user or stale resurrection)
+  const currentUserUid = React.useMemo(() => resolveUserUid(userEmail), [userEmail]);
+
+  const activeAllSubmissions = React.useMemo(() => {
+    return allSubmissions.filter((sub) => isValidActiveMediaRecord(sub));
+  }, [allSubmissions]);
+
+  // Robustly match user submissions by uid, userId, normalized lowercase emails, or legacy authorName/teacherName
   const effectiveUserSubmissions = React.useMemo(() => {
-    if (userSubmissions.length > 0) {
-      return userSubmissions;
-    }
+    const teacherMatcher = {
+      uid: currentUserUid,
+      email: userEmail,
+      teacherName: teacherName || defaultTeacherName,
+      fullName: defaultTeacherName,
+    };
 
-    const normEmail = userEmail.trim().toLowerCase();
-    const normName = (teacherName || defaultTeacherName || '').trim().toLowerCase();
-
-    return allSubmissions
-      .filter((sub) => {
-        const subEmail = (sub.userEmail || '').trim().toLowerCase();
-        const subName = (sub.teacherName || '').trim().toLowerCase();
-        if (subEmail) {
-          return Boolean(normEmail && subEmail === normEmail);
-        }
-        return Boolean(
-          normName && (subName === normName || (normName.length > 3 && subName.includes(normName)))
-        );
-      })
+    return activeAllSubmissions
+      .filter((sub) => doesMediaRecordBelongToTeacher(sub, teacherMatcher))
       .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-  }, [allSubmissions, userSubmissions, userEmail, teacherName, defaultTeacherName]);
+  }, [activeAllSubmissions, currentUserUid, userEmail, teacherName, defaultTeacherName]);
+
+  // Unified count across both teacher_innovations_submissions and teacher_media_repository
+  const unifiedUserMedia = React.useMemo(() => {
+    return getUnifiedTeacherMediaRecords(
+      {
+        uid: currentUserUid,
+        email: userEmail,
+        teacherName: teacherName || defaultTeacherName,
+        fullName: defaultTeacherName,
+      },
+      activeAllSubmissions,
+      teacherMedia
+    );
+  }, [currentUserUid, userEmail, teacherName, defaultTeacherName, activeAllSubmissions, teacherMedia]);
+
+  // Prefill subjectGroup from existing user submission when not editing
+  useEffect(() => {
+    if (editingId || effectiveUserSubmissions.length === 0) return;
+    const prevGroup = effectiveUserSubmissions.find((s) => s.subjectGroup)?.subjectGroup;
+    if (prevGroup) {
+      setSubjectGroup((curr) => (curr === SUBJECT_GROUPS[0] ? prevGroup : curr));
+    }
+  }, [effectiveUserSubmissions, editingId]);
+
+  const userSubmissions = effectiveUserSubmissions;
 
   // Calculate next unsubmitted item slot (1 to 5)
   const nextUnsubmittedSlot = React.useMemo(() => {
     for (let i = 1; i <= 5; i++) {
-      const exists = effectiveUserSubmissions.some((s) => Number(s.itemNumber) === i);
-      if (!exists) return i;
+      const slotUsed = unifiedUserMedia.slots[i - 1] && (unifiedUserMedia.slots[i - 1].title || unifiedUserMedia.slots[i - 1].status !== 'pending');
+      if (!slotUsed) return i;
     }
     return 1;
-  }, [effectiveUserSubmissions]);
+  }, [unifiedUserMedia.slots]);
 
   // Handle image upload & compression
   const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -424,7 +442,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
             }`}
           >
             <Clock className="w-4 h-4" />
-            <span>เช็คสถานะการส่ง ({effectiveUserSubmissions.length}/5 ชิ้น)</span>
+            <span>เช็คสถานะการส่ง ({unifiedUserMedia.submittedCount}/5 ชิ้น)</span>
           </button>
 
           <button
@@ -528,7 +546,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                     <Sparkles className="w-4 h-4 text-amber-400" />
                     <span className="font-bold text-white">ความคืบหน้าการส่งสื่อ:</span>
                     <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 font-bold text-[11px] border border-blue-400/30">
-                      {effectiveUserSubmissions.length} จาก 5 ชิ้น ({Math.round((effectiveUserSubmissions.length / 5) * 100)}%)
+                      {unifiedUserMedia.submittedCount} จาก 5 ชิ้น ({Math.min(100, Math.round((unifiedUserMedia.submittedCount / 5) * 100))}%)
                     </span>
                   </div>
                   <button
@@ -544,6 +562,9 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                 <div className="grid grid-cols-5 gap-2">
                   {[1, 2, 3, 4, 5].map((slot) => {
                     const found = effectiveUserSubmissions.find((s) => Number(s.itemNumber) === slot);
+                    const unifiedSlot = unifiedUserMedia.slots[slot - 1];
+                    const hasSlotItem = Boolean(found || (unifiedSlot && unifiedSlot.title));
+                    const slotTitle = found?.mediaTitle || unifiedSlot?.title || '';
                     const isSelected = itemNumber === slot;
                     return (
                       <button
@@ -558,15 +579,15 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                         className={`p-2 rounded-xl text-center border transition-all cursor-pointer ${
                           isSelected
                             ? 'border-blue-400 bg-blue-600/30 text-white font-bold ring-2 ring-blue-500/40 shadow-sm'
-                            : found
+                            : hasSlotItem
                             ? 'border-emerald-500/40 bg-emerald-950/30 text-emerald-300 font-medium hover:border-emerald-400'
                             : 'border-slate-800 bg-slate-900/60 text-slate-400 hover:border-slate-700'
                         }`}
-                        title={found ? `ชิ้นที่ ${slot}: ${found.mediaTitle} (คลิกเพื่อแก้ไข)` : `ชิ้นที่ ${slot}: ยังไม่ส่ง (คลิกเพื่อส่ง)`}
+                        title={hasSlotItem ? `ชิ้นที่ ${slot}: ${slotTitle}${found ? ' (คลิกเพื่อแก้ไข)' : ''}` : `ชิ้นที่ ${slot}: ยังไม่ส่ง (คลิกเพื่อส่ง)`}
                       >
                         <div className="text-[10px] opacity-80">ชิ้นที่ {slot}</div>
                         <div className="text-xs font-bold truncate mt-0.5">
-                          {found ? '✔ ส่งแล้ว' : 'รอส่ง'}
+                          {hasSlotItem ? '✔ ส่งแล้ว' : 'รอส่ง'}
                         </div>
                       </button>
                     );
@@ -883,44 +904,65 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
           {/* TAB 2: STATUS */}
           {activeTab === 'status' && (() => {
-            // Determine all unique teachers who have submitted
-            const teacherMap = new Map<string, { email: string; name: string; count: number; group: string }>();
-            allSubmissions.forEach((s) => {
-              const emailKey = (s.userEmail || '').trim().toLowerCase() || s.teacherName.trim().toLowerCase();
-              if (!emailKey) return;
+            // Determine all unique teachers across BOTH innovations and teacher_media_repository (deduplicated)
+            const teacherMap = new Map<string, { email: string; name: string; count: number; group: string; seenIds: Set<string> }>();
+            const registerTeacherItem = (item: any, fallbackTitle: string) => {
+              if (!isValidActiveMediaRecord(item)) return;
+              const email = extractMediaEmails(item)[0] || '';
+              const name = (item.teacherName || item.authorName || '').trim();
+              const emailKey = email || name.toLowerCase();
+              if (!emailKey || !fallbackTitle) return;
+              const canonicalId = String(item.id || '').startsWith('work_') ? String(item.id).slice(5) : String(item.id || '');
               const existing = teacherMap.get(emailKey);
               if (existing) {
+                if (canonicalId && existing.seenIds.has(canonicalId)) return;
+                if (canonicalId) existing.seenIds.add(canonicalId);
                 existing.count++;
               } else {
+                const seenIds = new Set<string>();
+                if (canonicalId) seenIds.add(canonicalId);
                 teacherMap.set(emailKey, {
-                  email: s.userEmail.trim(),
-                  name: s.teacherName.trim(),
+                  email: email || emailKey,
+                  name: name || email,
                   count: 1,
-                  group: s.subjectGroup || '',
+                  group: item.subjectGroup || '',
+                  seenIds,
                 });
               }
-            });
+            };
+            activeAllSubmissions.forEach((s) => registerTeacherItem(s, s.mediaTitle));
+            teacherMedia.forEach((m) => registerTeacherItem(m, m.title));
             const distinctTeachers = Array.from(teacherMap.values());
 
             // Active teacher focus for the 5-slot matrix
             const isViewingSelf = selectedTeacherView === 'my' || selectedTeacherView === userEmail.toLowerCase().trim();
             const activeTeacherEmail = isViewingSelf ? userEmail.trim().toLowerCase() : selectedTeacherView;
-            
-            // Submissions belonging to the focused teacher for the 5-slot board
-            const focusedTeacherSubmissions = isViewingSelf
-              ? effectiveUserSubmissions
-              : allSubmissions.filter((s) => (s.userEmail || '').trim().toLowerCase() === activeTeacherEmail);
-
             const focusedTeacherName = isViewingSelf
               ? (teacherName || defaultTeacherName || userEmail)
               : (teacherMap.get(activeTeacherEmail)?.name || activeTeacherEmail);
+
+            const focusedMatcher = {
+              uid: isViewingSelf ? currentUserUid : (activeTeacherEmail.includes('@') ? resolveUserUid(activeTeacherEmail) : ''),
+              email: activeTeacherEmail.includes('@') ? activeTeacherEmail : '',
+              teacherName: focusedTeacherName,
+              fullName: focusedTeacherName,
+            };
+
+            const focusedUnified = isViewingSelf
+              ? unifiedUserMedia
+              : getUnifiedTeacherMediaRecords(focusedMatcher, activeAllSubmissions, teacherMedia);
+
+            // Submissions belonging to the focused teacher for the 5-slot board
+            const focusedTeacherSubmissions = isViewingSelf
+              ? effectiveUserSubmissions
+              : activeAllSubmissions.filter((s) => doesMediaRecordBelongToTeacher(s, focusedMatcher));
 
             // Filter submissions list based on search, view mode, subject group, and completion
             const baseSubmissions = selectedTeacherView === 'my'
               ? effectiveUserSubmissions
               : selectedTeacherView === 'all'
-              ? allSubmissions
-              : allSubmissions.filter((s) => (s.userEmail || '').trim().toLowerCase() === selectedTeacherView);
+              ? activeAllSubmissions
+              : activeAllSubmissions.filter((s) => doesMediaRecordBelongToTeacher(s, focusedMatcher));
 
             const displayedSubmissions = baseSubmissions.filter((sub) => {
               // Subject group filter
@@ -934,7 +976,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                 const matchName = (sub.teacherName || '').toLowerCase().includes(term);
                 const matchTitle = (sub.mediaTitle || '').toLowerCase().includes(term);
                 const matchUsage = (sub.usageDetails || '').toLowerCase().includes(term);
-                const matchEmail = (sub.userEmail || '').toLowerCase().includes(term);
+                const matchEmail = (sub.userEmail || extractMediaEmails(sub)[0] || '').toLowerCase().includes(term);
                 const matchGroup = (sub.subjectGroup || '').toLowerCase().includes(term);
                 if (!matchName && !matchTitle && !matchUsage && !matchEmail && !matchGroup) {
                   return false;
@@ -944,10 +986,8 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
               return true;
             });
 
-            const completedSlotsCount = [1, 2, 3, 4, 5].filter((slot) =>
-              focusedTeacherSubmissions.some((s) => Number(s.itemNumber) === slot)
-            ).length;
-            const progressPercent = Math.round((completedSlotsCount / 5) * 100);
+            const completedSlotsCount = focusedUnified.submittedCount;
+            const progressPercent = Math.min(100, Math.round((completedSlotsCount / 5) * 100));
 
             return (
               <div className="space-y-5">
@@ -975,7 +1015,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                             : 'text-slate-400 hover:text-white'
                         }`}
                       >
-                        ผลงานของฉัน ({effectiveUserSubmissions.length}/5)
+                        ผลงานของฉัน ({unifiedUserMedia.submittedCount}/5)
                       </button>
                       <button
                         type="button"
@@ -986,7 +1026,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                             : 'text-slate-400 hover:text-white'
                         }`}
                       >
-                        คุณครูทั้งหมด ({allSubmissions.length} รายการ)
+                        คุณครูทั้งหมด ({activeAllSubmissions.length} รายการ)
                       </button>
                     </div>
                   </div>
@@ -1105,7 +1145,20 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
                     {[1, 2, 3, 4, 5].map((slotNumber) => {
                       const match = focusedTeacherSubmissions.find((s) => Number(s.itemNumber) === slotNumber);
-                      const isSubmitted = !!match;
+                      const unifiedSlot = focusedUnified.slots[slotNumber - 1];
+                      const unifiedRec = unifiedSlot?.title
+                        ? focusedUnified.records.find((r) => r.title === unifiedSlot.title)
+                        : undefined;
+                      const isSubmitted = Boolean(match || (unifiedSlot && unifiedSlot.title));
+                      const displayTitle = match?.mediaTitle || unifiedSlot?.title || '';
+                      const displayMediaType = match?.mediaType || unifiedSlot?.category || 'สื่อการสอน';
+                      const displayImageUrl = match?.imageUrl || unifiedSlot?.coverImageUrl || '';
+                      const displayOnlineUrl = match?.onlineUrl || unifiedSlot?.linkUrl || '';
+                      const displaySubjectGroup = match?.subjectGroup || unifiedRec?.subjectGroup || '-';
+                      const displayDateText = match?.submittedAt
+                        ? new Date(match.submittedAt).toLocaleDateString('th-TH')
+                        : (unifiedSlot?.submittedDate || 'ส่งแล้ว');
+                      const ownerEmailForAction = match?.userEmail || unifiedRec?.ownerEmail || '';
 
                       return (
                         <div
@@ -1136,20 +1189,20 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                             </div>
 
                             {/* Card Body: Thumbnail or Icon */}
-                            {isSubmitted && match ? (
+                            {isSubmitted ? (
                               <div className="space-y-2">
-                                {match.imageUrl ? (
+                                {displayImageUrl ? (
                                   <div className="w-full h-20 rounded-xl overflow-hidden bg-slate-950 border border-slate-700 relative">
                                     <img
-                                      src={match.imageUrl}
-                                      alt={match.mediaTitle}
+                                      src={displayImageUrl}
+                                      alt={displayTitle}
                                       className="w-full h-full object-cover"
                                       onError={(e) => {
                                         (e.target as HTMLImageElement).src = '/acu_active_logo.png';
                                       }}
                                     />
                                     <div className="absolute bottom-1 right-1 px-1.5 py-0.5 rounded bg-black/70 text-[9px] text-white font-medium">
-                                      {match.mediaType}
+                                      {displayMediaType}
                                     </div>
                                   </div>
                                 ) : (
@@ -1158,14 +1211,14 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                   </div>
                                 )}
                                 <div>
-                                  <h5 className="text-xs font-bold text-white line-clamp-2 leading-tight" title={match.mediaTitle}>
-                                    {match.mediaTitle}
+                                  <h5 className="text-xs font-bold text-white line-clamp-2 leading-tight" title={displayTitle}>
+                                    {displayTitle}
                                   </h5>
                                   <p className="text-[10px] text-slate-400 truncate mt-1">
-                                    {match.subjectGroup || '-'}
+                                    {displaySubjectGroup}
                                   </p>
                                   <p className="text-[10px] text-slate-500 mt-0.5">
-                                    {new Date(match.submittedAt).toLocaleDateString('th-TH')}
+                                    {displayDateText}
                                   </p>
                                 </div>
                               </div>
@@ -1183,11 +1236,11 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
                           {/* Card Footer Actions */}
                           <div className="mt-3 pt-2.5 border-t border-slate-700/60">
-                            {isSubmitted && match ? (
+                            {isSubmitted ? (
                               <div className="flex items-center gap-1.5 justify-between">
-                                {match.onlineUrl ? (
+                                {displayOnlineUrl ? (
                                   <a
-                                    href={match.onlineUrl}
+                                    href={displayOnlineUrl}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="px-2 py-1 rounded-lg bg-slate-700/80 hover:bg-slate-700 text-sky-300 text-[11px] font-medium flex items-center gap-1 transition-colors"
@@ -1200,20 +1253,37 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                   <span />
                                 )}
 
-                                {canUserModify(match.userEmail, userEmail) && (
+                                {canUserModify(ownerEmailForAction, userEmail) && (
                                   <div className="flex items-center gap-1">
+                                    {match && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleStartEdit(match)}
+                                        className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                        title="แก้ไขข้อมูลสื่อ"
+                                      >
+                                        <Edit3 className="w-3 h-3" />
+                                        <span>แก้ไข</span>
+                                      </button>
+                                    )}
                                     <button
                                       type="button"
-                                      onClick={() => handleStartEdit(match)}
-                                      className="px-2 py-1 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
-                                      title="แก้ไขข้อมูลสื่อ"
-                                    >
-                                      <Edit3 className="w-3 h-3" />
-                                      <span>แก้ไข</span>
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => handleDeleteSubmission(match)}
+                                      onClick={() => {
+                                        if (match) {
+                                          handleDeleteSubmission(match);
+                                        } else if (unifiedRec?.mediaWorkId) {
+                                          if (window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${displayTitle}"?`)) {
+                                            deleteTeacherMedia(unifiedRec.mediaWorkId, userEmail).then((res) => {
+                                              if (res.success) {
+                                                setActionNotice(`ลบสื่อ "${displayTitle}" เรียบร้อยแล้ว`);
+                                                setTimeout(() => setActionNotice(null), 3000);
+                                              } else {
+                                                alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+                                              }
+                                            });
+                                          }
+                                        }
+                                      }}
                                       className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
                                       title="ลบสื่อนี้"
                                     >

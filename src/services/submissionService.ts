@@ -7,12 +7,23 @@ import {
   deleteDoc,
   query, 
   where, 
-  orderBy, 
+  orderBy,
+  limit,
   onSnapshot, 
   updateDoc, 
   increment 
 } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import {
+  adjustUserSubmissionCount,
+  DEFAULT_INNOVATION_ITEMS,
+  getCachedUserProfile,
+  getCleanRealName,
+  getDeletedUserEmails,
+  InnovationItem,
+  resolveUserUid,
+  setCachedUserProfile,
+} from './userProfileService';
 
 export const ADMIN_TARGET_EMAIL = 'weerapong1625@acu.ac.th';
 
@@ -64,6 +75,13 @@ export const SUBJECT_GROUPS = [
 
 export interface InnovationSubmission {
   id: string;
+  uid?: string;
+  userId?: string;
+  email?: string;
+  submittedByEmail?: string;
+  teacherEmail?: string;
+  authorEmail?: string;
+  authorName?: string;
   teacherName: string;
   subjectGroup?: string; // กลุ่มสาระการเรียนรู้ของครูผู้สอน (9 กลุ่มสาระ)
   gradeLevel: string;
@@ -76,7 +94,9 @@ export interface InnovationSubmission {
   imageUrl?: string; // ไฟล์สื่อรูปภาพ
   coverImageUrl?: string; // ภาพปกชิ้นงาน
   userEmail: string;
-  status: 'ส่งเรียบร้อย' | 'อนุมัติแล้ว' | 'รอตรวจสอบ';
+  status: 'ส่งเรียบร้อย' | 'อนุมัติแล้ว' | 'รอตรวจสอบ' | 'pending' | 'approved' | 'submitted' | 'under_review' | string;
+  isDeleted?: boolean;
+  deleted?: boolean;
   submittedAt: string;
   updatedAt?: string;
 }
@@ -156,6 +176,13 @@ export interface FacilitySubmission {
 
 export interface TeacherMediaWork {
   id: string;
+  uid?: string;
+  userId?: string;
+  email?: string;
+  userEmail?: string;
+  teacherEmail?: string;
+  authorEmail?: string;
+  authorName?: string;
   title: string;
   teacherName: string;
   subjectGroup: string;
@@ -174,6 +201,9 @@ export interface TeacherMediaWork {
   likedBy?: string[];
   userRatings?: { [emailKey: string]: number };
   submittedByEmail?: string;
+  status?: string;
+  isDeleted?: boolean;
+  deleted?: boolean;
   createdAt: string;
 }
 
@@ -221,6 +251,389 @@ export const LEGACY_FAKE_SEED_IDS = new Set<string>([
   'work_innov_weerapong_item5',
 ]);
 
+export const DELETED_MEDIA_STORAGE_KEY = 'acu_deleted_media_ids';
+
+export function getDeletedMediaIds(): Set<string> {
+  if (typeof window === 'undefined') return new Set();
+  try {
+    const raw = localStorage.getItem(DELETED_MEDIA_STORAGE_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) {
+        return new Set(arr.map((id: string) => String(id).trim()).filter(Boolean));
+      }
+    }
+  } catch {}
+  return new Set();
+}
+
+export function addDeletedMediaIds(ids: string[]): void {
+  if (typeof window === 'undefined' || !Array.isArray(ids) || ids.length === 0) return;
+  try {
+    const set = getDeletedMediaIds();
+    ids.forEach((rawId) => {
+      const id = String(rawId || '').trim();
+      if (!id) return;
+      set.add(id);
+      if (id.startsWith('work_')) {
+        set.add(id.slice(5));
+      } else {
+        set.add(`work_${id}`);
+      }
+    });
+    localStorage.setItem(DELETED_MEDIA_STORAGE_KEY, JSON.stringify(Array.from(set)));
+  } catch {}
+}
+
+function isMediaIdBlocked(id?: string): boolean {
+  if (!id) return false;
+  const trimmed = String(id).trim();
+  if (!trimmed || trimmed.startsWith('seed-') || LEGACY_FAKE_SEED_IDS.has(trimmed)) return true;
+  const blocked = getDeletedMediaIds();
+  const stripped = trimmed.startsWith('work_') ? trimmed.slice(5) : trimmed;
+  return blocked.has(trimmed) || blocked.has(stripped) || blocked.has(`work_${stripped}`);
+}
+
+/**
+ * Extract all normalized lowercase emails attached to a media or innovation document
+ */
+export function extractMediaEmails(item: any): string[] {
+  if (!item || typeof item !== 'object') return [];
+  const candidates = [
+    item.email,
+    item.userEmail,
+    item.submittedByEmail,
+    item.teacherEmail,
+    item.authorEmail,
+  ];
+  const emails: string[] = [];
+  for (const raw of candidates) {
+    if (typeof raw === 'string') {
+      const norm = raw.trim().toLowerCase();
+      if (norm && !emails.includes(norm)) {
+        emails.push(norm);
+      }
+    }
+  }
+  return emails;
+}
+
+const REJECTED_OR_DELETED_STATUSES = new Set([
+  'deleted',
+  'rejected',
+  'cancelled',
+  'canceled',
+  'ยกเลิก',
+  'ถูกลบ',
+  'ปฏิเสธ',
+  'ไม่ผ่าน',
+]);
+
+/**
+ * Check whether an innovation/media record is valid & active for counting.
+ * Counts pending, approved, submitted, under_review, Thai submitted statuses, and legacy records missing `status`,
+ * while excluding deleted/rejected records, deleted users, and persistent deletion blocklist items.
+ */
+export function isValidActiveMediaRecord(item: any): boolean {
+  if (!item || typeof item !== 'object') return false;
+  if (isMediaIdBlocked(item.id)) return false;
+  if (item.isDeleted === true || item.deleted === true) return false;
+
+  const status = typeof item.status === 'string' ? item.status.trim().toLowerCase() : '';
+  if (status && REJECTED_OR_DELETED_STATUSES.has(status)) {
+    return false;
+  }
+
+  const title = (item.mediaTitle || item.title || '').toString().trim();
+  if (!title) return false;
+
+  const deletedUsers = getDeletedUserEmails();
+  const emails = extractMediaEmails(item);
+  if (emails.length > 0 && emails.every((em) => deletedUsers.has(em))) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Robustly match a media/innovation record to a teacher using:
+ * 1) item.uid === teacher.uid OR item.userId === teacher.uid
+ * 2) normalized lowercase email match across email/userEmail/submittedByEmail/teacherEmail/authorEmail
+ * 3) trimmed authorName/teacherName match fallback ONLY when email and uid are missing on legacy records
+ */
+export function doesMediaRecordBelongToTeacher(
+  item: any,
+  teacher: {
+    uid?: string;
+    email?: string;
+    fullName?: string;
+    teacherName?: string;
+    displayName?: string;
+  }
+): boolean {
+  if (!item || typeof item !== 'object') return false;
+
+  const teacherUid = (teacher.uid || '').trim();
+  const itemUid = (item.uid || '').toString().trim();
+  const itemUserId = (item.userId || '').toString().trim();
+
+  if (teacherUid && ((itemUid && itemUid === teacherUid) || (itemUserId && itemUserId === teacherUid))) {
+    return true;
+  }
+
+  const teacherEmail = (teacher.email || '').trim().toLowerCase();
+  const itemEmails = extractMediaEmails(item);
+
+  if (teacherEmail && itemEmails.includes(teacherEmail)) {
+    return true;
+  }
+
+  // Fallback to trimmed authorName / teacherName only when both email and uid/userId are absent on legacy records
+  if (!itemUid && !itemUserId && itemEmails.length === 0) {
+    const recordNames = [item.authorName, item.teacherName]
+      .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+      .map((n) => getCleanRealName(n).trim().toLowerCase());
+
+    const teacherNames = [teacher.fullName, teacher.teacherName, teacher.displayName]
+      .filter((n): n is string => typeof n === 'string' && n.trim().length > 0)
+      .flatMap((n) => [n.trim().toLowerCase(), getCleanRealName(n).trim().toLowerCase()])
+      .filter(Boolean);
+
+    if (recordNames.length > 0 && teacherNames.length > 0) {
+      return recordNames.some((rn) =>
+        teacherNames.some(
+          (tn) => rn === tn || (tn.length > 3 && rn.includes(tn)) || (rn.length > 3 && tn.includes(rn))
+        )
+      );
+    }
+  }
+
+  return false;
+}
+
+export interface UnifiedMediaRecord {
+  canonicalId: string;
+  innovationId?: string;
+  mediaWorkId?: string;
+  itemNumber: number;
+  title: string;
+  mediaType: string;
+  productionType: string;
+  usageDetails: string;
+  subjectGroup: string;
+  gradeLevel: string;
+  teacherName: string;
+  ownerEmail: string;
+  onlineUrl: string;
+  coverImageUrl: string;
+  submittedAt: string;
+  status: 'approved' | 'submitted' | 'under_review';
+}
+
+export interface UnifiedTeacherMediaResult {
+  records: UnifiedMediaRecord[];
+  submittedCount: number;
+  slots: InnovationItem[];
+}
+
+function mapRawStatusToSlotStatus(rawStatus?: string): 'approved' | 'submitted' | 'under_review' {
+  const s = (rawStatus || '').trim().toLowerCase();
+  if (s === 'approved' || s === 'อนุมัติแล้ว') return 'approved';
+  if (s === 'under_review' || s === 'รอตรวจสอบ') return 'under_review';
+  return 'submitted';
+}
+
+/**
+ * Unify and deduplicate a teacher's media submissions across BOTH `teacher_innovations_submissions`
+ * and `teacher_media_repository` in memory (zero extra Firestore reads).
+ */
+export function getUnifiedTeacherMediaRecords(
+  teacher: {
+    uid?: string;
+    email?: string;
+    fullName?: string;
+    teacherName?: string;
+    displayName?: string;
+  },
+  innovations: InnovationSubmission[],
+  teacherMedia: TeacherMediaWork[]
+): UnifiedTeacherMediaResult {
+  const unifiedMap = new Map<string, UnifiedMediaRecord>();
+
+  // 1. Add innovation submissions first
+  innovations.forEach((inv) => {
+    if (!isValidActiveMediaRecord(inv)) return;
+    if (!doesMediaRecordBelongToTeacher(inv, teacher)) return;
+
+    const canonicalId = inv.id.startsWith('work_') ? inv.id.slice(5) : inv.id;
+    const ownerEmail = extractMediaEmails(inv)[0] || (teacher.email || '').trim().toLowerCase();
+    unifiedMap.set(canonicalId, {
+      canonicalId,
+      innovationId: inv.id,
+      itemNumber: Number(inv.itemNumber) || 1,
+      title: (inv.mediaTitle || '').trim(),
+      mediaType: inv.mediaType || 'สื่อการสอน',
+      productionType: inv.productionType || 'ครูผลิตสื่อเอง',
+      usageDetails: inv.usageDetails || '',
+      subjectGroup: inv.subjectGroup || SUBJECT_GROUPS[0],
+      gradeLevel: inv.gradeLevel || '-',
+      teacherName: inv.teacherName || teacher.fullName || teacher.teacherName || '',
+      ownerEmail,
+      onlineUrl: inv.onlineUrl || '',
+      coverImageUrl: inv.imageUrl || inv.coverImageUrl || '',
+      submittedAt: inv.submittedAt || '',
+      status: mapRawStatusToSlotStatus(inv.status),
+    });
+  });
+
+  // 2. Merge / add teacher_media_repository items (deduplicating paired work_<innovId> records)
+  teacherMedia.forEach((work) => {
+    if (!isValidActiveMediaRecord(work)) return;
+    if (!doesMediaRecordBelongToTeacher(work, teacher)) return;
+
+    const canonicalId = work.id.startsWith('work_') ? work.id.slice(5) : work.id;
+    const existing = unifiedMap.get(canonicalId);
+    if (existing) {
+      existing.mediaWorkId = work.id;
+      if (!existing.coverImageUrl && work.thumbnailUrl) existing.coverImageUrl = work.thumbnailUrl;
+      if (!existing.onlineUrl && work.onlineUrl) existing.onlineUrl = work.onlineUrl;
+      return;
+    }
+
+    const ownerEmail = extractMediaEmails(work)[0] || (teacher.email || '').trim().toLowerCase();
+    unifiedMap.set(canonicalId, {
+      canonicalId,
+      mediaWorkId: work.id,
+      itemNumber: Number(work.itemNumber) || 1,
+      title: (work.title || '').trim(),
+      mediaType: work.mediaType || 'สื่อการสอน',
+      productionType: work.productionType || 'ครูผลิตสื่อเอง',
+      usageDetails: work.subjectName || work.description || '',
+      subjectGroup: work.subjectGroup || SUBJECT_GROUPS[0],
+      gradeLevel: work.gradeLevel || '-',
+      teacherName: work.teacherName || work.authorName || teacher.fullName || teacher.teacherName || '',
+      ownerEmail,
+      onlineUrl: work.onlineUrl || '',
+      coverImageUrl: work.thumbnailUrl || '',
+      submittedAt: work.createdAt || '',
+      status: mapRawStatusToSlotStatus(work.status),
+    });
+  });
+
+  const records = Array.from(unifiedMap.values()).sort((a, b) => {
+    const slotDiff = (a.itemNumber || 99) - (b.itemNumber || 99);
+    if (slotDiff !== 0) return slotDiff;
+    return new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime();
+  });
+
+  // Map records cleanly into the 5 display slots (1..5):
+  // Pass 1: Place innovation records & distinct explicit slots into their declared slot 1..5 if empty
+  // Pass 2: Place any remaining records (e.g. direct Media Library uploads with itemNumber=1) into open slots 1..5
+  const slotAssignments: (UnifiedMediaRecord | null)[] = [null, null, null, null, null];
+  const unplaced: UnifiedMediaRecord[] = [];
+
+  for (const rec of records) {
+    const idx = rec.itemNumber - 1;
+    if (idx >= 0 && idx < 5 && !slotAssignments[idx]) {
+      slotAssignments[idx] = rec;
+    } else {
+      unplaced.push(rec);
+    }
+  }
+
+  for (const rec of unplaced) {
+    const emptyIdx = slotAssignments.findIndex((s) => s === null);
+    if (emptyIdx !== -1) {
+      slotAssignments[emptyIdx] = rec;
+    }
+  }
+
+  const slots: InnovationItem[] = DEFAULT_INNOVATION_ITEMS.map((defItem, idx) => {
+    const rec = slotAssignments[idx];
+    if (!rec) return defItem;
+    return {
+      id: defItem.id,
+      title: rec.title,
+      category: rec.mediaType,
+      status: rec.status,
+      submittedDate: rec.submittedAt
+        ? new Date(rec.submittedAt).toLocaleDateString('th-TH', {
+            day: 'numeric',
+            month: 'short',
+            year: 'numeric',
+          })
+        : 'ส่งแล้ว',
+      linkUrl: rec.onlineUrl || '',
+      coverImageUrl: rec.coverImageUrl || '',
+      notes: `${rec.productionType}${rec.usageDetails ? ` • ${rec.usageDetails}` : ''}`,
+    };
+  });
+
+  return {
+    records,
+    submittedCount: records.length,
+    slots,
+  };
+}
+
+// Module-level guard to ensure self-healing Firestore sync runs at most once per email+count per session
+const syncedSubmissionCountMemo = new Map<string, number>();
+
+/**
+ * Self-healing sync: when dynamic count differs from stored `stats.submissionCount`,
+ * update `user_profiles/{safeDocId}` and localStorage cache safely without N+1 reads or loops.
+ */
+export async function syncUserSubmissionCountIfOutOfSync(
+  teacherEmail: string,
+  actualCount: number,
+  storedCount?: number,
+  uid?: string
+): Promise<void> {
+  const normEmail = (teacherEmail || '').trim().toLowerCase();
+  if (!normEmail || actualCount < 0) return;
+  if (getDeletedUserEmails().has(normEmail)) return;
+  if (typeof storedCount === 'number' && storedCount === actualCount) return;
+  if (syncedSubmissionCountMemo.get(normEmail) === actualCount) return;
+
+  syncedSubmissionCountMemo.set(normEmail, actualCount);
+
+  try {
+    const cached = getCachedUserProfile(normEmail);
+    if (cached) {
+      cached.stats = {
+        ...cached.stats,
+        submissionCount: actualCount,
+      };
+      setCachedUserProfile(cached);
+    }
+  } catch {
+    // ignore
+  }
+
+  try {
+    const safeDocId = encodeURIComponent(normEmail);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    const resolvedUid = resolveUserUid(normEmail, uid);
+    await setDoc(
+      profileRef,
+      {
+        uid: resolvedUid,
+        email: normEmail,
+        stats: {
+          submissionCount: actualCount,
+        },
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
+  }
+}
+
 export const DEFAULT_RESTORED_INNOVATIONS: InnovationSubmission[] = [];
 
 export const DEFAULT_RESTORED_TEACHER_MEDIA: TeacherMediaWork[] = [];
@@ -254,7 +667,9 @@ export function getStoredInnovations(): InnovationSubmission[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const cleaned = parsed.filter((item: InnovationSubmission) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+        const cleaned = parsed.filter(
+          (item: InnovationSubmission) => item && !isMediaIdBlocked(item.id)
+        );
         if (cleaned.length !== parsed.length) {
           saveStoredInnovations(cleaned);
         }
@@ -272,7 +687,7 @@ export function getStoredInnovations(): InnovationSubmission[] {
  */
 export function saveStoredInnovations(list: InnovationSubmission[]): void {
   try {
-    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
     localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
   } catch (err) {
     console.warn('Failed to save innovations cache:', err);
@@ -288,7 +703,9 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const cleaned = parsed.filter((item: TeacherMediaWork) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+        const cleaned = parsed.filter(
+          (item: TeacherMediaWork) => item && !isMediaIdBlocked(item.id)
+        );
         if (cleaned.length !== parsed.length) {
           saveStoredTeacherMedia(cleaned);
         }
@@ -306,7 +723,7 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
  */
 export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
   try {
-    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
     localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
   } catch (err) {
     console.warn('Failed to save teacher media cache:', err);
@@ -353,11 +770,19 @@ export async function saveInnovationSubmission(data: {
   const nowIso = new Date().toISOString();
   const selectedSubjectGroup = data.subjectGroup?.trim() || SUBJECT_GROUPS[0];
   const normalizedEmail = data.userEmail.trim().toLowerCase();
+  const resolvedUid = resolveUserUid(normalizedEmail);
   const itemNum = Number(data.itemNumber) || 1;
+  const trimmedName = data.teacherName.trim();
 
   const payload: InnovationSubmission = {
     id,
-    teacherName: data.teacherName.trim(),
+    uid: resolvedUid,
+    userId: resolvedUid,
+    email: normalizedEmail,
+    userEmail: normalizedEmail,
+    submittedByEmail: normalizedEmail,
+    teacherName: trimmedName,
+    authorName: trimmedName,
     subjectGroup: selectedSubjectGroup,
     gradeLevel: data.gradeLevel,
     itemNumber: itemNum,
@@ -367,7 +792,6 @@ export async function saveInnovationSubmission(data: {
     usageDetails: data.usageDetails.trim(),
     onlineUrl: data.onlineUrl?.trim() || '',
     imageUrl: data.imageUrl || '',
-    userEmail: normalizedEmail,
     status: 'ส่งเรียบร้อย',
     submittedAt: nowIso,
     updatedAt: nowIso,
@@ -376,8 +800,14 @@ export async function saveInnovationSubmission(data: {
   const mediaDocId = `work_${id}`;
   const mediaPayload: TeacherMediaWork = {
     id: mediaDocId,
+    uid: resolvedUid,
+    userId: resolvedUid,
+    email: normalizedEmail,
+    userEmail: normalizedEmail,
+    submittedByEmail: normalizedEmail,
     title: data.mediaTitle.trim(),
-    teacherName: data.teacherName.trim(),
+    teacherName: trimmedName,
+    authorName: trimmedName,
     subjectGroup: selectedSubjectGroup,
     gradeLevel: data.gradeLevel,
     subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
@@ -392,7 +822,7 @@ export async function saveInnovationSubmission(data: {
     views: 1,
     likes: 0,
     likedBy: [],
-    submittedByEmail: normalizedEmail,
+    status: 'ส่งเรียบร้อย',
     createdAt: nowIso,
   };
 
@@ -431,7 +861,7 @@ export async function saveInnovationSubmission(data: {
       await setDoc(mediaRef, mediaPayload, { merge: true });
     } catch {}
 
-    // Update user profile document in user_profiles
+    // Update user profile document in user_profiles & atomically increment submissionCount
     try {
       const safeDocId = encodeURIComponent(normalizedEmail);
       const profileRef = doc(db, 'user_profiles', safeDocId);
@@ -467,12 +897,19 @@ export async function saveInnovationSubmission(data: {
             coverImageUrl: data.imageUrl || '',
             notes: `${data.productionType}${data.usageDetails ? ` • ${data.usageDetails}` : ''}`,
           };
-          await updateDoc(profileRef, {
-            innovations: currentInnos,
-            updatedAt: nowIso,
-          });
+          await setDoc(
+            profileRef,
+            {
+              uid: resolvedUid,
+              email: normalizedEmail,
+              innovations: currentInnos,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
         }
       }
+      await adjustUserSubmissionCount(normalizedEmail, 1, resolvedUid);
     } catch (profErr) {
       console.warn('Could not sync to user_profiles:', profErr);
     }
@@ -712,12 +1149,15 @@ export async function deleteInnovationSubmission(
     const snap = await getDoc(docRef);
 
     if (!snap.exists()) {
-      if (cachedItem && !canUserModify(cachedItem.userEmail, currentUserEmail)) {
+      const ownerEmail = cachedItem ? extractMediaEmails(cachedItem)[0] : undefined;
+      if (cachedItem && !canUserModify(ownerEmail, currentUserEmail)) {
         return { success: false, error: 'คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
       }
 
+      addDeletedMediaIds([id, `work_${id}`]);
+
       // Clean up paired collections defensively if authorized
-      if (canUserModify(cachedItem?.userEmail, currentUserEmail)) {
+      if (canUserModify(ownerEmail, currentUserEmail)) {
         try {
           await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${id}`));
         } catch {}
@@ -727,9 +1167,12 @@ export async function deleteInnovationSubmission(
       }
 
       saveStoredInnovations(cachedList.filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
       if (cachedItem) {
-        await syncUserProfileSlotOnDelete(cachedItem.userEmail, cachedItem.itemNumber);
+        await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
+        if (ownerEmail) {
+          await adjustUserSubmissionCount(ownerEmail, -1, cachedItem.uid);
+        }
       }
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
@@ -737,11 +1180,13 @@ export async function deleteInnovationSubmission(
     }
 
     const currentData = snap.data() as InnovationSubmission;
+    const ownerEmail = extractMediaEmails(currentData)[0] || currentData.userEmail;
 
-    if (!canUserModify(currentData.userEmail, currentUserEmail)) {
+    if (!canUserModify(ownerEmail, currentUserEmail)) {
       return { success: false, error: 'คุณไม่มีสิทธิ์ลบผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
     }
 
+    addDeletedMediaIds([id, `work_${id}`]);
     await deleteDoc(docRef);
 
     // Also delete from system_test_submissions
@@ -764,11 +1209,14 @@ export async function deleteInnovationSubmission(
     // Delete from local caches immediately
     try {
       saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
     } catch {}
 
-    // Reset the owner's slot in user_profiles back to pending if no other item exists for that slot
-    await syncUserProfileSlotOnDelete(currentData.userEmail, currentData.itemNumber);
+    // Reset the owner's slot in user_profiles back to pending & decrement counter atomically
+    await syncUserProfileSlotOnDelete(ownerEmail, currentData.itemNumber);
+    if (ownerEmail) {
+      await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
+    }
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -778,8 +1226,9 @@ export async function deleteInnovationSubmission(
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
       console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
+      addDeletedMediaIds([id, `work_${id}`]);
       saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}`));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
       return { success: true };
@@ -789,9 +1238,76 @@ export async function deleteInnovationSubmission(
   }
 }
 
+// Shared multiplexed listeners for teacher_innovations_submissions to protect Firestore read quotas
+const allInnovationsListeners = new Set<(submissions: InnovationSubmission[]) => void>();
+let sharedInnovationsUnsub: (() => void) | null = null;
+let sharedLatestInnovations: InnovationSubmission[] | null = null;
+let innovationsWindowListenerAttached = false;
+
+function broadcastAllInnovations(list: InnovationSubmission[]): void {
+  sharedLatestInnovations = list;
+  allInnovationsListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (err) {
+      console.warn('Error in innovations listener:', err);
+    }
+  });
+}
+
+function ensureSharedInnovationsSubscription(): void {
+  if (typeof window !== 'undefined' && !innovationsWindowListenerAttached) {
+    innovationsWindowListenerAttached = true;
+    window.addEventListener('acu_innovations_changed', () => {
+      const cached = getStoredInnovations();
+      cached.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+      broadcastAllInnovations(cached);
+    });
+  }
+
+  if (sharedInnovationsUnsub) return;
+
+  try {
+    const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
+    sharedInnovationsUnsub = onSnapshot(
+      colQuery,
+      (snapshot) => {
+        const liveList: InnovationSubmission[] = [];
+        snapshot.forEach((docSnap) => {
+          const data = docSnap.data() as InnovationSubmission;
+          const docId = data?.id || docSnap.id;
+          if (!isMediaIdBlocked(docId) && !isMediaIdBlocked(docSnap.id) && data?.isDeleted !== true) {
+            liveList.push({ ...data, id: docId });
+          }
+        });
+
+        liveList.sort(
+          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+        );
+        saveStoredInnovations(liveList);
+        broadcastAllInnovations(liveList);
+      },
+      (err) => {
+        if (isQuotaExceededError(err)) {
+          notifyQuotaExceeded();
+          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
+        } else {
+          console.warn('subscribeAllInnovations listener notice:', err);
+        }
+        broadcastAllInnovations(sharedLatestInnovations || getStoredInnovations());
+      }
+    );
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
+    broadcastAllInnovations(sharedLatestInnovations || getStoredInnovations());
+  }
+}
+
 /**
  * Subscribe to user's innovation submissions in real time.
- * Uses Firestore live snapshot as authoritative source when online (no stale cache resurrection).
+ * Multiplexes via the shared `subscribeAllInnovations` stream in memory (zero extra Firestore listeners).
  */
 export function subscribeUserInnovations(
   userEmail: string,
@@ -804,154 +1320,49 @@ export function subscribeUserInnovations(
   }
 
   const normTargetEmail = (userEmail || '').trim().toLowerCase();
-  const normTargetName = (teacherName || '').trim().toLowerCase();
+  const targetUid = normTargetEmail ? resolveUserUid(normTargetEmail) : '';
+  const normTargetName = (teacherName || '').trim();
 
   const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
     return items
       .filter((item) => {
-        if (!item || LEGACY_FAKE_SEED_IDS.has(item.id)) return false;
-        const itemEmail = (item.userEmail || '').trim().toLowerCase();
-        const itemName = (item.teacherName || '').trim().toLowerCase();
-
-        // When userEmail is present on the record, strictly match by email so another user's items never bleed in
-        if (itemEmail) {
-          return Boolean(normTargetEmail && itemEmail === normTargetEmail);
-        }
-
-        // Fallback to name only if record lacks userEmail
-        return Boolean(
-          normTargetName &&
-            (itemName === normTargetName ||
-              (normTargetName.length > 3 && itemName.includes(normTargetName)) ||
-              (itemName.length > 3 && normTargetName.includes(itemName)))
-        );
+        if (!isValidActiveMediaRecord(item)) return false;
+        return doesMediaRecordBelongToTeacher(item, {
+          uid: targetUid,
+          email: normTargetEmail,
+          teacherName: normTargetName,
+          fullName: normTargetName,
+        });
       })
       .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   };
 
-  // 1. Instant initial render from local cache (already stripped of legacy fake seed IDs)
-  callback(filterUserItems(getStoredInnovations()));
-
-  const handleLocalChange = () => {
-    callback(filterUserItems(getStoredInnovations()));
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-  }
-
-  // 2. Real-time Firestore sync (authoritative when onSnapshot succeeds)
-  try {
-    const colRef = collection(db, INNOVATIONS_COLLECTION);
-
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: InnovationSubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as InnovationSubmission;
-          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
-            liveList.push({ ...data, id: data?.id || docSnap.id });
-          }
-        });
-
-        liveList.sort(
-          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-        );
-        saveStoredInnovations(liveList);
-        callback(filterUserItems(liveList));
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Quota reached for subscribeUserInnovations; serving from local recovery cache.');
-        } else {
-          console.warn('subscribeUserInnovations listener notice:', err);
-        }
-        callback(filterUserItems(getStoredInnovations()));
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    callback(filterUserItems(getStoredInnovations()));
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-    };
-  }
+  return subscribeAllInnovations((allItems) => {
+    callback(filterUserItems(allItems));
+  });
 }
 
 /**
  * Subscribe to ALL innovation submissions (for Google Sheets summary and admin overview).
- * Uses Firestore live snapshot as authoritative source when online (prevents deleted items from reappearing).
+ * Multiplexes a single `limit(500)` Firestore listener and emits cached data immediately.
  */
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
 ): () => void {
-  // 1. Instant initial load from local cache (already stripped of legacy fake seed IDs)
-  callback(getStoredInnovations());
+  allInnovationsListeners.add(callback);
 
-  const handleLocalChange = () => {
-    callback(getStoredInnovations());
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-  }
+  const initial = sharedLatestInnovations || getStoredInnovations();
+  callback(initial);
 
-  try {
-    const colRef = collection(db, INNOVATIONS_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: InnovationSubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as InnovationSubmission;
-          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
-            liveList.push({ ...data, id: data?.id || docSnap.id });
-          }
-        });
+  ensureSharedInnovationsSubscription();
 
-        liveList.sort(
-          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-        );
-        saveStoredInnovations(liveList);
-        callback(liveList);
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
-        } else {
-          console.warn('subscribeAllInnovations listener notice:', err);
-        }
-        callback(getStoredInnovations());
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
+  return () => {
+    allInnovationsListeners.delete(callback);
+    if (allInnovationsListeners.size === 0 && sharedInnovationsUnsub) {
+      sharedInnovationsUnsub();
+      sharedInnovationsUnsub = null;
     }
-    callback(getStoredInnovations());
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-    };
-  }
+  };
 }
 
 /**
@@ -1159,36 +1570,65 @@ export function subscribeUserSubmissions(
   }
 }
 
+const allFacilityListeners = new Set<(submissions: FacilitySubmission[]) => void>();
+let sharedFacilitiesUnsub: (() => void) | null = null;
+let sharedLatestFacilities: FacilitySubmission[] | null = null;
+
+function broadcastAllFacilities(list: FacilitySubmission[]): void {
+  sharedLatestFacilities = list;
+  allFacilityListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (err) {
+      console.warn('Error in facility submissions listener:', err);
+    }
+  });
+}
+
 /**
- * Subscribe in real-time to ALL facility usage records
+ * Subscribe in real-time to ALL facility usage records (multiplexed & limited)
  */
 export function subscribeAllSubmissions(
   callback: (submissions: FacilitySubmission[]) => void
 ): () => void {
-  try {
-    const colRef = collection(db, SYSTEM_TEST_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const list: FacilitySubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data.learningCenter) {
-            list.push(data as FacilitySubmission);
-          }
-        });
-        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(list);
-      },
-      (err) => {
-        console.warn('subscribeAllSubmissions listener warning:', err);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeAllSubmissions failed:', err);
-    return () => {};
+  allFacilityListeners.add(callback);
+  if (sharedLatestFacilities) {
+    callback(sharedLatestFacilities);
   }
+
+  if (!sharedFacilitiesUnsub) {
+    try {
+      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
+      sharedFacilitiesUnsub = onSnapshot(
+        colQuery,
+        (snapshot) => {
+          const list: FacilitySubmission[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data.learningCenter) {
+              list.push(data as FacilitySubmission);
+            }
+          });
+          list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          broadcastAllFacilities(list);
+        },
+        (err) => {
+          console.warn('subscribeAllSubmissions listener warning:', err);
+          if (sharedLatestFacilities) broadcastAllFacilities(sharedLatestFacilities);
+        }
+      );
+    } catch (err) {
+      console.error('subscribeAllSubmissions failed:', err);
+    }
+  }
+
+  return () => {
+    allFacilityListeners.delete(callback);
+    if (allFacilityListeners.size === 0 && sharedFacilitiesUnsub) {
+      sharedFacilitiesUnsub();
+      sharedFacilitiesUnsub = null;
+    }
+  };
 }
 
 /**
@@ -1249,65 +1689,95 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
-/**
- * Subscribe to Teacher Media Repository with live updates (Displays real teacher submissions only)
- */
-export function subscribeTeacherMedia(
-  callback: (works: TeacherMediaWork[]) => void
-): () => void {
-  const handleLocalChange = () => {
-    const cached = getStoredTeacherMedia().filter(
-      (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
-    );
-    cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-    callback(cached);
-  };
+const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
+let sharedTeacherMediaUnsub: (() => void) | null = null;
+let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
+let teacherMediaWindowListenerAttached = false;
 
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_teacher_media_changed', handleLocalChange);
+function broadcastTeacherMedia(works: TeacherMediaWork[]): void {
+  sharedLatestTeacherMedia = works;
+  teacherMediaListeners.forEach((cb) => {
+    try {
+      cb(works);
+    } catch (err) {
+      console.warn('Error in teacher media listener:', err);
+    }
+  });
+}
+
+function getFilteredStoredTeacherMedia(): TeacherMediaWork[] {
+  const cached = getStoredTeacherMedia().filter(
+    (w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0
+  );
+  cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  return cached;
+}
+
+function ensureSharedTeacherMediaSubscription(): void {
+  if (typeof window !== 'undefined' && !teacherMediaWindowListenerAttached) {
+    teacherMediaWindowListenerAttached = true;
+    window.addEventListener('acu_teacher_media_changed', () => {
+      broadcastTeacherMedia(getFilteredStoredTeacherMedia());
+    });
   }
 
+  if (sharedTeacherMediaUnsub) return;
+
   try {
-    const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
+    const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
+    sharedTeacherMediaUnsub = onSnapshot(
+      colQuery,
       (snapshot) => {
         const liveList: TeacherMediaWork[] = [];
         snapshot.forEach((docSnap) => {
           const data = docSnap.data() as TeacherMediaWork;
-          liveList.push({ ...data, id: data?.id || docSnap.id });
+          const docId = data?.id || docSnap.id;
+          liveList.push({ ...data, id: docId });
         });
 
-        // Filter out legacy seed items if any exist in collection
         const realWorks = liveList.filter(
-          (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
+          (w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0
         );
 
-        // Sort newest first so real teacher submissions appear at top
         realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         saveStoredTeacherMedia(realWorks);
-        callback(realWorks);
+        broadcastTeacherMedia(realWorks);
       },
       (err) => {
+        if (isQuotaExceededError(err)) {
+          notifyQuotaExceeded();
+        }
         console.warn('subscribeTeacherMedia fallback:', err);
-        handleLocalChange();
+        broadcastTeacherMedia(sharedLatestTeacherMedia || getFilteredStoredTeacherMedia());
       }
     );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
   } catch (err) {
     console.error('subscribeTeacherMedia failed:', err);
-    callback([]);
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
-      }
-    };
+    broadcastTeacherMedia(sharedLatestTeacherMedia || getFilteredStoredTeacherMedia());
   }
+}
+
+/**
+ * Subscribe to Teacher Media Repository with live updates (Displays real teacher submissions only).
+ * Multiplexed via a single limited listener and immediately serves cached works.
+ */
+export function subscribeTeacherMedia(
+  callback: (works: TeacherMediaWork[]) => void
+): () => void {
+  teacherMediaListeners.add(callback);
+
+  const initial = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
+  callback(initial);
+
+  ensureSharedTeacherMediaSubscription();
+
+  return () => {
+    teacherMediaListeners.delete(callback);
+    if (teacherMediaListeners.size === 0 && sharedTeacherMediaUnsub) {
+      sharedTeacherMediaUnsub();
+      sharedTeacherMediaUnsub = null;
+    }
+  };
 }
 
 /**
@@ -1351,17 +1821,31 @@ export async function deleteTeacherMedia(
   id: string,
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
+  const strippedId = id.startsWith('work_') ? id.slice(5) : id;
   try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     const snap = await getDoc(docRef);
+    const cachedList = getStoredTeacherMedia();
+    const cachedItem = cachedList.find((m) => m.id === id);
+
     if (!snap.exists()) {
-      const cachedList = getStoredTeacherMedia();
-      const cachedItem = cachedList.find((m) => m.id === id);
-      if (cachedItem && !canUserModify(cachedItem.submittedByEmail, currentUserEmail)) {
+      const ownerEmail = cachedItem ? extractMediaEmails(cachedItem)[0] : undefined;
+      if (cachedItem && !canUserModify(ownerEmail, currentUserEmail)) {
         return { success: false, error: 'คุณไม่มีสิทธิ์ลบสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
       }
       if (cachedItem || canUserModify(undefined, currentUserEmail)) {
+        addDeletedMediaIds([id, strippedId]);
         saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
+        if (id.startsWith('work_')) {
+          saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
+          try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
+          try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
+        }
+        if (cachedItem && ownerEmail) {
+          await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
+          await adjustUserSubmissionCount(ownerEmail, -1, cachedItem.uid);
+        }
+        notifyInnovationsChanged();
         notifyTeacherMediaChanged();
         return { success: true };
       }
@@ -1369,13 +1853,29 @@ export async function deleteTeacherMedia(
     }
 
     const currentData = snap.data() as TeacherMediaWork;
+    const ownerEmail = extractMediaEmails(currentData)[0] || currentData.submittedByEmail;
 
-    if (!canUserModify(currentData.submittedByEmail, currentUserEmail)) {
+    if (!canUserModify(ownerEmail, currentUserEmail)) {
       return { success: false, error: 'คุณไม่มีสิทธิ์ลบสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
     }
 
+    addDeletedMediaIds([id, strippedId]);
     await deleteDoc(docRef);
-    saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== id));
+
+    // Clean up paired innovation/system_test docs if this work came from Innovation_5_Items
+    if (id.startsWith('work_')) {
+      try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
+      try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
+      saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
+    }
+
+    saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
+    if (ownerEmail) {
+      await syncUserProfileSlotOnDelete(ownerEmail, currentData.itemNumber);
+      await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
+    }
+
+    notifyInnovationsChanged();
     notifyTeacherMediaChanged();
     return { success: true };
   } catch (err: any) {
@@ -1407,6 +1907,7 @@ export async function clearAdminOwnMedia(
       const data = d.data() as InnovationSubmission;
       const docOwner = (data?.userEmail || '').trim().toLowerCase();
       if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
+        addDeletedMediaIds([d.id, `work_${d.id}`]);
         await deleteDoc(d.ref);
         deletedCount++;
         try {
@@ -1424,6 +1925,7 @@ export async function clearAdminOwnMedia(
       const data = d.data() as TeacherMediaWork;
       const docOwner = (data?.submittedByEmail || '').trim().toLowerCase();
       if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
+        addDeletedMediaIds([d.id]);
         await deleteDoc(d.ref);
         deletedCount++;
       }
@@ -1453,13 +1955,17 @@ export async function clearAdminOwnMedia(
 
     const safeDocId = encodeURIComponent(targetAdmin);
     const profileRef = doc(db, 'user_profiles', safeDocId);
-    const profileSnap = await getDoc(profileRef);
-    if (profileSnap.exists()) {
-      await updateDoc(profileRef, {
+    await setDoc(
+      profileRef,
+      {
         innovations: emptySlots,
+        stats: {
+          submissionCount: 0,
+        },
         updatedAt: new Date().toISOString(),
-      });
-    }
+      },
+      { merge: true }
+    );
 
     // 5. Clean only weerapong1625@acu.ac.th items from localStorage caches
     saveStoredInnovations(
@@ -1508,35 +2014,73 @@ export async function addTeacherMediaDirectly(data: {
   onlineUrl?: string;
   submittedByEmail: string;
 }): Promise<{ success: boolean; id?: string; error?: string }> {
+  const id = `work_direct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const nowIso = new Date().toISOString();
+  const normalizedEmail = data.submittedByEmail.trim().toLowerCase();
+  const resolvedUid = resolveUserUid(normalizedEmail);
+  const trimmedName = data.teacherName.trim();
+
+  // Compute next open itemNumber (1-5) from local cache so multiple direct uploads don't collide on slot 1
+  const existingUnified = getUnifiedTeacherMediaRecords(
+    { uid: resolvedUid, email: normalizedEmail, teacherName: trimmedName },
+    getStoredInnovations(),
+    getStoredTeacherMedia()
+  );
+  const usedSlots = new Set(existingUnified.records.map((r) => r.itemNumber));
+  let nextSlot = 1;
+  for (let i = 1; i <= 5; i++) {
+    if (!usedSlots.has(i)) {
+      nextSlot = i;
+      break;
+    }
+  }
+
+  const payload: TeacherMediaWork = {
+    id,
+    uid: resolvedUid,
+    userId: resolvedUid,
+    email: normalizedEmail,
+    userEmail: normalizedEmail,
+    submittedByEmail: normalizedEmail,
+    title: data.title.trim(),
+    teacherName: trimmedName,
+    authorName: trimmedName,
+    subjectGroup: data.subjectGroup,
+    gradeLevel: data.gradeLevel || data.subjectGroup,
+    subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+    thumbnailUrl: data.thumbnailUrl?.trim() || '/ACU N.png',
+    description: data.description.trim(),
+    mediaType: data.mediaType,
+    productionType: 'ครูผลิตสื่อเอง',
+    itemNumber: nextSlot,
+    onlineUrl: data.onlineUrl?.trim() || '',
+    ratingAvg: 5.0,
+    ratingCount: 1,
+    views: 1,
+    likes: 0,
+    likedBy: [],
+    status: 'ส่งเรียบร้อย',
+    createdAt: nowIso,
+  };
+
+  // Save immediately to localStorage cache
   try {
-    const id = `work_direct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const nowIso = new Date().toISOString();
+    const currentMedia = getStoredTeacherMedia();
+    saveStoredTeacherMedia([payload, ...currentMedia.filter((m) => m.id !== id)]);
+  } catch {}
+
+  try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
-
-    const payload: TeacherMediaWork = {
-      id,
-      title: data.title.trim(),
-      teacherName: data.teacherName.trim(),
-      subjectGroup: data.subjectGroup,
-      gradeLevel: data.gradeLevel || data.subjectGroup,
-      subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-      thumbnailUrl: data.thumbnailUrl?.trim() || '/ACU N.png',
-      description: data.description.trim(),
-      mediaType: data.mediaType,
-      itemNumber: 1,
-      onlineUrl: data.onlineUrl?.trim() || '',
-      ratingAvg: 5.0,
-      ratingCount: 1,
-      views: 1,
-      likes: 0,
-      likedBy: [],
-      submittedByEmail: data.submittedByEmail.trim(),
-      createdAt: nowIso,
-    };
-
     await setDoc(docRef, payload);
+    await adjustUserSubmissionCount(normalizedEmail, 1, resolvedUid);
+    notifyTeacherMediaChanged();
     return { success: true, id };
   } catch (err: any) {
+    notifyTeacherMediaChanged();
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, id };
+    }
     console.error('Error adding teacher media:', err);
     return { success: false, error: err.message || 'เพิ่มสื่อไม่สำเร็จ' };
   }
@@ -1652,42 +2196,69 @@ function sanitizeSharedIdeaRecord(item: SharedIdeaItem): SharedIdeaItem {
   };
 }
 
+const sharedIdeasListeners = new Set<(ideas: SharedIdeaItem[]) => void>();
+let sharedIdeasUnsub: (() => void) | null = null;
+let sharedLatestIdeas: SharedIdeaItem[] | null = null;
+
+function broadcastSharedIdeas(ideas: SharedIdeaItem[]): void {
+  sharedLatestIdeas = ideas;
+  sharedIdeasListeners.forEach((cb) => {
+    try {
+      cb(ideas);
+    } catch (err) {
+      console.warn('Error in shared ideas listener:', err);
+    }
+  });
+}
+
 /**
- * Subscribe to Shared Ideas in real time
+ * Subscribe to Shared Ideas in real time (multiplexed & limited)
  */
 export function subscribeSharedIdeas(
   callback: (ideas: SharedIdeaItem[]) => void
 ): () => void {
-  try {
-    const colRef = collection(db, SHARED_IDEAS_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: SharedIdeaItem[] = [];
-        snapshot.forEach((docSnap) => {
-          liveList.push(sanitizeSharedIdeaRecord(docSnap.data() as SharedIdeaItem));
-        });
-
-        // Merge default seeds if not present
-        const mergedMap = new Map<string, SharedIdeaItem>();
-        DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
-        liveList.forEach((i) => mergedMap.set(i.id, i));
-
-        const finalIdeas = Array.from(mergedMap.values());
-        finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(finalIdeas);
-      },
-      (err) => {
-        console.warn('subscribeSharedIdeas fallback to seed:', err);
-        callback(DEFAULT_SEED_IDEAS);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeSharedIdeas failed:', err);
-    callback(DEFAULT_SEED_IDEAS);
-    return () => {};
+  sharedIdeasListeners.add(callback);
+  if (sharedLatestIdeas) {
+    callback(sharedLatestIdeas);
   }
+
+  if (!sharedIdeasUnsub) {
+    try {
+      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
+      sharedIdeasUnsub = onSnapshot(
+        colQuery,
+        (snapshot) => {
+          const liveList: SharedIdeaItem[] = [];
+          snapshot.forEach((docSnap) => {
+            liveList.push(sanitizeSharedIdeaRecord(docSnap.data() as SharedIdeaItem));
+          });
+
+          const mergedMap = new Map<string, SharedIdeaItem>();
+          DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+          liveList.forEach((i) => mergedMap.set(i.id, i));
+
+          const finalIdeas = Array.from(mergedMap.values());
+          finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          broadcastSharedIdeas(finalIdeas);
+        },
+        (err) => {
+          console.warn('subscribeSharedIdeas fallback to seed:', err);
+          broadcastSharedIdeas(sharedLatestIdeas || DEFAULT_SEED_IDEAS);
+        }
+      );
+    } catch (err) {
+      console.error('subscribeSharedIdeas failed:', err);
+      broadcastSharedIdeas(sharedLatestIdeas || DEFAULT_SEED_IDEAS);
+    }
+  }
+
+  return () => {
+    sharedIdeasListeners.delete(callback);
+    if (sharedIdeasListeners.size === 0 && sharedIdeasUnsub) {
+      sharedIdeasUnsub();
+      sharedIdeasUnsub = null;
+    }
+  };
 }
 
 /**

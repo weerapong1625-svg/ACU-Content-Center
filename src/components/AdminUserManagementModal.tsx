@@ -31,9 +31,20 @@ import { LoginLogEntry, subscribeAllLoginLogs } from '../services/auditService';
 import { 
   InnovationSubmission, 
   FacilitySubmission,
+  TeacherMediaWork,
   subscribeAllInnovations,
-  subscribeAllSubmissions
+  subscribeAllSubmissions,
+  subscribeTeacherMedia,
+  getUnifiedTeacherMediaRecords,
+  extractMediaEmails,
+  isValidActiveMediaRecord
 } from '../services/submissionService';
+import {
+  resolveDisplayAvatarUrl,
+  sanitizeAvatarUrl,
+  buildFallbackAvatarUrl,
+  isUiAvatarPlaceholder,
+} from '../utils/avatarUtils';
 
 interface AdminUserManagementModalProps {
   isOpen: boolean;
@@ -42,6 +53,7 @@ interface AdminUserManagementModalProps {
   userProfilesMap?: Record<string, FullUserProfile>;
   loginLogs?: LoginLogEntry[];
   innovations?: InnovationSubmission[];
+  teacherMedia?: TeacherMediaWork[];
   facilities?: FacilitySubmission[];
   onUserDeleted?: (deletedEmail: string) => void;
   onOpenEmailAudit?: () => void;
@@ -55,6 +67,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
   userProfilesMap,
   loginLogs,
   innovations,
+  teacherMedia,
   facilities,
   onUserDeleted,
   onOpenEmailAudit,
@@ -86,6 +99,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
   const [internalProfiles, setInternalProfiles] = useState<Record<string, FullUserProfile>>({});
   const [internalLogs, setInternalLogs] = useState<LoginLogEntry[]>([]);
   const [internalInnovations, setInternalInnovations] = useState<InnovationSubmission[]>([]);
+  const [internalTeacherMedia, setInternalTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [internalFacilities, setInternalFacilities] = useState<FacilitySubmission[]>([]);
 
   useEffect(() => {
@@ -94,6 +108,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
     let unsubProfiles = () => {};
     let unsubLogs = () => {};
     let unsubInnovations = () => {};
+    let unsubTeacherMedia = () => {};
     let unsubFacilities = () => {};
 
     if (!userProfilesMap) {
@@ -114,6 +129,12 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       });
     }
 
+    if (!teacherMedia) {
+      unsubTeacherMedia = subscribeTeacherMedia((works) => {
+        setInternalTeacherMedia(works);
+      });
+    }
+
     if (!facilities) {
       unsubFacilities = subscribeAllSubmissions((list) => {
         setInternalFacilities(list);
@@ -124,13 +145,15 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       unsubProfiles();
       unsubLogs();
       unsubInnovations();
+      unsubTeacherMedia();
       unsubFacilities();
     };
-  }, [isOpen, userProfilesMap, loginLogs, innovations, facilities]);
+  }, [isOpen, userProfilesMap, loginLogs, innovations, teacherMedia, facilities]);
 
   const activeProfilesMap = userProfilesMap || internalProfiles;
   const activeLogs = loginLogs || internalLogs;
   const activeInnovations = innovations || internalInnovations;
+  const activeTeacherMedia = teacherMedia || internalTeacherMedia;
   const activeFacilities = facilities || internalFacilities;
 
   // Gather all unique users across userProfilesMap, loginLogs, innovations, and facilities
@@ -153,59 +176,68 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
     Object.entries(activeProfilesMap).forEach(([emailKey, prof]) => {
       const normEmail = emailKey.trim().toLowerCase();
       const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
-      map.set(normEmail, {
-        email: normEmail,
-        fullName: prof.fullName || prof.displayName || normEmail.split('@')[0],
-        displayName: prof.displayName || prof.fullName || normEmail.split('@')[0],
-        school: prof.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-        avatarUrl: prof.avatarUrl || '',
-        role: prof.role || (isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน'),
-        loginCount: 0,
-        innovationCount: 0,
-        facilityCount: 0,
-        isMasterAdmin: isMaster,
-      });
-    });
-
-    // 2. Aggregate login logs
-    activeLogs.forEach((log) => {
-      const normEmail = (log.email || '').trim().toLowerCase();
-      if (!normEmail) return;
-      const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
-
-      let userObj = map.get(normEmail);
-      if (!userObj) {
-        userObj = {
+        const resolvedProfAvatar = resolveDisplayAvatarUrl({
+          customPhotoUrl: prof.photoURL,
+          firestoreAvatarUrl: prof.avatarUrl,
+          fallbackSeedName: prof.fullName || prof.displayName || normEmail,
+        });
+        map.set(normEmail, {
           email: normEmail,
-          fullName: log.displayName || normEmail.split('@')[0],
-          displayName: log.displayName || normEmail.split('@')[0],
-          school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-          avatarUrl: log.avatarUrl || '',
-          role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : (log.role || 'ครูผู้สอน'),
+          fullName: prof.fullName || prof.displayName || normEmail.split('@')[0],
+          displayName: prof.displayName || prof.fullName || normEmail.split('@')[0],
+          school: prof.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+          avatarUrl: isUiAvatarPlaceholder(resolvedProfAvatar) ? '' : resolvedProfAvatar,
+          role: prof.role || (isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน'),
           loginCount: 0,
           innovationCount: 0,
           facilityCount: 0,
           isMasterAdmin: isMaster,
-        };
-        map.set(normEmail, userObj);
-      }
+        });
+      });
+
+      // 2. Aggregate login logs
+      activeLogs.forEach((log) => {
+        const normEmail = (log.email || '').trim().toLowerCase();
+        if (!normEmail) return;
+        const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
+
+        let userObj = map.get(normEmail);
+        if (!userObj) {
+          userObj = {
+            email: normEmail,
+            fullName: log.displayName || normEmail.split('@')[0],
+            displayName: log.displayName || normEmail.split('@')[0],
+            school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+            avatarUrl: sanitizeAvatarUrl(log.avatarUrl),
+            role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : (log.role || 'ครูผู้สอน'),
+            loginCount: 0,
+            innovationCount: 0,
+            facilityCount: 0,
+            isMasterAdmin: isMaster,
+          };
+          map.set(normEmail, userObj);
+        } else if (!userObj.avatarUrl && log.avatarUrl) {
+          userObj.avatarUrl = sanitizeAvatarUrl(log.avatarUrl);
+        }
       userObj.loginCount++;
       if (!userObj.lastLogin || new Date(log.loginTimestamp) > new Date(userObj.lastLogin)) {
         userObj.lastLogin = log.loginTimestamp;
       }
     });
 
-    // 3. Aggregate innovations (create entry if missing)
-    activeInnovations.forEach((inv) => {
-      const normEmail = (inv.userEmail || '').trim().toLowerCase();
+    // 3. Register users from innovations & teacher media repository (create entry if missing)
+    const ensureUserFromMedia = (rawItem: any) => {
+      if (!isValidActiveMediaRecord(rawItem)) return;
+      const normEmail = extractMediaEmails(rawItem)[0] || '';
       if (!normEmail) return;
       const isMaster = normEmail === SUPER_ADMIN_EMAIL.toLowerCase();
       let userObj = map.get(normEmail);
+      const itemTeacherName = (rawItem.teacherName || rawItem.authorName || '').toString().trim();
       if (!userObj) {
         userObj = {
           email: normEmail,
-          fullName: inv.teacherName || normEmail.split('@')[0],
-          displayName: inv.teacherName || normEmail.split('@')[0],
+          fullName: itemTeacherName || normEmail.split('@')[0],
+          displayName: itemTeacherName || normEmail.split('@')[0],
           school: 'โรงเรียนอัสสัมชัญอุบลราชธานี',
           avatarUrl: '',
           role: isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน',
@@ -215,12 +247,13 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
           isMasterAdmin: isMaster,
         };
         map.set(normEmail, userObj);
+      } else if (itemTeacherName && userObj.fullName === normEmail.split('@')[0]) {
+        userObj.fullName = itemTeacherName;
       }
-      userObj.innovationCount++;
-      if (inv.teacherName && userObj.fullName === normEmail.split('@')[0]) {
-        userObj.fullName = inv.teacherName;
-      }
-    });
+    };
+
+    activeInnovations.forEach(ensureUserFromMedia);
+    activeTeacherMedia.forEach(ensureUserFromMedia);
 
     // 4. Aggregate facilities (create entry if missing)
     activeFacilities.forEach((fac) => {
@@ -249,10 +282,23 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       }
     });
 
-    // 5. Fallback loginCount from profile stats if login_logs had 0 entries for an active user
+    // 5. Dynamically calculate unified media counts (innovations + teacher_media_repository) & loginCount fallback
     map.forEach((userObj, normEmail) => {
+      const prof = activeProfilesMap[normEmail];
+      const unified = getUnifiedTeacherMediaRecords(
+        {
+          uid: prof?.uid,
+          email: normEmail,
+          fullName: prof?.fullName || userObj.fullName,
+          displayName: prof?.displayName || userObj.displayName,
+        },
+        activeInnovations,
+        activeTeacherMedia
+      );
+      userObj.innovationCount = unified.submittedCount;
+
       if (userObj.loginCount === 0) {
-        const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
+        const profViews = prof?.stats?.totalViews || 0;
         if (profViews > 0) {
           userObj.loginCount = profViews;
         }
@@ -265,7 +311,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       if (b.isMasterAdmin) return 1;
       return b.loginCount - a.loginCount;
     });
-  }, [activeProfilesMap, activeLogs, activeInnovations, activeFacilities]);
+  }, [activeProfilesMap, activeLogs, activeInnovations, activeTeacherMedia, activeFacilities]);
 
   // Filter users based on search term
   const filteredUsers = useMemo(() => {
@@ -441,11 +487,16 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
                     <div className="flex items-center gap-3.5 min-w-0 flex-1 pr-3">
                       {/* Avatar */}
                       <div className="relative flex-shrink-0">
-                        {user.avatarUrl ? (
+                        {sanitizeAvatarUrl(user.avatarUrl) ? (
                           <img
-                            src={user.avatarUrl}
+                            src={sanitizeAvatarUrl(user.avatarUrl)}
                             alt={cleanName}
-                            className="w-11 h-11 rounded-full object-cover border border-slate-600 shadow"
+                            className="w-11 h-11 rounded-full object-cover border border-slate-600 shadow bg-slate-800"
+                            onError={(e) => {
+                              const el = e.target as HTMLImageElement;
+                              const fallback = buildFallbackAvatarUrl(cleanName, 128);
+                              if (el.src !== fallback) el.src = fallback;
+                            }}
                           />
                         ) : (
                           <div className={`w-11 h-11 rounded-full flex items-center justify-center font-bold text-sm border ${

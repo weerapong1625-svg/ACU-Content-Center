@@ -17,15 +17,20 @@ import {
   WARNING_BEFORE_TIMEOUT_MS,
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
-import { signOut } from 'firebase/auth';
+import { signOut, onAuthStateChanged } from 'firebase/auth';
 import { auth } from './firebase';
 import {
   getBangkokDateParts,
   logUserLogin,
   subscribeAllLoginLogs,
   flushPendingLoginLogs,
+  syncLoginLogsFromServer,
 } from './services/auditService';
-import { getCachedUserProfile } from './services/userProfileService';
+import {
+  getCachedUserProfile,
+  syncUserAvatarOnAuthOrLogin,
+} from './services/userProfileService';
+import { sanitizeAvatarUrl } from './utils/avatarUtils';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -69,11 +74,29 @@ export default function App() {
     }
   });
 
-  // Keep shared login_logs listener warm & flush pending outbox whenever user is active
+  // Sync profile picture on Firebase Auth state changes (`onAuthStateChanged`) without overwriting custom Firestore photoURL
+  React.useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      if (firebaseUser?.email) {
+        const normEmail = firebaseUser.email.toLowerCase().trim();
+        syncUserAvatarOnAuthOrLogin(normEmail, {
+          uid: firebaseUser.uid,
+          email: normEmail,
+          photoURL: firebaseUser.photoURL,
+          displayName: firebaseUser.displayName,
+        }).catch(() => {});
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Keep shared login_logs listener warm, flush pending outbox, sync profile avatar from Firestore, and pull authoritative server state
   React.useEffect(() => {
     if (!loggedInUser) return;
+    syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
     const unsub = subscribeAllLoginLogs(() => {});
+    syncLoginLogsFromServer(true).catch(() => {});
     return () => unsub();
   }, [loggedInUser]);
 
@@ -114,19 +137,34 @@ export default function App() {
 
     const isAdmin = norm === 'weerapong1625@acu.ac.th';
     const cachedProf = getCachedUserProfile(norm);
+    const cleanedCachedAvatar = sanitizeAvatarUrl(cachedProf?.photoURL || cachedProf?.avatarUrl);
+    const safeAvatarUrl =
+      cleanedCachedAvatar && !cleanedCachedAvatar.startsWith('data:')
+        ? cleanedCachedAvatar
+        : '';
     logUserLogin({
       email: norm,
-      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0]),
+      displayName: cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0],
       role: isAdmin ? 'admin' : 'teacher',
       loginMethod: method,
-      avatarUrl: cachedProf?.avatarUrl || '',
+      avatarUrl: safeAvatarUrl,
     });
   }, []);
 
-  // Auto-record visit for active or returning session
+  // Auto-record visit for active or returning session (including mobile/tablet tabs woken up on a new Bangkok day)
   React.useEffect(() => {
     if (!loggedInUser) return;
     recordLoginVisit(loggedInUser, 'Session Visit', false);
+
+    const handleResumeCheck = () => {
+      if (document.visibilityState === 'visible') {
+        recordLoginVisit(loggedInUser, 'Session Visit', false);
+      }
+    };
+    document.addEventListener('visibilitychange', handleResumeCheck);
+    return () => {
+      document.removeEventListener('visibilitychange', handleResumeCheck);
+    };
   }, [loggedInUser, recordLoginVisit]);
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
@@ -157,6 +195,7 @@ export default function App() {
     } catch {
       // ignore
     }
+    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, true).catch(() => {});
     recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 

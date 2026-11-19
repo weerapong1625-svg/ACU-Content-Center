@@ -6,6 +6,11 @@ service cloud.firestore {
       allow read, create, update, delete, write: if true;
     }
 
+    // users collection (Single Source of Truth for cross-device profile photos matched by UID & email)
+    match /users/{userId} {
+      allow read, create, update, delete, write: if true;
+    }
+
     // user_profiles collection for customized profile, innovation items, and praises
     match /user_profiles/{profileId} {
       allow read, create, update, delete, write: if true;
