@@ -45,6 +45,20 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
 let lastServerSyncMs = 0;
 let inFlightServerSync: Promise<LoginLogEntry[]> | null = null;
+let isQuotaHit = false;
+let liveStatsSyncRefCount = 0;
+let liveStatsSyncTimer: ReturnType<typeof setInterval> | null = null;
+let logsBroadcastChannel: BroadcastChannel | null = null;
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('acu_firestore_quota_exceeded', () => {
+    isQuotaHit = true;
+    if (liveStatsSyncTimer !== null) {
+      clearInterval(liveStatsSyncTimer);
+      liveStatsSyncTimer = null;
+    }
+  });
+}
 
 const FAKE_SAMPLE_EMAILS = new Set([
   'kanda@acu.ac.th',
@@ -309,6 +323,17 @@ export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): voi
     if (broadcast) {
       broadcastLogsToListeners(sanitized);
       window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: sanitized }));
+      try {
+        if (!logsBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
+          logsBroadcastChannel = new BroadcastChannel('acu_login_logs_channel');
+        }
+        logsBroadcastChannel?.postMessage({
+          type: sanitized.length === 0 ? 'LOGS_CLEARED' : 'LOGS_UPDATED',
+          ts: Date.now(),
+        });
+      } catch {
+        // ignore BroadcastChannel unsupported errors
+      }
     }
   } catch (err) {
     console.warn('Could not save login logs to localStorage:', err);
@@ -461,8 +486,9 @@ export async function logUserLogin(data: {
       createdAt: serverTimestamp(),
     });
     removePendingLoginLogByIds(new Set([logId]));
-    // Also flush any older queued offline logs from this device now that network write succeeded
+    // Flush any older queued offline logs and immediately pull concurrent logins from other devices
     flushPendingLoginLogs().catch(() => {});
+    syncLoginLogsFromServer(true).catch(() => {});
     return logId;
   } catch (err) {
     if (isQuotaExceededError(err)) {
@@ -848,12 +874,12 @@ function parseFirestoreLoginLogDoc(docSnap: { id: string; data: () => any }): {
  */
 export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   if (typeof window === 'undefined') return sharedLatestLogs || [];
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+  if (isQuotaHit || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
     return sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
   }
 
   const now = Date.now();
-  if (!force && hasReceivedServerSnapshot && sharedLatestLogs && now - lastServerSyncMs < 4000) {
+  if (!force && hasReceivedServerSnapshot && sharedLatestLogs && now - lastServerSyncMs < 2500) {
     return sharedLatestLogs;
   }
   if (inFlightServerSync) {
@@ -869,6 +895,7 @@ export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEn
         snapshot = await getDocsFromServer(logsRef);
       } catch (serverErr) {
         if (isQuotaExceededError(serverErr)) {
+          isQuotaHit = true;
           notifyQuotaExceeded();
           throw serverErr;
         }
@@ -894,6 +921,7 @@ export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEn
       return merged;
     } catch (err) {
       if (isQuotaExceededError(err)) {
+        isQuotaHit = true;
         notifyQuotaExceeded();
       }
       const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
@@ -906,6 +934,42 @@ export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEn
   return inFlightServerSync;
 }
 
+function runLiveStatsSyncTick(): void {
+  if (typeof window === 'undefined' || liveStatsSyncRefCount <= 0 || isQuotaHit) return;
+  if (document.visibilityState !== 'visible') return;
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  if (logListeners.size > 0 && !sharedUnsubscribeFirestore) {
+    ensureSharedFirestoreSubscription();
+  }
+  syncLoginLogsFromServer(true).catch(() => {});
+}
+
+/**
+ * Acquire an active live-sync lease while a stats modal/dashboard is open and visible.
+ * Guarantees two devices entering simultaneously stay updated in real time (every ~3.5s)
+ * even if mobile/proxy buffers delay Firestore push packets. Stops immediately on release/hide.
+ */
+export function acquireLiveStatsSync(intervalMs = 3500): () => void {
+  liveStatsSyncRefCount++;
+  ensureSharedFirestoreSubscription();
+  syncLoginLogsFromServer(true).catch(() => {});
+
+  if (typeof window !== 'undefined' && liveStatsSyncTimer === null && !isQuotaHit) {
+    liveStatsSyncTimer = setInterval(runLiveStatsSyncTick, Math.max(2500, intervalMs));
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    liveStatsSyncRefCount = Math.max(0, liveStatsSyncRefCount - 1);
+    if (liveStatsSyncRefCount === 0 && liveStatsSyncTimer !== null) {
+      clearInterval(liveStatsSyncTimer);
+      liveStatsSyncTimer = null;
+    }
+  };
+}
+
 function clearReconnectTimer(): void {
   if (reconnectTimer !== null) {
     clearTimeout(reconnectTimer);
@@ -914,7 +978,7 @@ function clearReconnectTimer(): void {
 }
 
 function scheduleSubscriptionReconnect(): void {
-  if (typeof window === 'undefined' || reconnectTimer !== null || logListeners.size === 0) return;
+  if (typeof window === 'undefined' || reconnectTimer !== null || logListeners.size === 0 || isQuotaHit) return;
   const delayMs = Math.min(30000, 2000 * Math.pow(2, Math.min(reconnectAttempts, 4)));
   reconnectAttempts++;
   reconnectTimer = setTimeout(() => {
@@ -942,7 +1006,7 @@ function ensureSharedFirestoreSubscription(): void {
           if (logListeners.size > 0 && !sharedUnsubscribeFirestore) {
             ensureSharedFirestoreSubscription();
           }
-          return syncLoginLogsFromServer(false);
+          return syncLoginLogsFromServer(true);
         })
         .catch(() => {});
     };
@@ -952,9 +1016,16 @@ function ensureSharedFirestoreSubscription(): void {
       }
     };
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === LOGIN_LOGS_STORAGE_KEY && !hasReceivedServerSnapshot) {
-        const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-        broadcastLogsToListeners(merged);
+      if (e.key === LOGIN_LOGS_STORAGE_KEY) {
+        if (e.newValue === '[]') {
+          saveLocalLoginLogs([], false);
+          broadcastLogsToListeners([]);
+        } else {
+          syncLoginLogsFromServer(true).catch(() => {
+            const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+            broadcastLogsToListeners(merged);
+          });
+        }
       }
     };
     const handleUserDeleted = () => {
@@ -962,6 +1033,23 @@ function ensureSharedFirestoreSubscription(): void {
       const cleaned = sanitizeAuthenticLogs(base);
       saveLocalLoginLogs(cleaned, true);
     };
+
+    try {
+      if (!logsBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
+        logsBroadcastChannel = new BroadcastChannel('acu_login_logs_channel');
+      }
+      if (logsBroadcastChannel) {
+        logsBroadcastChannel.onmessage = (ev) => {
+          if (ev?.data?.type === 'LOGS_CLEARED') {
+            broadcastLogsToListeners([]);
+          } else {
+            syncLoginLogsFromServer(true).catch(() => {});
+          }
+        };
+      }
+    } catch {
+      // ignore BroadcastChannel unsupported errors
+    }
 
     window.addEventListener('online', handleResumeSync);
     window.addEventListener('focus', handleResumeSync);
@@ -1134,26 +1222,26 @@ export async function fetchRecentLoginLogs(maxCount = 10): Promise<LoginLogEntry
   try {
     const logsRef = collection(db, 'login_logs');
     const q = query(logsRef, orderBy('createdAt', 'desc'), limit(maxCount));
-    const snapshot = await getDocs(q);
+    let snapshot;
+    try {
+      snapshot = await getDocsFromServer(q);
+    } catch (serverErr) {
+      if (isQuotaExceededError(serverErr)) {
+        isQuotaHit = true;
+        notifyQuotaExceeded();
+        throw serverErr;
+      }
+      snapshot = await getDocs(q);
+    }
     const logs: LoginLogEntry[] = [];
     snapshot.forEach((docSnap) => {
-      const d = docSnap.data();
-      logs.push({
-        id: docSnap.id,
-        email: d.email || '',
-        displayName: d.displayName || '',
-        role: d.role || 'guest',
-        loginMethod: d.loginMethod || 'Google SSO',
-        status: d.status || 'online',
-        loginTimestamp: d.loginTimestamp || new Date().toISOString(),
-        source: d.source || 'System Test',
-        avatarUrl: d.avatarUrl || '',
-      });
+      const { entry } = parseFirestoreLoginLogDoc(docSnap);
+      logs.push(entry);
     });
-    return logs;
+    return sanitizeAuthenticLogs(logs).slice(0, maxCount);
   } catch (err) {
     console.warn('Failed to fetch login logs from Firestore (using local fallback):', err);
-    return getLocalLoginLogs().slice(0, maxCount);
+    return (sharedLatestLogs || getLocalLoginLogs()).slice(0, maxCount);
   }
 }
 

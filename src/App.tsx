@@ -75,7 +75,7 @@ export default function App() {
     if (!loggedInUser) return;
     flushPendingLoginLogs().catch(() => {});
     const unsub = subscribeAllLoginLogs(() => {});
-    syncLoginLogsFromServer(false).catch(() => {});
+    syncLoginLogsFromServer(true).catch(() => {});
     return () => unsub();
   }, [loggedInUser]);
 

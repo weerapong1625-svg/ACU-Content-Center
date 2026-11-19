@@ -53,6 +53,7 @@ import {
 import { 
   subscribeAllLoginLogs, 
   syncLoginLogsFromServer,
+  acquireLiveStatsSync,
   LoginLogEntry, 
   resetAllLoginLogs,
   resetAdminLoginLogs,
@@ -155,14 +156,25 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to real-time login logs and refresh authoritative server state
+  // Subscribe to real-time login logs and keep authoritative server state live while modal is open
   useEffect(() => {
     if (!isOpen) return;
     const unsub = subscribeAllLoginLogs((logs) => {
       setLoginLogs(logs);
     });
-    syncLoginLogsFromServer(false).catch(() => {});
-    return () => unsub();
+    const releaseLiveSync = acquireLiveStatsSync(3500);
+    return () => {
+      unsub();
+      releaseLiveSync();
+    };
+  }, [isOpen]);
+
+  // Force immediate server sync whenever user switches to stats or praise tab
+  useEffect(() => {
+    if (!isOpen) return;
+    if (activeTab === 'stats' || activeTab === 'praise') {
+      syncLoginLogsFromServer(true).catch(() => {});
+    }
   }, [isOpen, activeTab]);
 
   // Subscribe to real-time teacher media repository for kudos/likes counting

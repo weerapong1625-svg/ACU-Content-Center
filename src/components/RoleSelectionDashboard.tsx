@@ -29,6 +29,9 @@ import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
   fetchRecentLoginLogs, 
+  subscribeAllLoginLogs,
+  acquireLiveStatsSync,
+  syncLoginLogsFromServer,
   LoginLogEntry, 
   fetchUserProfile 
 } from '../services/auditService';
@@ -148,6 +151,22 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     setRecentLogs(logs);
     setIsLoadingLogs(false);
   };
+
+  // Keep System Test modal live-synced when two devices log in simultaneously
+  useEffect(() => {
+    if (!showSystemTestModal) return;
+    const unsub = subscribeAllLoginLogs((allLogs) => {
+      if (allLogs.length > 0) {
+        setRecentLogs(allLogs.slice(0, 10));
+      }
+    });
+    const releaseLiveSync = acquireLiveStatsSync(3500);
+    syncLoginLogsFromServer(true).catch(() => {});
+    return () => {
+      unsub();
+      releaseLiveSync();
+    };
+  }, [showSystemTestModal]);
 
   const handleOpenAdminPortal = () => {
     setAdminPasswordInput('');

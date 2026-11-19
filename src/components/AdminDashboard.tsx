@@ -116,6 +116,7 @@ import {
   LoginLogEntry,
   subscribeAllLoginLogs,
   syncLoginLogsFromServer,
+  acquireLiveStatsSync,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
   resetAllLoginLogs,
@@ -395,7 +396,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
 
     // Pull authoritative login_logs from Firestore server immediately on dashboard open
-    syncLoginLogsFromServer(false).catch(() => {});
+    syncLoginLogsFromServer(true).catch(() => {});
 
     return () => {
       unsubInnovations();
@@ -410,10 +411,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, []);
 
-  // Re-sync server login logs when switching to stats / visitors / certificates tabs
+  // Re-sync server login logs in real time while viewing stats / visitors / certificates tabs
   useEffect(() => {
     if (activeTab === 'stats' || activeTab === 'visitors' || activeTab === 'certificates') {
-      syncLoginLogsFromServer(false).catch(() => {});
+      const releaseLiveSync = acquireLiveStatsSync(3500);
+      return () => releaseLiveSync();
     }
   }, [activeTab]);
 

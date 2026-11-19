@@ -31,6 +31,7 @@ import {
   LoginLogEntry,
   subscribeAllLoginLogs,
   syncLoginLogsFromServer,
+  acquireLiveStatsSync,
   getBangkokDateParts,
   computeEffectiveUserYearVisits
 } from '../services/auditService';
@@ -113,7 +114,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
         setInternalLogs(logs);
       });
     }
-    syncLoginLogsFromServer(false).catch(() => {});
+    const releaseLiveSync = acquireLiveStatsSync(3500);
 
     if (!innovations) {
       unsubInnovations = subscribeAllInnovations((list) => {
@@ -130,6 +131,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
     return () => {
       unsubProfiles();
       unsubLogs();
+      releaseLiveSync();
       unsubInnovations();
       unsubFacilities();
     };
