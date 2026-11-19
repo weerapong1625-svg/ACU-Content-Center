@@ -100,11 +100,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             .filter((num) => num >= 1 && num <= 5)
         );
         setUserInnovationsCount(distinctSlots.size);
-      },
-      profile?.fullName
+      }
     );
     return () => unsub();
-  }, [userEmail, profile?.fullName]);
+  }, [userEmail]);
 
   // Search & Filter state for Media Repository
   const [searchMedia, setSearchMedia] = useState('');

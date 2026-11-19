@@ -48,6 +48,8 @@ export function getInitialCertificateLogoUrl(): string {
  * Real-time subscription to certificate logo in Firestore
  */
 export function subscribeCertificateLogo(onUpdate: (url: string) => void): () => void {
+  onUpdate(getInitialCertificateLogoUrl());
+
   const handleCustomUpdate = (e: Event) => {
     const custom = e as CustomEvent<string>;
     if (custom.detail) {
@@ -73,8 +75,10 @@ export function subscribeCertificateLogo(onUpdate: (url: string) => void): () =>
             return;
           }
         }
-        // Fall back to school logo
-        onUpdate(getInitialCertificateLogoUrl());
+        try {
+          localStorage.removeItem(CERTIFICATE_LOGO_STORAGE_KEY);
+        } catch {}
+        onUpdate(getInitialLogoUrl());
       },
       (error) => {
         if (isQuotaExceededError(error)) {

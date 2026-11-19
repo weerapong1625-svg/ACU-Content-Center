@@ -115,11 +115,13 @@ import {
 import {
   LoginLogEntry,
   subscribeAllLoginLogs,
+  syncLoginLogsFromServer,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
   resetAllLoginLogs,
   resetAdminLoginLogs,
-  getBangkokDateParts
+  getBangkokDateParts,
+  computeEffectiveUserYearVisits
 } from '../services/auditService';
 import {
   PopupBannerConfig,
@@ -169,10 +171,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [managingPrivilegeTeacher, setManagingPrivilegeTeacher] = useState<TeacherPrivilegeAdminItem | null>(null);
 
   // Yearly Stats & Certificate Filter
-  const [selectedYear, setSelectedYear] = useState<string>('2026');
+  const [selectedYear, setSelectedYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
 
   // 1. Visitor logs filter by year and search
-  const [visitorYear, setVisitorYear] = useState<string>('2026');
+  const [visitorYear, setVisitorYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
   const [visitorSearchTerm, setVisitorSearchTerm] = useState('');
 
   // 2. Online Certificate Verification Filter & Target state
@@ -392,6 +394,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (cfg.sheetUrl) setGoogleSheetsUrl(cfg.sheetUrl);
     });
 
+    // Pull authoritative login_logs from Firestore server immediately on dashboard open
+    syncLoginLogsFromServer(false).catch(() => {});
+
     return () => {
       unsubInnovations();
       unsubFacilities();
@@ -404,6 +409,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubPrivileges();
     };
   }, []);
+
+  // Re-sync server login logs when switching to stats / visitors / certificates tabs
+  useEffect(() => {
+    if (activeTab === 'stats' || activeTab === 'visitors' || activeTab === 'certificates') {
+      syncLoginLogsFromServer(false).catch(() => {});
+    }
+  }, [activeTab]);
 
   // Compute aggregated summaries
   const teacherSummaries = useMemo(() => {
@@ -430,10 +442,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         }
       }
 
-      // Filter by Innovation Year
+      // Filter by Innovation Year (Bangkok UTC+7)
       if (innovationYear !== 'all') {
-        const d = new Date(item.submittedAt);
-        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        const parts = item.submittedAt ? getBangkokDateParts(item.submittedAt) : null;
+        const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
         if (yr !== innovationYear) return false;
       }
 
@@ -715,10 +727,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Filtered facilities list
   const filteredFacilities = useMemo(() => {
     return facilities.filter((fac) => {
-      // Filter by Facility Year
+      // Filter by Facility Year (Bangkok UTC+7)
       if (facilityYear !== 'all') {
-        const d = new Date(fac.createdAt || fac.usageDateTime);
-        const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+        const parts = getBangkokDateParts(fac.createdAt || fac.usageDateTime);
+        const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
         if (yr !== facilityYear) return false;
       }
       if (facilitySearchTerm.trim()) {
@@ -806,11 +818,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
         }
       });
-      if (yr === CURRENT_CALENDAR_YEAR) {
+      const isCurrentOptionYear = yr === CURRENT_CALENDAR_YEAR;
+      if (isCurrentOptionYear) {
         Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
           const em = emKey.toLowerCase().trim();
-          if (!visitsByEmail[em] && (prof?.stats?.totalViews || 0) > 0) {
-            visitsByEmail[em] = prof.stats.totalViews;
+          const eff = computeEffectiveUserYearVisits(visitsByEmail[em] || 0, prof?.stats?.totalViews, true);
+          if (eff > 0) {
+            visitsByEmail[em] = eff;
           }
         });
       }
@@ -823,23 +837,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return result;
   }, [loginLogs, userProfilesMap]);
 
-  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
+  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี (Bangkok UTC+7)
   const innovationYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
     innovations.forEach((item) => {
-      const d = new Date(item.submittedAt);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      const parts = item.submittedAt ? getBangkokDateParts(item.submittedAt) : null;
+      const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
     });
     return counts;
   }, [innovations]);
 
-  // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี
+  // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี (Bangkok UTC+7)
   const facilityYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
     facilities.forEach((fac) => {
-      const d = new Date(fac.createdAt || fac.usageDateTime);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      const parts = getBangkokDateParts(fac.createdAt || fac.usageDateTime);
+      const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
     });
     return counts;
@@ -900,9 +914,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const realName = getCleanRealName(rawName, email);
       
       const profileViews = profile?.stats?.totalViews || 0;
-      const visits = visitData.count > 0
-        ? visitData.count
-        : (isCurrentSelectedYear && profileViews > 0 ? profileViews : 0);
+      const visits = computeEffectiveUserYearVisits(visitData.count, profileViews, isCurrentSelectedYear);
       const isEligible = visits >= 100;
       const progressPercent = Math.min(100, Math.round((visits / 100) * 100));
 
@@ -1056,18 +1068,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Yearly Stats calculation
+  // Yearly Stats calculation (Bangkok UTC+7 across all devices)
   const yearlyStats = useMemo(() => {
-    const targetYear = parseInt(selectedYear) || 2026;
+    const targetYear = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
 
     const yearInnovations = innovations.filter(i => {
-      const d = new Date(i.submittedAt);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
+      const parts = i.submittedAt ? getBangkokDateParts(i.submittedAt) : null;
+      return Boolean(parts && parts.year === targetYear);
     });
 
     const yearFacilities = facilities.filter(f => {
-      const d = new Date(f.createdAt || f.usageDateTime);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
+      const parts = getBangkokDateParts(f.createdAt || f.usageDateTime);
+      return Boolean(parts && parts.year === targetYear);
     });
 
     const yearLogs = loginLogs.filter(l => {
@@ -1088,12 +1100,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         return parts ? parts.monthIndex === idx : false;
       }).length;
       const mediaCount = yearInnovations.filter(i => {
-        const d = new Date(i.submittedAt);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
+        const parts = i.submittedAt ? getBangkokDateParts(i.submittedAt) : null;
+        return parts ? parts.monthIndex === idx : false;
       }).length;
       const facCount = yearFacilities.filter(f => {
-        const d = new Date(f.createdAt || f.usageDateTime);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
+        const parts = getBangkokDateParts(f.createdAt || f.usageDateTime);
+        return parts ? parts.monthIndex === idx : false;
       }).length;
 
       return {

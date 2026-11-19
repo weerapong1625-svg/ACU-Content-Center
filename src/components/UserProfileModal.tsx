@@ -52,11 +52,13 @@ import {
 } from '../services/submissionService';
 import { 
   subscribeAllLoginLogs, 
+  syncLoginLogsFromServer,
   LoginLogEntry, 
   resetAllLoginLogs,
   resetAdminLoginLogs,
   resetUserLoginLogsByEmail,
-  getBangkokDateParts
+  getBangkokDateParts,
+  computeEffectiveUserYearVisits
 } from '../services/auditService';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
@@ -153,14 +155,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to real-time login logs
+  // Subscribe to real-time login logs and refresh authoritative server state
   useEffect(() => {
     if (!isOpen) return;
     const unsub = subscribeAllLoginLogs((logs) => {
       setLoginLogs(logs);
     });
+    syncLoginLogsFromServer(false).catch(() => {});
     return () => unsub();
-  }, [isOpen]);
+  }, [isOpen, activeTab]);
 
   // Subscribe to real-time teacher media repository for kudos/likes counting
   useEffect(() => {
@@ -471,8 +474,8 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
-    // Fallback for accounts with recorded profile views when login_logs entry is absent
-    const useProfileViewsFallback = myYearLogs.length === 0 && isCurrentYear && profileViews > 0;
+    const effectiveMyYearVisits = computeEffectiveUserYearVisits(myYearLogs.length, profileViews, isCurrentYear);
+    const extraLegacyViews = Math.max(0, effectiveMyYearVisits - myYearLogs.length);
 
     // Monthly breakdown for selected year (1-12)
     const monthNames = [
@@ -490,9 +493,9 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         return parts ? parts.monthIndex === idx : false;
       }).length;
 
-      if (useProfileViewsFallback && idx === currentMonthIdx) {
-        myCount += profileViews;
-        allCount += profileViews;
+      if (extraLegacyViews > 0 && idx === currentMonthIdx) {
+        myCount += extraLegacyViews;
+        allCount += extraLegacyViews;
       }
 
       return {
@@ -523,7 +526,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     const uniqueEmailsInYear = new Set(
       allYearLogs.map((l) => l.email?.toLowerCase().trim()).filter(Boolean)
     );
-    if (useProfileViewsFallback && normTargetEmail) {
+    if (extraLegacyViews > 0 && normTargetEmail) {
       uniqueEmailsInYear.add(normTargetEmail);
     }
     const uniqueVerifiedUsersYear = uniqueEmailsInYear.size;
@@ -1370,7 +1373,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                     className="px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-700 text-xs font-semibold text-white focus:outline-none focus:border-purple-500 cursor-pointer"
                   >
                     {Array.from({ length: 13 }, (_, i) => {
-                      const yr = (new Date().getFullYear() || 2026) + 10 - i;
+                      const yr = (getBangkokDateParts()?.year || new Date().getFullYear() || 2026) + 10 - i;
                       return (
                         <option key={yr} value={yr.toString()}>
                           พ.ศ. {yr + 543} ({yr})

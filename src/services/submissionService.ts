@@ -225,8 +225,95 @@ export const DEFAULT_RESTORED_INNOVATIONS: InnovationSubmission[] = [];
 
 export const DEFAULT_RESTORED_TEACHER_MEDIA: TeacherMediaWork[] = [];
 
+// =========================================================================
+// SHARED MULTIPLEXED IN-MEMORY CACHE & REFERENCE-COUNTED FIRESTORE STREAMS
+// =========================================================================
+
+let sharedLatestInnovations: InnovationSubmission[] | null = null;
+const innovationsListeners = new Set<(list: InnovationSubmission[]) => void>();
+let unsubSharedInnovationsFs: (() => void) | null = null;
+
+let sharedLatestFacilities: FacilitySubmission[] | null = null;
+const facilitiesListeners = new Set<(list: FacilitySubmission[]) => void>();
+let unsubSharedFacilitiesFs: (() => void) | null = null;
+
+let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
+const teacherMediaListeners = new Set<(list: TeacherMediaWork[]) => void>();
+let unsubSharedTeacherMediaFs: (() => void) | null = null;
+
+let sharedLatestSharedIdeas: SharedIdeaItem[] | null = null;
+const sharedIdeasListeners = new Set<(list: SharedIdeaItem[]) => void>();
+let unsubSharedIdeasFs: (() => void) | null = null;
+
+function safeSaveCacheList<T extends Record<string, any>>(storageKey: string, list: T[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(storageKey, JSON.stringify(list));
+  } catch {
+    // Fallback if QuotaExceededError due to oversized base64 data URIs: preserve records with lightweight fallback image
+    try {
+      const stripped = list.map((item) => {
+        const copy: any = { ...item };
+        if (typeof copy.imageUrl === 'string' && copy.imageUrl.length > 60000) copy.imageUrl = '';
+        if (typeof copy.coverImageUrl === 'string' && copy.coverImageUrl.length > 60000) copy.coverImageUrl = '';
+        if (typeof copy.thumbnailUrl === 'string' && copy.thumbnailUrl.length > 60000) copy.thumbnailUrl = '/acu_active_logo.png';
+        return copy;
+      });
+      localStorage.setItem(storageKey, JSON.stringify(stripped));
+    } catch {
+      // ignore if browser storage is completely full
+    }
+  }
+}
+
+function broadcastInnovations(list: InnovationSubmission[]): void {
+  sharedLatestInnovations = list;
+  innovationsListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (e) {
+      console.warn('Innovations listener error:', e);
+    }
+  });
+}
+
+function broadcastFacilities(list: FacilitySubmission[]): void {
+  sharedLatestFacilities = list;
+  facilitiesListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (e) {
+      console.warn('Facilities listener error:', e);
+    }
+  });
+}
+
+function broadcastTeacherMedia(list: TeacherMediaWork[]): void {
+  sharedLatestTeacherMedia = list;
+  teacherMediaListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (e) {
+      console.warn('TeacherMedia listener error:', e);
+    }
+  });
+}
+
+function broadcastSharedIdeas(list: SharedIdeaItem[]): void {
+  sharedLatestSharedIdeas = list;
+  sharedIdeasListeners.forEach((cb) => {
+    try {
+      cb(list);
+    } catch (e) {
+      console.warn('SharedIdeas listener error:', e);
+    }
+  });
+}
+
 function notifyInnovationsChanged(): void {
   try {
+    const current = sharedLatestInnovations || getStoredInnovations();
+    broadcastInnovations(current);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
     }
@@ -235,10 +322,36 @@ function notifyInnovationsChanged(): void {
   }
 }
 
+function notifyFacilitiesChanged(): void {
+  try {
+    const current = sharedLatestFacilities || getStoredFacilities();
+    broadcastFacilities(current);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_facilities_changed'));
+    }
+  } catch {
+    // ignore
+  }
+}
+
 function notifyTeacherMediaChanged(): void {
   try {
+    const current = sharedLatestTeacherMedia || getStoredTeacherMedia();
+    broadcastTeacherMedia(current);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function notifySharedIdeasChanged(): void {
+  try {
+    const current = sharedLatestSharedIdeas || getStoredSharedIdeas();
+    broadcastSharedIdeas(current);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_shared_ideas_changed'));
     }
   } catch {
     // ignore
@@ -249,6 +362,7 @@ function notifyTeacherMediaChanged(): void {
  * Get cached innovations from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredInnovations(): InnovationSubmission[] {
+  if (sharedLatestInnovations) return sharedLatestInnovations;
   try {
     const raw = localStorage.getItem(INNOVATIONS_STORAGE_KEY);
     if (raw) {
@@ -268,27 +382,50 @@ export function getStoredInnovations(): InnovationSubmission[] {
 }
 
 /**
- * Save innovations to localStorage cache
+ * Save innovations to RAM + localStorage cache
  */
 export function saveStoredInnovations(list: InnovationSubmission[]): void {
+  const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+  sharedLatestInnovations = cleaned;
+  safeSaveCacheList(INNOVATIONS_STORAGE_KEY, cleaned);
+}
+
+/**
+ * Get cached facilities from localStorage
+ */
+export function getStoredFacilities(): FacilitySubmission[] {
+  if (sharedLatestFacilities) return sharedLatestFacilities;
   try {
-    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
+    const raw = localStorage.getItem(FACILITY_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((f: FacilitySubmission) => f && Boolean(f.learningCenter));
+      }
+    }
   } catch (err) {
-    console.warn('Failed to save innovations cache:', err);
+    console.warn('Failed to read facilities cache:', err);
   }
+  return [];
+}
+
+export function saveStoredFacilities(list: FacilitySubmission[]): void {
+  const cleaned = list.filter((f) => f && Boolean(f.learningCenter));
+  sharedLatestFacilities = cleaned;
+  safeSaveCacheList(FACILITY_STORAGE_KEY, cleaned);
 }
 
 /**
  * Get cached teacher media from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredTeacherMedia(): TeacherMediaWork[] {
+  if (sharedLatestTeacherMedia) return sharedLatestTeacherMedia;
   try {
     const raw = localStorage.getItem(TEACHER_MEDIA_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        const cleaned = parsed.filter((item: TeacherMediaWork) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
+        const cleaned = parsed.filter((item: TeacherMediaWork) => item && !item.id?.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(item.id) && item.title?.trim().length > 0);
         if (cleaned.length !== parsed.length) {
           saveStoredTeacherMedia(cleaned);
         }
@@ -302,15 +439,31 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
 }
 
 /**
- * Save teacher media to localStorage cache
+ * Save teacher media to RAM + localStorage cache
  */
 export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
+  const cleaned = list.filter((item) => item && !item.id?.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(item.id) && item.title?.trim().length > 0);
+  sharedLatestTeacherMedia = cleaned;
+  safeSaveCacheList(TEACHER_MEDIA_STORAGE_KEY, cleaned);
+}
+
+export function getStoredSharedIdeas(): SharedIdeaItem[] {
+  if (sharedLatestSharedIdeas) return sharedLatestSharedIdeas;
   try {
-    const cleaned = list.filter((item) => item && !LEGACY_FAKE_SEED_IDS.has(item.id));
-    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
-  } catch (err) {
-    console.warn('Failed to save teacher media cache:', err);
-  }
+    const raw = localStorage.getItem(SHARED_IDEAS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map((i: SharedIdeaItem) => sanitizeSharedIdeaRecord(i));
+      }
+    }
+  } catch {}
+  return DEFAULT_SEED_IDEAS;
+}
+
+export function saveStoredSharedIdeas(list: SharedIdeaItem[]): void {
+  sharedLatestSharedIdeas = list;
+  safeSaveCacheList(SHARED_IDEAS_STORAGE_KEY, list);
 }
 
 /**
@@ -790,8 +943,80 @@ export async function deleteInnovationSubmission(
 }
 
 /**
+ * Subscribe to ALL innovation submissions (for Google Sheets summary, admin overview, and multiplexed user views).
+ * Reference-counted shared Firestore listener + 0ms RAM/localStorage emission.
+ */
+export function subscribeAllInnovations(
+  callback: (submissions: InnovationSubmission[]) => void
+): () => void {
+  innovationsListeners.add(callback);
+
+  // 1. Instant initial load from RAM or localStorage cache
+  callback(sharedLatestInnovations || getStoredInnovations());
+
+  const handleLocalChange = () => {
+    callback(sharedLatestInnovations || getStoredInnovations());
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_innovations_changed', handleLocalChange);
+  }
+
+  // 2. Attach single shared Firestore listener if not already active
+  if (!unsubSharedInnovationsFs) {
+    try {
+      const colRef = collection(db, INNOVATIONS_COLLECTION);
+      unsubSharedInnovationsFs = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const liveList: InnovationSubmission[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data() as InnovationSubmission;
+            if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
+              liveList.push({ ...data, id: data?.id || docSnap.id });
+            }
+          });
+
+          liveList.sort(
+            (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
+          );
+          saveStoredInnovations(liveList);
+          broadcastInnovations(liveList);
+        },
+        (err) => {
+          if (isQuotaExceededError(err)) {
+            notifyQuotaExceeded();
+            console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
+          } else {
+            console.warn('subscribeAllInnovations listener notice:', err);
+          }
+          broadcastInnovations(sharedLatestInnovations || getStoredInnovations());
+        }
+      );
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      broadcastInnovations(sharedLatestInnovations || getStoredInnovations());
+    }
+  }
+
+  return () => {
+    innovationsListeners.delete(callback);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_innovations_changed', handleLocalChange);
+    }
+    if (innovationsListeners.size === 0 && unsubSharedInnovationsFs) {
+      try {
+        unsubSharedInnovationsFs();
+      } catch {}
+      unsubSharedInnovationsFs = null;
+    }
+  };
+}
+
+/**
  * Subscribe to user's innovation submissions in real time.
- * Uses Firestore live snapshot as authoritative source when online (no stale cache resurrection).
+ * Reuses the single shared innovations stream to eliminate duplicate Firestore listeners and re-subscribe flicker.
  */
 export function subscribeUserInnovations(
   userEmail: string,
@@ -813,12 +1038,10 @@ export function subscribeUserInnovations(
         const itemEmail = (item.userEmail || '').trim().toLowerCase();
         const itemName = (item.teacherName || '').trim().toLowerCase();
 
-        // When userEmail is present on the record, strictly match by email so another user's items never bleed in
         if (itemEmail) {
           return Boolean(normTargetEmail && itemEmail === normTargetEmail);
         }
 
-        // Fallback to name only if record lacks userEmail
         return Boolean(
           normTargetName &&
             (itemName === normTargetName ||
@@ -829,129 +1052,9 @@ export function subscribeUserInnovations(
       .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
   };
 
-  // 1. Instant initial render from local cache (already stripped of legacy fake seed IDs)
-  callback(filterUserItems(getStoredInnovations()));
-
-  const handleLocalChange = () => {
-    callback(filterUserItems(getStoredInnovations()));
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-  }
-
-  // 2. Real-time Firestore sync (authoritative when onSnapshot succeeds)
-  try {
-    const colRef = collection(db, INNOVATIONS_COLLECTION);
-
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: InnovationSubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as InnovationSubmission;
-          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
-            liveList.push({ ...data, id: data?.id || docSnap.id });
-          }
-        });
-
-        liveList.sort(
-          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-        );
-        saveStoredInnovations(liveList);
-        callback(filterUserItems(liveList));
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Quota reached for subscribeUserInnovations; serving from local recovery cache.');
-        } else {
-          console.warn('subscribeUserInnovations listener notice:', err);
-        }
-        callback(filterUserItems(getStoredInnovations()));
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    callback(filterUserItems(getStoredInnovations()));
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-    };
-  }
-}
-
-/**
- * Subscribe to ALL innovation submissions (for Google Sheets summary and admin overview).
- * Uses Firestore live snapshot as authoritative source when online (prevents deleted items from reappearing).
- */
-export function subscribeAllInnovations(
-  callback: (submissions: InnovationSubmission[]) => void
-): () => void {
-  // 1. Instant initial load from local cache (already stripped of legacy fake seed IDs)
-  callback(getStoredInnovations());
-
-  const handleLocalChange = () => {
-    callback(getStoredInnovations());
-  };
-  if (typeof window !== 'undefined') {
-    window.addEventListener('acu_innovations_changed', handleLocalChange);
-  }
-
-  try {
-    const colRef = collection(db, INNOVATIONS_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: InnovationSubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as InnovationSubmission;
-          if (!LEGACY_FAKE_SEED_IDS.has(docSnap.id) && !LEGACY_FAKE_SEED_IDS.has(data?.id)) {
-            liveList.push({ ...data, id: data?.id || docSnap.id });
-          }
-        });
-
-        liveList.sort(
-          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-        );
-        saveStoredInnovations(liveList);
-        callback(liveList);
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
-        } else {
-          console.warn('subscribeAllInnovations listener notice:', err);
-        }
-        callback(getStoredInnovations());
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    callback(getStoredInnovations());
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_innovations_changed', handleLocalChange);
-      }
-    };
-  }
+  return subscribeAllInnovations((allItems) => {
+    callback(filterUserItems(allItems));
+  });
 }
 
 /**
@@ -1026,25 +1129,31 @@ export async function saveFacilitySubmission(data: {
   imageUrl?: string;
   userEmail: string;
 }): Promise<{ success: boolean; id: string; error?: string }> {
+  const id = `fac_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowIso = new Date().toISOString();
+
+  const payload: FacilitySubmission = {
+    id,
+    teacherName: data.teacherName.trim(),
+    subjectGroup: data.subjectGroup,
+    learningCenter: data.learningCenter,
+    periods: data.periods,
+    usageDateTime: data.usageDateTime,
+    feedback: data.feedback.trim(),
+    imageUrl: data.imageUrl || '',
+    userEmail: data.userEmail.trim().toLowerCase(),
+    status: 'บันทึกสำเร็จ',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
   try {
-    const id = `fac_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const nowIso = new Date().toISOString();
+    const current = getStoredFacilities();
+    saveStoredFacilities([payload, ...current.filter((f) => f.id !== id)]);
+    notifyFacilitiesChanged();
+  } catch {}
 
-    const payload: FacilitySubmission = {
-      id,
-      teacherName: data.teacherName.trim(),
-      subjectGroup: data.subjectGroup,
-      learningCenter: data.learningCenter,
-      periods: data.periods,
-      usageDateTime: data.usageDateTime,
-      feedback: data.feedback.trim(),
-      imageUrl: data.imageUrl || '',
-      userEmail: data.userEmail.trim(),
-      status: 'บันทึกสำเร็จ',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-
+  try {
     const docRef = doc(db, SYSTEM_TEST_COLLECTION, id);
     await setDoc(docRef, {
       ...payload,
@@ -1054,6 +1163,10 @@ export async function saveFacilitySubmission(data: {
 
     return { success: true, id };
   } catch (error: any) {
+    if (isQuotaExceededError(error)) {
+      notifyQuotaExceeded();
+      return { success: true, id };
+    }
     console.error('Error saving facility submission to Firestore:', error);
     return { success: false, id: '', error: error.message || 'บันทึกข้อมูลไม่สำเร็จ' };
   }
@@ -1080,12 +1193,28 @@ export async function updateFacilitySubmission(
       return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขข้อมูลของผู้อื่น (เฉพาะเจ้าของหรือ Admin)' };
     }
 
+    const updatedAt = new Date().toISOString();
     await updateDoc(docRef, {
       ...updates,
-      updatedAt: new Date().toISOString(),
+      updatedAt,
     });
+
+    const current = getStoredFacilities();
+    saveStoredFacilities(
+      current.map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
+    );
+    notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      const updatedAt = new Date().toISOString();
+      saveStoredFacilities(
+        getStoredFacilities().map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
+      );
+      notifyFacilitiesChanged();
+      return { success: true };
+    }
     console.error('Error updating facility submission:', err);
     return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
   }
@@ -1103,7 +1232,13 @@ export async function deleteFacilitySubmission(
     const docRef = doc(db, SYSTEM_TEST_COLLECTION, id);
     const snap = await getDoc(docRef);
     if (!snap.exists()) {
-      return { success: false, error: 'ไม่พบรายการที่ต้องการลบ' };
+      const cached = getStoredFacilities().find((f) => f.id === id);
+      if (cached && !canUserModify(cached.userEmail, currentUserEmail)) {
+        return { success: false, error: 'คุณไม่มีสิทธิ์ลบข้อมูลของผู้อื่น (เฉพาะเจ้าของหรือ Admin)' };
+      }
+      saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+      notifyFacilitiesChanged();
+      return { success: true };
     }
     const currentData = snap.data() as FacilitySubmission;
 
@@ -1112,15 +1247,82 @@ export async function deleteFacilitySubmission(
     }
 
     await deleteDoc(docRef);
+    saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+    notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+      notifyFacilitiesChanged();
+      return { success: true };
+    }
     console.error('Error deleting facility submission:', err);
     return { success: false, error: err.message || 'ลบข้อมูลไม่สำเร็จ' };
   }
 }
 
 /**
- * Subscribe in real-time to submissions created by current user
+ * Subscribe in real-time to ALL facility usage records (multiplexed + 0ms cached emission)
+ */
+export function subscribeAllSubmissions(
+  callback: (submissions: FacilitySubmission[]) => void
+): () => void {
+  facilitiesListeners.add(callback);
+  callback(sharedLatestFacilities || getStoredFacilities());
+
+  const handleLocalChange = () => {
+    callback(sharedLatestFacilities || getStoredFacilities());
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_facilities_changed', handleLocalChange);
+  }
+
+  if (!unsubSharedFacilitiesFs) {
+    try {
+      const colRef = collection(db, SYSTEM_TEST_COLLECTION);
+      unsubSharedFacilitiesFs = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const list: FacilitySubmission[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data.learningCenter) {
+              list.push({ ...(data as FacilitySubmission), id: (data as any)?.id || docSnap.id });
+            }
+          });
+          list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          saveStoredFacilities(list);
+          broadcastFacilities(list);
+        },
+        (err) => {
+          if (isQuotaExceededError(err)) notifyQuotaExceeded();
+          console.warn('subscribeAllSubmissions listener warning:', err);
+          broadcastFacilities(sharedLatestFacilities || getStoredFacilities());
+        }
+      );
+    } catch (err) {
+      console.error('subscribeAllSubmissions failed:', err);
+      broadcastFacilities(sharedLatestFacilities || getStoredFacilities());
+    }
+  }
+
+  return () => {
+    facilitiesListeners.delete(callback);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_facilities_changed', handleLocalChange);
+    }
+    if (facilitiesListeners.size === 0 && unsubSharedFacilitiesFs) {
+      try {
+        unsubSharedFacilitiesFs();
+      } catch {}
+      unsubSharedFacilitiesFs = null;
+    }
+  };
+}
+
+/**
+ * Subscribe in real-time to submissions created by current user (reuses shared facilities stream)
  */
 export function subscribeUserSubmissions(
   userEmail: string,
@@ -1130,65 +1332,10 @@ export function subscribeUserSubmissions(
     callback([]);
     return () => {};
   }
-
-  try {
-    const colRef = collection(db, SYSTEM_TEST_COLLECTION);
-    const q = query(colRef, where('userEmail', '==', userEmail.trim()));
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const list: FacilitySubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data.learningCenter) {
-            list.push(data as FacilitySubmission);
-          }
-        });
-        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(list);
-      },
-      (err) => {
-        console.warn('subscribeUserSubmissions listener warning:', err);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeUserSubmissions failed:', err);
-    return () => {};
-  }
-}
-
-/**
- * Subscribe in real-time to ALL facility usage records
- */
-export function subscribeAllSubmissions(
-  callback: (submissions: FacilitySubmission[]) => void
-): () => void {
-  try {
-    const colRef = collection(db, SYSTEM_TEST_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const list: FacilitySubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data.learningCenter) {
-            list.push(data as FacilitySubmission);
-          }
-        });
-        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(list);
-      },
-      (err) => {
-        console.warn('subscribeAllSubmissions listener warning:', err);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeAllSubmissions failed:', err);
-    return () => {};
-  }
+  const norm = userEmail.trim().toLowerCase();
+  return subscribeAllSubmissions((all) => {
+    callback(all.filter((f) => (f.userEmail || '').trim().toLowerCase() === norm));
+  });
 }
 
 /**
@@ -1250,13 +1397,19 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
 /**
- * Subscribe to Teacher Media Repository with live updates (Displays real teacher submissions only)
+ * Subscribe to Teacher Media Repository with live updates (multiplexed + 0ms instant cached emission)
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
 ): () => void {
+  teacherMediaListeners.add(callback);
+
+  // Emit cached data synchronously on mount so Teacher Media Repository never appears empty/slow
+  const initialWorks = sharedLatestTeacherMedia || getStoredTeacherMedia();
+  callback(initialWorks);
+
   const handleLocalChange = () => {
-    const cached = getStoredTeacherMedia().filter(
+    const cached = (sharedLatestTeacherMedia || getStoredTeacherMedia()).filter(
       (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
     );
     cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
@@ -1267,47 +1420,52 @@ export function subscribeTeacherMedia(
     window.addEventListener('acu_teacher_media_changed', handleLocalChange);
   }
 
-  try {
-    const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: TeacherMediaWork[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as TeacherMediaWork;
-          liveList.push({ ...data, id: data?.id || docSnap.id });
-        });
+  if (!unsubSharedTeacherMediaFs) {
+    try {
+      const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
+      unsubSharedTeacherMediaFs = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const liveList: TeacherMediaWork[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data() as TeacherMediaWork;
+            liveList.push({ ...data, id: data?.id || docSnap.id });
+          });
 
-        // Filter out legacy seed items if any exist in collection
-        const realWorks = liveList.filter(
-          (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
-        );
+          // Filter out legacy seed items if any exist in collection
+          const realWorks = liveList.filter(
+            (w) => !w.id.startsWith('seed-') && !LEGACY_FAKE_SEED_IDS.has(w.id) && w.title?.trim().length > 0
+          );
 
-        // Sort newest first so real teacher submissions appear at top
-        realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        saveStoredTeacherMedia(realWorks);
-        callback(realWorks);
-      },
-      (err) => {
-        console.warn('subscribeTeacherMedia fallback:', err);
-        handleLocalChange();
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    console.error('subscribeTeacherMedia failed:', err);
-    callback([]);
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
-      }
-    };
+          // Sort newest first so real teacher submissions appear at top
+          realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+          saveStoredTeacherMedia(realWorks);
+          broadcastTeacherMedia(realWorks);
+        },
+        (err) => {
+          if (isQuotaExceededError(err)) notifyQuotaExceeded();
+          console.warn('subscribeTeacherMedia fallback:', err);
+          broadcastTeacherMedia(sharedLatestTeacherMedia || getStoredTeacherMedia());
+        }
+      );
+    } catch (err) {
+      console.error('subscribeTeacherMedia failed:', err);
+      broadcastTeacherMedia(sharedLatestTeacherMedia || getStoredTeacherMedia());
+    }
   }
+
+  return () => {
+    teacherMediaListeners.delete(callback);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_teacher_media_changed', handleLocalChange);
+    }
+    if (teacherMediaListeners.size === 0 && unsubSharedTeacherMediaFs) {
+      try {
+        unsubSharedTeacherMediaFs();
+      } catch {}
+      unsubSharedTeacherMediaFs = null;
+    }
+  };
 }
 
 /**
@@ -1508,35 +1666,45 @@ export async function addTeacherMediaDirectly(data: {
   onlineUrl?: string;
   submittedByEmail: string;
 }): Promise<{ success: boolean; id?: string; error?: string }> {
+  const id = `work_direct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const nowIso = new Date().toISOString();
+
+  const payload: TeacherMediaWork = {
+    id,
+    title: data.title.trim(),
+    teacherName: data.teacherName.trim(),
+    subjectGroup: data.subjectGroup,
+    gradeLevel: data.gradeLevel || data.subjectGroup,
+    subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+    thumbnailUrl: data.thumbnailUrl?.trim() || '/acu_active_logo.png',
+    description: data.description.trim(),
+    mediaType: data.mediaType,
+    itemNumber: 1,
+    onlineUrl: data.onlineUrl?.trim() || '',
+    ratingAvg: 5.0,
+    ratingCount: 1,
+    views: 1,
+    likes: 0,
+    likedBy: [],
+    submittedByEmail: data.submittedByEmail.trim().toLowerCase(),
+    createdAt: nowIso,
+  };
+
   try {
-    const id = `work_direct_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const nowIso = new Date().toISOString();
+    const currentMedia = getStoredTeacherMedia();
+    saveStoredTeacherMedia([payload, ...currentMedia.filter((m) => m.id !== id)]);
+    notifyTeacherMediaChanged();
+  } catch {}
+
+  try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
-
-    const payload: TeacherMediaWork = {
-      id,
-      title: data.title.trim(),
-      teacherName: data.teacherName.trim(),
-      subjectGroup: data.subjectGroup,
-      gradeLevel: data.gradeLevel || data.subjectGroup,
-      subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-      thumbnailUrl: data.thumbnailUrl?.trim() || '/ACU N.png',
-      description: data.description.trim(),
-      mediaType: data.mediaType,
-      itemNumber: 1,
-      onlineUrl: data.onlineUrl?.trim() || '',
-      ratingAvg: 5.0,
-      ratingCount: 1,
-      views: 1,
-      likes: 0,
-      likedBy: [],
-      submittedByEmail: data.submittedByEmail.trim(),
-      createdAt: nowIso,
-    };
-
     await setDoc(docRef, payload);
     return { success: true, id };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, id };
+    }
     console.error('Error adding teacher media:', err);
     return { success: false, error: err.message || 'เพิ่มสื่อไม่สำเร็จ' };
   }
@@ -1653,41 +1821,65 @@ function sanitizeSharedIdeaRecord(item: SharedIdeaItem): SharedIdeaItem {
 }
 
 /**
- * Subscribe to Shared Ideas in real time
+ * Subscribe to Shared Ideas in real time (multiplexed + instant cached emission)
  */
 export function subscribeSharedIdeas(
   callback: (ideas: SharedIdeaItem[]) => void
 ): () => void {
-  try {
-    const colRef = collection(db, SHARED_IDEAS_COLLECTION);
-    const unsubscribe = onSnapshot(
-      colRef,
-      (snapshot) => {
-        const liveList: SharedIdeaItem[] = [];
-        snapshot.forEach((docSnap) => {
-          liveList.push(sanitizeSharedIdeaRecord(docSnap.data() as SharedIdeaItem));
-        });
+  sharedIdeasListeners.add(callback);
+  callback(sharedLatestSharedIdeas || getStoredSharedIdeas());
 
-        // Merge default seeds if not present
-        const mergedMap = new Map<string, SharedIdeaItem>();
-        DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
-        liveList.forEach((i) => mergedMap.set(i.id, i));
-
-        const finalIdeas = Array.from(mergedMap.values());
-        finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(finalIdeas);
-      },
-      (err) => {
-        console.warn('subscribeSharedIdeas fallback to seed:', err);
-        callback(DEFAULT_SEED_IDEAS);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeSharedIdeas failed:', err);
-    callback(DEFAULT_SEED_IDEAS);
-    return () => {};
+  const handleLocalChange = () => {
+    callback(sharedLatestSharedIdeas || getStoredSharedIdeas());
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_shared_ideas_changed', handleLocalChange);
   }
+
+  if (!unsubSharedIdeasFs) {
+    try {
+      const colRef = collection(db, SHARED_IDEAS_COLLECTION);
+      unsubSharedIdeasFs = onSnapshot(
+        colRef,
+        (snapshot) => {
+          const liveList: SharedIdeaItem[] = [];
+          snapshot.forEach((docSnap) => {
+            liveList.push(sanitizeSharedIdeaRecord({ ...(docSnap.data() as SharedIdeaItem), id: docSnap.id }));
+          });
+
+          const mergedMap = new Map<string, SharedIdeaItem>();
+          DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+          liveList.forEach((i) => mergedMap.set(i.id, i));
+
+          const finalIdeas = Array.from(mergedMap.values());
+          finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+          saveStoredSharedIdeas(finalIdeas);
+          broadcastSharedIdeas(finalIdeas);
+        },
+        (err) => {
+          if (isQuotaExceededError(err)) notifyQuotaExceeded();
+          console.warn('subscribeSharedIdeas fallback to cache/seed:', err);
+          broadcastSharedIdeas(sharedLatestSharedIdeas || getStoredSharedIdeas());
+        }
+      );
+    } catch (err) {
+      console.error('subscribeSharedIdeas failed:', err);
+      broadcastSharedIdeas(sharedLatestSharedIdeas || getStoredSharedIdeas());
+    }
+  }
+
+  return () => {
+    sharedIdeasListeners.delete(callback);
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_shared_ideas_changed', handleLocalChange);
+    }
+    if (sharedIdeasListeners.size === 0 && unsubSharedIdeasFs) {
+      try {
+        unsubSharedIdeasFs();
+      } catch {}
+      unsubSharedIdeasFs = null;
+    }
+  };
 }
 
 /**
@@ -1704,33 +1896,43 @@ export async function saveSharedIdea(data: {
   creatorEmail: string;
   creatorName: string;
 }): Promise<{ success: boolean; id: string; error?: string }> {
+  const id = `idea_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+  const nowIso = new Date().toISOString();
+
+  const payload: SharedIdeaItem = {
+    id,
+    title: data.title.trim(),
+    description: data.description.trim(),
+    category: data.category,
+    categoryLabel: data.categoryLabel,
+    url: data.url?.trim() || '',
+    ...(data.imageUrl?.trim() ? { imageUrl: data.imageUrl.trim() } : {}),
+    tags: data.tags && data.tags.length > 0 ? data.tags : ['ไอเดียใหม่', 'แบ่งปันโดยครู ACU'],
+    creatorEmail: data.creatorEmail.trim().toLowerCase(),
+    creatorName: data.creatorName.trim() || data.creatorEmail,
+    createdAt: nowIso,
+    ratingAvg: 5.0,
+    ratingCount: 1,
+    userRatings: {
+      [data.creatorEmail.replace(/[^a-zA-Z0-9]/g, '_')]: 5,
+    },
+  };
+
   try {
-    const id = `idea_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
-    const nowIso = new Date().toISOString();
+    const current = getStoredSharedIdeas();
+    saveStoredSharedIdeas([payload, ...current.filter((i) => i.id !== id)]);
+    notifySharedIdeasChanged();
+  } catch {}
 
-    const payload: SharedIdeaItem = {
-      id,
-      title: data.title.trim(),
-      description: data.description.trim(),
-      category: data.category,
-      categoryLabel: data.categoryLabel,
-      url: data.url?.trim() || '',
-      ...(data.imageUrl?.trim() ? { imageUrl: data.imageUrl.trim() } : {}),
-      tags: data.tags && data.tags.length > 0 ? data.tags : ['ไอเดียใหม่', 'แบ่งปันโดยครู ACU'],
-      creatorEmail: data.creatorEmail.trim(),
-      creatorName: data.creatorName.trim() || data.creatorEmail,
-      createdAt: nowIso,
-      ratingAvg: 5.0,
-      ratingCount: 1,
-      userRatings: {
-        [data.creatorEmail.replace(/[^a-zA-Z0-9]/g, '_')]: 5,
-      },
-    };
-
+  try {
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, id);
     await setDoc(docRef, payload);
     return { success: true, id };
   } catch (err: any) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+      return { success: true, id };
+    }
     console.error('Error saving shared idea:', err);
     return { success: false, id: '', error: err.message || 'บันทึกไอเดียไม่สำเร็จ' };
   }
@@ -1765,11 +1967,17 @@ export async function rateSharedIdea(
         ratingCount: count,
         userRatings,
       });
+
+      saveStoredSharedIdeas(
+        getStoredSharedIdeas().map((item) =>
+          item.id === ideaId ? { ...item, ratingAvg: avg, ratingCount: count, userRatings } : item
+        )
+      );
+      notifySharedIdeasChanged();
       return true;
     } else {
-      // Seed item being rated for the first time
       const seed = DEFAULT_SEED_IDEAS.find((s) => s.id === ideaId);
-      const initialRatings: { [key: string]: number } = seed?.userRatings || {};
+      const initialRatings: { [key: string]: number } = { ...(seed?.userRatings || {}) };
       initialRatings[safeEmailKey] = stars;
 
       const ratingValues = Object.values(initialRatings) as number[];
@@ -1813,8 +2021,9 @@ export async function deleteSharedIdea(
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
     const snap = await getDoc(docRef);
     if (!snap.exists()) {
-      // Might be a local seed, check if admin
       if (currentUserEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
+        saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+        notifySharedIdeasChanged();
         return { success: true };
       }
       return { success: false, error: 'ไม่พบรายการไอเดียที่ต้องการลบ' };
@@ -1826,6 +2035,8 @@ export async function deleteSharedIdea(
     }
 
     await deleteDoc(docRef);
+    saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+    notifySharedIdeasChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error deleting shared idea:', err);
@@ -1855,6 +2066,10 @@ export async function updateSharedIdea(
     }
 
     await updateDoc(docRef, updates);
+    saveStoredSharedIdeas(
+      getStoredSharedIdeas().map((i) => (i.id === ideaId ? { ...i, ...updates } : i))
+    );
+    notifySharedIdeasChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error updating shared idea:', err);
@@ -1891,6 +2106,12 @@ export async function rateTeacherMedia(
         userRatings,
         views: increment(1),
       });
+      saveStoredTeacherMedia(
+        getStoredTeacherMedia().map((m) =>
+          m.id === mediaId ? { ...m, ratingAvg: avg, ratingCount: count, userRatings, views: (m.views || 0) + 1 } : m
+        )
+      );
+      notifyTeacherMediaChanged();
       return true;
     } else {
       // Create it from seed or initial
@@ -1898,7 +2119,7 @@ export async function rateTeacherMedia(
       const initialRatings: { [key: string]: number } = {};
       initialRatings[safeEmailKey] = rating;
 
-      await setDoc(docRef, {
+      const newWork: TeacherMediaWork = {
         ...(seed || {
           id: mediaId,
           title: 'สื่อนวัตกรรมการจัดการเรียนรู้',
@@ -1914,7 +2135,15 @@ export async function rateTeacherMedia(
         ratingAvg: rating,
         ratingCount: 1,
         userRatings: initialRatings,
-      });
+      };
+      await setDoc(docRef, newWork);
+      const cur = getStoredTeacherMedia();
+      saveStoredTeacherMedia(
+        cur.some((m) => m.id === mediaId)
+          ? cur.map((m) => (m.id === mediaId ? { ...m, ...newWork } : m))
+          : [newWork, ...cur]
+      );
+      notifyTeacherMediaChanged();
       return true;
     }
   } catch (err) {
@@ -1946,6 +2175,13 @@ export async function toggleLikeTeacherMedia(
       currentLikes = typeof data.likes === 'number' ? data.likes : 0;
       likedBy = Array.isArray(data.likedBy) ? data.likedBy : [];
       authorEmail = data.submittedByEmail;
+    } else {
+      const cached = getStoredTeacherMedia().find((m) => m.id === mediaId);
+      if (cached) {
+        currentLikes = typeof cached.likes === 'number' ? cached.likes : 0;
+        likedBy = Array.isArray(cached.likedBy) ? cached.likedBy : [];
+        authorEmail = cached.submittedByEmail;
+      }
     }
 
     const isAlreadyLiked = likedBy.includes(normEmail);
@@ -1970,6 +2206,13 @@ export async function toggleLikeTeacherMedia(
       },
       { merge: true }
     );
+
+    saveStoredTeacherMedia(
+      getStoredTeacherMedia().map((m) =>
+        m.id === mediaId ? { ...m, likes: newLikes, likedBy } : m
+      )
+    );
+    notifyTeacherMediaChanged();
 
     // If media has an author email, sync stats.points on their user profile in Firestore
     if (authorEmail && authorEmail.trim()) {
@@ -2024,6 +2267,8 @@ export function getInitialCriteriaPosterUrl(): string {
 }
 
 export function subscribeCriteriaPoster(onUpdate: (url: string) => void): () => void {
+  onUpdate(getInitialCriteriaPosterUrl());
+
   const handleCustomUpdate = (e: Event) => {
     const custom = e as CustomEvent<string>;
     if (custom.detail) {
@@ -2049,7 +2294,10 @@ export function subscribeCriteriaPoster(onUpdate: (url: string) => void): () => 
             return;
           }
         }
-        onUpdate(getInitialCriteriaPosterUrl());
+        try {
+          localStorage.removeItem(CRITERIA_STORAGE_KEY);
+        } catch {}
+        onUpdate(DEFAULT_CRITERIA_POSTER);
       },
       () => {
         onUpdate(getInitialCriteriaPosterUrl());

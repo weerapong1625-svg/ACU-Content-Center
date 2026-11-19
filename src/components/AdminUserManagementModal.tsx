@@ -27,7 +27,13 @@ import {
   subscribeAllUserProfiles
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
-import { LoginLogEntry, subscribeAllLoginLogs } from '../services/auditService';
+import {
+  LoginLogEntry,
+  subscribeAllLoginLogs,
+  syncLoginLogsFromServer,
+  getBangkokDateParts,
+  computeEffectiveUserYearVisits
+} from '../services/auditService';
 import { 
   InnovationSubmission, 
   FacilitySubmission,
@@ -107,6 +113,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
         setInternalLogs(logs);
       });
     }
+    syncLoginLogsFromServer(false).catch(() => {});
 
     if (!innovations) {
       unsubInnovations = subscribeAllInnovations((list) => {
@@ -167,7 +174,9 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       });
     });
 
-    // 2. Aggregate login logs
+    const currentBangkokYear = getBangkokDateParts()?.year || new Date().getFullYear();
+
+    // 2. Aggregate login logs (aligned to current Bangkok calendar year for consistency with UserProfileModal & Certificates)
     activeLogs.forEach((log) => {
       const normEmail = (log.email || '').trim().toLowerCase();
       if (!normEmail) return;
@@ -189,7 +198,10 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
         };
         map.set(normEmail, userObj);
       }
-      userObj.loginCount++;
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      if (parts && parts.year === currentBangkokYear) {
+        userObj.loginCount++;
+      }
       if (!userObj.lastLogin || new Date(log.loginTimestamp) > new Date(userObj.lastLogin)) {
         userObj.lastLogin = log.loginTimestamp;
       }
@@ -249,14 +261,10 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       }
     });
 
-    // 5. Fallback loginCount from profile stats if login_logs had 0 entries for an active user
+    // 5. Align loginCount with shared visit calculation (preserves legacy profile stats without shrinking)
     map.forEach((userObj, normEmail) => {
-      if (userObj.loginCount === 0) {
-        const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
-        if (profViews > 0) {
-          userObj.loginCount = profViews;
-        }
-      }
+      const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
+      userObj.loginCount = computeEffectiveUserYearVisits(userObj.loginCount, profViews, true);
     });
 
     return Array.from(map.values()).sort((a, b) => {
