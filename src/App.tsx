@@ -24,7 +24,6 @@ import {
   logUserLogin,
   subscribeAllLoginLogs,
   flushPendingLoginLogs,
-  syncLoginLogsFromServer,
 } from './services/auditService';
 import { getCachedUserProfile } from './services/userProfileService';
 
@@ -70,12 +69,11 @@ export default function App() {
     }
   });
 
-  // Keep shared login_logs listener warm, flush pending outbox, and pull authoritative server state
+  // Keep shared login_logs listener warm & flush pending outbox whenever user is active
   React.useEffect(() => {
     if (!loggedInUser) return;
     flushPendingLoginLogs().catch(() => {});
     const unsub = subscribeAllLoginLogs(() => {});
-    syncLoginLogsFromServer(true).catch(() => {});
     return () => unsub();
   }, [loggedInUser]);
 
@@ -116,33 +114,19 @@ export default function App() {
 
     const isAdmin = norm === 'weerapong1625@acu.ac.th';
     const cachedProf = getCachedUserProfile(norm);
-    const safeAvatarUrl =
-      cachedProf?.avatarUrl && !cachedProf.avatarUrl.startsWith('data:')
-        ? cachedProf.avatarUrl
-        : '';
     logUserLogin({
       email: norm,
-      displayName: cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0],
+      displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (cachedProf?.fullName || cachedProf?.displayName || norm.split('@')[0]),
       role: isAdmin ? 'admin' : 'teacher',
       loginMethod: method,
-      avatarUrl: safeAvatarUrl,
+      avatarUrl: cachedProf?.avatarUrl || '',
     });
   }, []);
 
-  // Auto-record visit for active or returning session (including mobile/tablet tabs woken up on a new Bangkok day)
+  // Auto-record visit for active or returning session
   React.useEffect(() => {
     if (!loggedInUser) return;
     recordLoginVisit(loggedInUser, 'Session Visit', false);
-
-    const handleResumeCheck = () => {
-      if (document.visibilityState === 'visible') {
-        recordLoginVisit(loggedInUser, 'Session Visit', false);
-      }
-    };
-    document.addEventListener('visibilitychange', handleResumeCheck);
-    return () => {
-      document.removeEventListener('visibilitychange', handleResumeCheck);
-    };
   }, [loggedInUser, recordLoginVisit]);
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {

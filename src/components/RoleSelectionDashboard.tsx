@@ -29,12 +29,10 @@ import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
   fetchRecentLoginLogs, 
-  subscribeAllLoginLogs,
-  acquireLiveStatsSync,
-  syncLoginLogsFromServer,
   LoginLogEntry, 
   fetchUserProfile 
 } from '../services/auditService';
+import { EditProfileModal, PRESET_AVATARS } from './EditProfileModal';
 import { UserProfileModal } from './UserProfileModal';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
@@ -66,21 +64,23 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     ? userEmail.split('@')[0]
     : userEmail;
 
-  // Real profile picture state: check localStorage & cached profile, fallback empty so UI shows initials until server profile loads
+  // Real profile picture state: check localStorage & cached profile, otherwise preset authentic educator avatar
   const getInitialAvatar = () => {
     try {
       const norm = userEmail.toLowerCase().trim();
       const saved = localStorage.getItem(`acu_user_avatar_${norm}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`);
-      if (saved && !saved.includes('ui-avatars.com')) return saved;
+      if (saved) return saved;
       const cached = getCachedUserProfile(userEmail);
-      if (cached?.avatarUrl && !cached.avatarUrl.includes('ui-avatars.com')) return cached.avatarUrl;
+      if (cached?.avatarUrl) return cached.avatarUrl;
     } catch {
       // ignore
     }
-    return '';
+    // Default to realistic educator portrait matching the email account
+    return PRESET_AVATARS[0].url;
   };
 
   const [avatarUrl, setAvatarUrl] = useState<string>(getInitialAvatar);
+  const [showEditProfileModal, setShowEditProfileModal] = useState<boolean>(false);
   const [showUserProfileModal, setShowUserProfileModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
@@ -91,46 +91,38 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [profileSchool, setProfileSchool] = useState<string>(() => cachedProfile?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
 
   const handleProfileUpdated = (updated: FullUserProfile) => {
-    setProfileName(updated.fullName || updated.displayName || userName);
+    if (updated.fullName) setProfileName(updated.fullName);
     setProfileNickname(updated.nickname || '');
     if (updated.school) setProfileSchool(updated.school);
-    const nextAvatar = updated.avatarUrl || '';
-    setAvatarUrl(nextAvatar);
-    try {
-      const norm = userEmail.toLowerCase().trim();
-      if (nextAvatar) {
-        localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
-      } else {
-        localStorage.removeItem(`acu_user_avatar_${norm}`);
+    if (updated.avatarUrl) {
+      setAvatarUrl(updated.avatarUrl);
+      try {
+        localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, updated.avatarUrl);
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
     }
   };
 
   // Synchronize profile real-time from Firestore across all devices (mobile & desktop)
   useEffect(() => {
     const unsubscribe = subscribeFullUserProfile(userEmail, (fullProf) => {
-      const nextAvatar = fullProf.avatarUrl || '';
-      setAvatarUrl(nextAvatar);
-      try {
-        const norm = userEmail.toLowerCase().trim();
-        if (nextAvatar) {
-          localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
-        } else {
-          localStorage.removeItem(`acu_user_avatar_${norm}`);
+      if (fullProf.avatarUrl) {
+        setAvatarUrl(fullProf.avatarUrl);
+        try {
+          localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, fullProf.avatarUrl);
+        } catch {
+          // ignore
         }
-      } catch {
-        // ignore
       }
-      setProfileName(fullProf.fullName || fullProf.displayName || userName);
+      if (fullProf.fullName) setProfileName(fullProf.fullName);
       setProfileNickname(fullProf.nickname || '');
       if (fullProf.school) setProfileSchool(fullProf.school);
     });
     return () => {
       unsubscribe();
     };
-  }, [userEmail, userName]);
+  }, [userEmail]);
 
   // Format current login time
   const [loginTimeStr, setLoginTimeStr] = useState('');
@@ -156,22 +148,6 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     setRecentLogs(logs);
     setIsLoadingLogs(false);
   };
-
-  // Keep System Test modal live-synced when two devices log in simultaneously
-  useEffect(() => {
-    if (!showSystemTestModal) return;
-    const unsub = subscribeAllLoginLogs((allLogs) => {
-      if (allLogs.length > 0) {
-        setRecentLogs(allLogs.slice(0, 10));
-      }
-    });
-    const releaseLiveSync = acquireLiveStatsSync(3500);
-    syncLoginLogsFromServer(true).catch(() => {});
-    return () => {
-      unsub();
-      releaseLiveSync();
-    };
-  }, [showSystemTestModal]);
 
   const handleOpenAdminPortal = () => {
     setAdminPasswordInput('');
@@ -309,7 +285,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                 title="คลิกที่รูปเพื่อเปิดหน้าโปรไฟล์และข้อมูลส่วนตัว"
               >
                 <img
-                  src={avatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(profileName || userName)}&background=1d4ed8&color=ffffff&size=128&bold=true`}
+                  src={avatarUrl}
                   alt={profileName || userName}
                   className="w-full h-full object-cover rounded-full bg-slate-800"
                   onError={(e) => {

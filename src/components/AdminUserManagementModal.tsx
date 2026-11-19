@@ -27,14 +27,7 @@ import {
   subscribeAllUserProfiles
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
-import {
-  LoginLogEntry,
-  subscribeAllLoginLogs,
-  syncLoginLogsFromServer,
-  acquireLiveStatsSync,
-  getBangkokDateParts,
-  computeEffectiveUserYearVisits
-} from '../services/auditService';
+import { LoginLogEntry, subscribeAllLoginLogs } from '../services/auditService';
 import { 
   InnovationSubmission, 
   FacilitySubmission,
@@ -114,7 +107,6 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
         setInternalLogs(logs);
       });
     }
-    const releaseLiveSync = acquireLiveStatsSync(3500);
 
     if (!innovations) {
       unsubInnovations = subscribeAllInnovations((list) => {
@@ -131,7 +123,6 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
     return () => {
       unsubProfiles();
       unsubLogs();
-      releaseLiveSync();
       unsubInnovations();
       unsubFacilities();
     };
@@ -176,9 +167,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       });
     });
 
-    const currentBangkokYear = getBangkokDateParts()?.year || new Date().getFullYear();
-
-    // 2. Aggregate login logs (aligned to current Bangkok calendar year for consistency with UserProfileModal & Certificates)
+    // 2. Aggregate login logs
     activeLogs.forEach((log) => {
       const normEmail = (log.email || '').trim().toLowerCase();
       if (!normEmail) return;
@@ -200,10 +189,7 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
         };
         map.set(normEmail, userObj);
       }
-      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
-      if (parts && parts.year === currentBangkokYear) {
-        userObj.loginCount++;
-      }
+      userObj.loginCount++;
       if (!userObj.lastLogin || new Date(log.loginTimestamp) > new Date(userObj.lastLogin)) {
         userObj.lastLogin = log.loginTimestamp;
       }
@@ -263,10 +249,14 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
       }
     });
 
-    // 5. Align loginCount with shared visit calculation (preserves legacy profile stats without shrinking)
+    // 5. Fallback loginCount from profile stats if login_logs had 0 entries for an active user
     map.forEach((userObj, normEmail) => {
-      const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
-      userObj.loginCount = computeEffectiveUserYearVisits(userObj.loginCount, profViews, true);
+      if (userObj.loginCount === 0) {
+        const profViews = activeProfilesMap[normEmail]?.stats?.totalViews || 0;
+        if (profViews > 0) {
+          userObj.loginCount = profViews;
+        }
+      }
     });
 
     return Array.from(map.values()).sort((a, b) => {

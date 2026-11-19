@@ -1,5 +1,5 @@
-import { collection, serverTimestamp, getDocs, getDocsFromServer, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
+import { db } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 
 export interface LoginLogEntry {
@@ -41,24 +41,6 @@ let sharedLatestLogs: LoginLogEntry[] | null = null;
 let hasReceivedServerSnapshot = false;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectAttempts = 0;
-let lastServerSyncMs = 0;
-let inFlightServerSync: Promise<LoginLogEntry[]> | null = null;
-let isQuotaHit = false;
-let liveStatsSyncRefCount = 0;
-let liveStatsSyncTimer: ReturnType<typeof setInterval> | null = null;
-let logsBroadcastChannel: BroadcastChannel | null = null;
-
-if (typeof window !== 'undefined') {
-  window.addEventListener('acu_firestore_quota_exceeded', () => {
-    isQuotaHit = true;
-    if (liveStatsSyncTimer !== null) {
-      clearInterval(liveStatsSyncTimer);
-      liveStatsSyncTimer = null;
-    }
-  });
-}
 
 const FAKE_SAMPLE_EMAILS = new Set([
   'kanda@acu.ac.th',
@@ -68,20 +50,8 @@ const FAKE_SAMPLE_EMAILS = new Set([
 ]);
 
 /**
- * Strip large Base64 data URIs from login_logs entries so logs never bloat Firestore docs
- * or exceed 5MB localStorage quotas on tablets/phones. Avatars are resolved from user_profiles.
- */
-function sanitizeLogAvatarUrl(url?: string): string {
-  if (!url || typeof url !== 'string') return '';
-  const trimmed = url.trim();
-  if (!trimmed || trimmed.startsWith('data:') || trimmed.length > 500) return '';
-  return trimmed;
-}
-
-/**
- * Get consistent Thailand (Asia/Bangkok, UTC+7) date parts using pure UTC+7 math
- * so every device (iPadOS, iOS, Android, Windows, macOS) computes identical day/month/year
- * regardless of OS timezone or Buddhist/Gregorian calendar settings.
+ * Get consistent Thailand (Asia/Bangkok, UTC+7) date parts so all devices
+ * (tablet, laptop, mobile) compute identical day/month/year regardless of OS timezone.
  */
 export function getBangkokDateParts(input?: string | number | Date): {
   year: number;
@@ -92,31 +62,32 @@ export function getBangkokDateParts(input?: string | number | Date): {
   try {
     const date = input instanceof Date ? input : input !== undefined ? new Date(input) : new Date();
     if (isNaN(date.getTime())) return null;
-    // Thailand is permanently UTC+7 with no DST
-    const bangkokDate = new Date(date.getTime() + 7 * 60 * 60 * 1000);
-    const year = bangkokDate.getUTCFullYear();
-    const monthIndex = bangkokDate.getUTCMonth();
-    const day = bangkokDate.getUTCDate();
+    const formatted = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Bangkok',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(date);
+    const parts = formatted.split('-');
+    if (parts.length !== 3) return null;
+    const year = parseInt(parts[0], 10);
+    const monthIndex = parseInt(parts[1], 10) - 1;
+    const day = parseInt(parts[2], 10);
     if (isNaN(year) || isNaN(monthIndex) || isNaN(day)) return null;
-    const dateKey = `${year}-${String(monthIndex + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-    return { year, monthIndex, day, dateKey };
+    return { year, monthIndex, day, dateKey: formatted };
   } catch {
-    return null;
+    const date = input instanceof Date ? input : input !== undefined ? new Date(input) : new Date();
+    if (isNaN(date.getTime())) return null;
+    const y = date.getFullYear();
+    const m = date.getMonth();
+    const d = date.getDate();
+    return {
+      year: y,
+      monthIndex: m,
+      day: d,
+      dateKey: `${y}-${String(m + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`,
+    };
   }
-}
-
-/**
- * Shared visit count formula across UserProfileModal, AdminDashboard, and AdminUserManagementModal
- * so every screen and device displays the exact same visit count without losing legacy profile views.
- */
-export function computeEffectiveUserYearVisits(
-  yearLogsCount: number,
-  profileTotalViews: number | undefined,
-  isCurrentYear: boolean
-): number {
-  const safeLogs = typeof yearLogsCount === 'number' && yearLogsCount > 0 ? yearLogsCount : 0;
-  const legacyViews = isCurrentYear && typeof profileTotalViews === 'number' && profileTotalViews > 0 ? profileTotalViews : 0;
-  return Math.max(safeLogs, legacyViews);
 }
 
 export function getOrCreateDeviceId(): string {
@@ -191,44 +162,20 @@ function deduplicateConsecutiveLogs(logs: LoginLogEntry[]): LoginLogEntry[] {
 }
 
 /**
- * Filter out any legacy synthetic/seed logs, strip Base64 avatar bloat, and collapse double-counts
+ * Filter out any legacy synthetic/seed logs and collapse double-counts to guarantee authentic real statistics
  */
 function sanitizeAuthenticLogs(logs: any[]): LoginLogEntry[] {
   if (!Array.isArray(logs)) return [];
   const deletedEmails = getDeletedUserEmails();
-  const valid: LoginLogEntry[] = [];
-  for (let i = 0; i < logs.length; i++) {
-    const log = logs[i];
-    if (!log || typeof log !== 'object') continue;
+  const valid = logs.filter((log) => {
+    if (!log || typeof log !== 'object') return false;
     const id = String(log.id || '');
-    if (id.startsWith('seed-') || id.includes('seed-log-')) continue;
-    const email = String(log.email || log.userEmail || '').toLowerCase().trim();
-    if (FAKE_SAMPLE_EMAILS.has(email) || deletedEmails.has(email)) continue;
-    if (!email || !log.loginTimestamp) continue;
-    valid.push({
-      ...log,
-      email,
-      avatarUrl: sanitizeLogAvatarUrl(log.avatarUrl),
-    });
-  }
+    if (id.startsWith('seed-') || id.includes('seed-log-')) return false;
+    const email = String(log.email || '').toLowerCase().trim();
+    if (FAKE_SAMPLE_EMAILS.has(email) || deletedEmails.has(email)) return false;
+    return Boolean(email && log.loginTimestamp);
+  });
   return deduplicateConsecutiveLogs(valid);
-}
-
-function safeSetLocalStorageArray(key: string, items: LoginLogEntry[]): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(key, JSON.stringify(items));
-  } catch {
-    // QuotaExceededError fallback: trim oldest cache entries so newest records still persist
-    for (const cap of [500, 200, 60]) {
-      try {
-        localStorage.setItem(key, JSON.stringify(items.slice(0, cap)));
-        return;
-      } catch {
-        // continue trimming
-      }
-    }
-  }
 }
 
 /**
@@ -250,7 +197,7 @@ function savePendingLoginLogs(logs: LoginLogEntry[]): void {
   if (typeof window === 'undefined') return;
   try {
     const clean = sanitizeAuthenticLogs(logs);
-    safeSetLocalStorageArray(PENDING_LOGIN_LOGS_KEY, clean);
+    localStorage.setItem(PENDING_LOGIN_LOGS_KEY, JSON.stringify(clean));
   } catch {
     // ignore
   }
@@ -299,9 +246,8 @@ export function getLocalLoginLogs(): LoginLogEntry[] {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         const authentic = sanitizeAuthenticLogs(parsed);
-        const hadBloatedAvatars = parsed.some((item: any) => typeof item?.avatarUrl === 'string' && item.avatarUrl.startsWith('data:'));
-        if (authentic.length !== parsed.length || hadBloatedAvatars) {
-          safeSetLocalStorageArray(LOGIN_LOGS_STORAGE_KEY, authentic);
+        if (authentic.length !== parsed.length) {
+          localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(authentic));
         }
         return authentic;
       }
@@ -319,21 +265,10 @@ export function saveLocalLoginLogs(logs: LoginLogEntry[], broadcast = true): voi
   if (typeof window === 'undefined') return;
   try {
     const sanitized = sanitizeAuthenticLogs(logs);
-    safeSetLocalStorageArray(LOGIN_LOGS_STORAGE_KEY, sanitized);
+    localStorage.setItem(LOGIN_LOGS_STORAGE_KEY, JSON.stringify(sanitized));
     if (broadcast) {
       broadcastLogsToListeners(sanitized);
       window.dispatchEvent(new CustomEvent('acu_login_logs_updated', { detail: sanitized }));
-      try {
-        if (!logsBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
-          logsBroadcastChannel = new BroadcastChannel('acu_login_logs_channel');
-        }
-        logsBroadcastChannel?.postMessage({
-          type: sanitized.length === 0 ? 'LOGS_CLEARED' : 'LOGS_UPDATED',
-          ts: Date.now(),
-        });
-      } catch {
-        // ignore BroadcastChannel unsupported errors
-      }
     }
   } catch (err) {
     console.warn('Could not save login logs to localStorage:', err);
@@ -377,7 +312,7 @@ export async function flushPendingLoginLogs(): Promise<void> {
   isFlushingPendingLogs = true;
   try {
     const confirmedIds = new Set<string>();
-    for (const entry of pending.slice(0, 25)) {
+    for (const entry of pending.slice(0, 20)) {
       const docId = entry.id || entry.clientLogId;
       if (!docId) continue;
       try {
@@ -387,23 +322,17 @@ export async function flushPendingLoginLogs(): Promise<void> {
           id: docId,
           clientLogId: entry.clientLogId || docId,
           deviceId: entry.deviceId || getOrCreateDeviceId(),
-          avatarUrl: sanitizeLogAvatarUrl(entry.avatarUrl),
           createdAt: serverTimestamp(),
         }, { merge: true });
         confirmedIds.add(docId);
         if (entry.clientLogId) confirmedIds.add(entry.clientLogId);
-      } catch (err) {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          break;
-        }
-        // Skip failing entry cleanly and still try remaining newer pending logs
+      } catch {
+        // Leave in outbox to retry on next reconnect / focus
+        break;
       }
     }
     if (confirmedIds.size > 0) {
       removePendingLoginLogByIds(confirmedIds);
-      const updated = mergeLogs(sharedLatestLogs || getLocalLoginLogs(), getPendingLoginLogs());
-      saveLocalLoginLogs(updated, true);
     }
   } finally {
     isFlushingPendingLogs = false;
@@ -457,7 +386,7 @@ export async function logUserLogin(data: {
     clientLogId: logId,
     deviceId,
     email: normEmail,
-    displayName: data.displayName || normEmail.split('@')[0],
+    displayName: isAdmin ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (data.displayName || normEmail.split('@')[0]),
     role: data.role || (isAdmin ? 'admin' : 'teacher'),
     loginMethod: data.loginMethod || 'Email Login',
     status: 'online',
@@ -465,7 +394,7 @@ export async function logUserLogin(data: {
     loginDate: nowDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }),
     loginTime: nowDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }),
     source: 'ACU Learning Media & Innovation Portal',
-    avatarUrl: sanitizeLogAvatarUrl(data.avatarUrl),
+    avatarUrl: data.avatarUrl || '',
   };
 
   // 1. Add to pending outbox + local cache immediately (0ms UI responsiveness)
@@ -486,14 +415,8 @@ export async function logUserLogin(data: {
       createdAt: serverTimestamp(),
     });
     removePendingLoginLogByIds(new Set([logId]));
-    // Flush any older queued offline logs and immediately pull concurrent logins from other devices
-    flushPendingLoginLogs().catch(() => {});
-    syncLoginLogsFromServer(true).catch(() => {});
     return logId;
   } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
     console.warn('Login log Firestore write queued in outbox for retry:', err);
     return logId;
   }
@@ -823,173 +746,6 @@ export function deleteLoginLogsByEmail(targetEmail: string): void {
   }
 }
 
-function parseFirestoreLoginLogDoc(docSnap: { id: string; data: () => any }): {
-  entry: LoginLogEntry;
-  confirmedKeys: string[];
-} {
-  const d = docSnap.data() || {};
-  const resolvedEmail = (d.email || d.userEmail || '').toString().trim().toLowerCase();
-  const resolvedTimestamp =
-    d.loginTimestamp ||
-    (d.createdAt?.toDate
-      ? d.createdAt.toDate().toISOString()
-      : typeof d.createdAt === 'string'
-        ? d.createdAt
-        : '') ||
-    d.timestamp ||
-    new Date().toISOString();
-  const tsDate = new Date(resolvedTimestamp);
-  const validDate = !isNaN(tsDate.getTime());
-
-  const confirmedKeys = [docSnap.id];
-  if (d.clientLogId) confirmedKeys.push(String(d.clientLogId));
-
-  return {
-    confirmedKeys,
-    entry: {
-      id: docSnap.id,
-      clientLogId: d.clientLogId || docSnap.id,
-      deviceId: d.deviceId || '',
-      email: resolvedEmail,
-      displayName: d.displayName || resolvedEmail.split('@')[0] || 'ผู้ใช้งาน',
-      role: d.role || 'teacher',
-      loginMethod: d.loginMethod || 'Email Login',
-      status: d.status || 'online',
-      loginTimestamp: resolvedTimestamp,
-      loginDate:
-        d.loginDate ||
-        (validDate ? tsDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }) : '-'),
-      loginTime:
-        d.loginTime ||
-        (validDate ? tsDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'),
-      source: d.source || 'ACU Portal',
-      avatarUrl: sanitizeLogAvatarUrl(d.avatarUrl),
-    },
-  };
-}
-
-/**
- * Pull authoritative server state from Firestore login_logs (bypasses stale device cache).
- * Throttled automatically unless force=true so dashboards/modals stay 100% synced across devices.
- */
-export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
-  if (typeof window === 'undefined') return sharedLatestLogs || [];
-  if (isQuotaHit || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
-    return sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-  }
-
-  const now = Date.now();
-  if (!force && hasReceivedServerSnapshot && sharedLatestLogs && now - lastServerSyncMs < 2500) {
-    return sharedLatestLogs;
-  }
-  if (inFlightServerSync) {
-    return inFlightServerSync;
-  }
-
-  inFlightServerSync = (async () => {
-    try {
-      await flushPendingLoginLogs().catch(() => {});
-      const logsRef = collection(db, 'login_logs');
-      let snapshot;
-      try {
-        snapshot = await getDocsFromServer(logsRef);
-      } catch (serverErr) {
-        if (isQuotaExceededError(serverErr)) {
-          isQuotaHit = true;
-          notifyQuotaExceeded();
-          throw serverErr;
-        }
-        snapshot = await getDocs(logsRef);
-      }
-
-      const fsLogs: LoginLogEntry[] = [];
-      const confirmedIds = new Set<string>();
-      snapshot.forEach((docSnap) => {
-        const { entry, confirmedKeys } = parseFirestoreLoginLogDoc(docSnap);
-        confirmedKeys.forEach((k) => confirmedIds.add(k));
-        fsLogs.push(entry);
-      });
-
-      hasReceivedServerSnapshot = true;
-      lastServerSyncMs = Date.now();
-      removePendingLoginLogByIds(confirmedIds);
-
-      const remainingPending = getPendingLoginLogs();
-      const merged = mergeLogs(fsLogs, remainingPending);
-      saveLocalLoginLogs(merged, false);
-      broadcastLogsToListeners(merged);
-      return merged;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        isQuotaHit = true;
-        notifyQuotaExceeded();
-      }
-      const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-      return fallback;
-    } finally {
-      inFlightServerSync = null;
-    }
-  })();
-
-  return inFlightServerSync;
-}
-
-function runLiveStatsSyncTick(): void {
-  if (typeof window === 'undefined' || liveStatsSyncRefCount <= 0 || isQuotaHit) return;
-  if (document.visibilityState !== 'visible') return;
-  if (typeof navigator !== 'undefined' && navigator.onLine === false) return;
-  if (logListeners.size > 0 && !sharedUnsubscribeFirestore) {
-    ensureSharedFirestoreSubscription();
-  }
-  syncLoginLogsFromServer(true).catch(() => {});
-}
-
-/**
- * Acquire an active live-sync lease while a stats modal/dashboard is open and visible.
- * Guarantees two devices entering simultaneously stay updated in real time (every ~3.5s)
- * even if mobile/proxy buffers delay Firestore push packets. Stops immediately on release/hide.
- */
-export function acquireLiveStatsSync(intervalMs = 3500): () => void {
-  liveStatsSyncRefCount++;
-  ensureSharedFirestoreSubscription();
-  syncLoginLogsFromServer(true).catch(() => {});
-
-  if (typeof window !== 'undefined' && liveStatsSyncTimer === null && !isQuotaHit) {
-    liveStatsSyncTimer = setInterval(runLiveStatsSyncTick, Math.max(2500, intervalMs));
-  }
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    liveStatsSyncRefCount = Math.max(0, liveStatsSyncRefCount - 1);
-    if (liveStatsSyncRefCount === 0 && liveStatsSyncTimer !== null) {
-      clearInterval(liveStatsSyncTimer);
-      liveStatsSyncTimer = null;
-    }
-  };
-}
-
-function clearReconnectTimer(): void {
-  if (reconnectTimer !== null) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-}
-
-function scheduleSubscriptionReconnect(): void {
-  if (typeof window === 'undefined' || reconnectTimer !== null || logListeners.size === 0 || isQuotaHit) return;
-  const delayMs = Math.min(30000, 2000 * Math.pow(2, Math.min(reconnectAttempts, 4)));
-  reconnectAttempts++;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    if (logListeners.size > 0 && !sharedUnsubscribeFirestore) {
-      ensureSharedFirestoreSubscription();
-      syncLoginLogsFromServer(true).catch(() => {});
-    }
-  }, delayMs);
-}
-
 function ensureSharedFirestoreSubscription(): void {
   if (sharedUnsubscribeFirestore) return;
 
@@ -999,33 +755,17 @@ function ensureSharedFirestoreSubscription(): void {
   if (typeof window !== 'undefined' && !windowSyncListenersAttached) {
     windowSyncListenersAttached = true;
     const handleResumeSync = () => {
-      reconnectAttempts = 0;
-      clearReconnectTimer();
-      flushPendingLoginLogs()
-        .then(() => {
-          if (logListeners.size > 0 && !sharedUnsubscribeFirestore) {
-            ensureSharedFirestoreSubscription();
-          }
-          return syncLoginLogsFromServer(true);
-        })
-        .catch(() => {});
+      flushPendingLoginLogs().catch(() => {});
     };
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        handleResumeSync();
+        flushPendingLoginLogs().catch(() => {});
       }
     };
     const handleStorage = (e: StorageEvent) => {
-      if (e.key === LOGIN_LOGS_STORAGE_KEY) {
-        if (e.newValue === '[]') {
-          saveLocalLoginLogs([], false);
-          broadcastLogsToListeners([]);
-        } else {
-          syncLoginLogsFromServer(true).catch(() => {
-            const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-            broadcastLogsToListeners(merged);
-          });
-        }
+      if (e.key === LOGIN_LOGS_STORAGE_KEY && !hasReceivedServerSnapshot) {
+        const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+        broadcastLogsToListeners(merged);
       }
     };
     const handleUserDeleted = () => {
@@ -1033,23 +773,6 @@ function ensureSharedFirestoreSubscription(): void {
       const cleaned = sanitizeAuthenticLogs(base);
       saveLocalLoginLogs(cleaned, true);
     };
-
-    try {
-      if (!logsBroadcastChannel && typeof BroadcastChannel !== 'undefined') {
-        logsBroadcastChannel = new BroadcastChannel('acu_login_logs_channel');
-      }
-      if (logsBroadcastChannel) {
-        logsBroadcastChannel.onmessage = (ev) => {
-          if (ev?.data?.type === 'LOGS_CLEARED') {
-            broadcastLogsToListeners([]);
-          } else {
-            syncLoginLogsFromServer(true).catch(() => {});
-          }
-        };
-      }
-    } catch {
-      // ignore BroadcastChannel unsupported errors
-    }
 
     window.addEventListener('online', handleResumeSync);
     window.addEventListener('focus', handleResumeSync);
@@ -1063,37 +786,62 @@ function ensureSharedFirestoreSubscription(): void {
     sharedUnsubscribeFirestore = onSnapshot(
       logsRef,
       (snapshot) => {
-        reconnectAttempts = 0;
-        clearReconnectTimer();
-
         const fsLogs: LoginLogEntry[] = [];
         const confirmedIds = new Set<string>();
 
         snapshot.forEach((docSnap) => {
-          const { entry, confirmedKeys } = parseFirestoreLoginLogDoc(docSnap);
-          confirmedKeys.forEach((k) => confirmedIds.add(k));
-          fsLogs.push(entry);
+          const d = docSnap.data();
+          const resolvedEmail = (d.email || d.userEmail || '').toString().trim().toLowerCase();
+          const resolvedTimestamp =
+            d.loginTimestamp ||
+            (d.createdAt?.toDate
+              ? d.createdAt.toDate().toISOString()
+              : typeof d.createdAt === 'string'
+                ? d.createdAt
+                : '') ||
+            d.timestamp ||
+            new Date().toISOString();
+          const tsDate = new Date(resolvedTimestamp);
+          const validDate = !isNaN(tsDate.getTime());
+
+          confirmedIds.add(docSnap.id);
+          if (d.clientLogId) confirmedIds.add(String(d.clientLogId));
+
+          fsLogs.push({
+            id: docSnap.id,
+            clientLogId: d.clientLogId || docSnap.id,
+            deviceId: d.deviceId || '',
+            email: resolvedEmail,
+            displayName: d.displayName || resolvedEmail.split('@')[0] || 'ผู้ใช้งาน',
+            role: d.role || 'teacher',
+            loginMethod: d.loginMethod || 'Email Login',
+            status: d.status || 'online',
+            loginTimestamp: resolvedTimestamp,
+            loginDate:
+              d.loginDate ||
+              (validDate ? tsDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }) : '-'),
+            loginTime:
+              d.loginTime ||
+              (validDate ? tsDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'),
+            source: d.source || 'ACU Portal',
+            avatarUrl: d.avatarUrl || '',
+          });
         });
 
         let merged: LoginLogEntry[];
         if (!snapshot.metadata.fromCache) {
           hasReceivedServerSnapshot = true;
-          lastServerSyncMs = Date.now();
           // Server confirmed docs can leave the outbox
           removePendingLoginLogByIds(confirmedIds);
           // Authoritative server state + only unconfirmed outbox items from this device
           const remainingPending = getPendingLoginLogs();
           merged = mergeLogs(fsLogs, remainingPending);
         } else {
-          // Cache-only emission while connecting/offline: keep existing server state if already received,
-          // otherwise merge Firestore offline cache with this device's pending outbox
+          // Cache-only emission while offline/connecting: do not overwrite newer server state if already received
           const fallbackLocal = hasReceivedServerSnapshot && sharedLatestLogs
             ? sharedLatestLogs
             : mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
           merged = mergeLogs(fsLogs, fallbackLocal);
-          if (!hasReceivedServerSnapshot) {
-            syncLoginLogsFromServer(false).catch(() => {});
-          }
         }
 
         saveLocalLoginLogs(merged, false);
@@ -1101,30 +849,12 @@ function ensureSharedFirestoreSubscription(): void {
       },
       (err) => {
         console.warn('Realtime login logs Firestore subscription fallback (quota/network):', err);
-        // Clean up dead subscription so focus/online/reconnect can re-establish a live listener
-        if (sharedUnsubscribeFirestore) {
-          try {
-            sharedUnsubscribeFirestore();
-          } catch {}
-          sharedUnsubscribeFirestore = null;
-        }
         const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
         broadcastLogsToListeners(fallback);
-
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-        } else {
-          scheduleSubscriptionReconnect();
-        }
       }
     );
   } catch (err) {
     console.warn('Error subscribing to login logs:', err);
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    } else {
-      scheduleSubscriptionReconnect();
-    }
     const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
     broadcastLogsToListeners(fallback);
   }
@@ -1146,12 +876,9 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
 
   return () => {
     logListeners.delete(callback);
-    if (logListeners.size === 0) {
-      clearReconnectTimer();
-      if (sharedUnsubscribeFirestore) {
-        sharedUnsubscribeFirestore();
-        sharedUnsubscribeFirestore = null;
-      }
+    if (logListeners.size === 0 && sharedUnsubscribeFirestore) {
+      sharedUnsubscribeFirestore();
+      sharedUnsubscribeFirestore = null;
       hasReceivedServerSnapshot = false;
     }
   };
@@ -1222,26 +949,26 @@ export async function fetchRecentLoginLogs(maxCount = 10): Promise<LoginLogEntry
   try {
     const logsRef = collection(db, 'login_logs');
     const q = query(logsRef, orderBy('createdAt', 'desc'), limit(maxCount));
-    let snapshot;
-    try {
-      snapshot = await getDocsFromServer(q);
-    } catch (serverErr) {
-      if (isQuotaExceededError(serverErr)) {
-        isQuotaHit = true;
-        notifyQuotaExceeded();
-        throw serverErr;
-      }
-      snapshot = await getDocs(q);
-    }
+    const snapshot = await getDocs(q);
     const logs: LoginLogEntry[] = [];
     snapshot.forEach((docSnap) => {
-      const { entry } = parseFirestoreLoginLogDoc(docSnap);
-      logs.push(entry);
+      const d = docSnap.data();
+      logs.push({
+        id: docSnap.id,
+        email: d.email || '',
+        displayName: d.displayName || '',
+        role: d.role || 'guest',
+        loginMethod: d.loginMethod || 'Google SSO',
+        status: d.status || 'online',
+        loginTimestamp: d.loginTimestamp || new Date().toISOString(),
+        source: d.source || 'System Test',
+        avatarUrl: d.avatarUrl || '',
+      });
     });
-    return sanitizeAuthenticLogs(logs).slice(0, maxCount);
+    return logs;
   } catch (err) {
     console.warn('Failed to fetch login logs from Firestore (using local fallback):', err);
-    return (sharedLatestLogs || getLocalLoginLogs()).slice(0, maxCount);
+    return getLocalLoginLogs().slice(0, maxCount);
   }
 }
 

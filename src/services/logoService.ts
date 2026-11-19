@@ -43,8 +43,6 @@ export function getInitialLogoUrl(): string {
  * Real-time subscription to school logo stored in Firestore
  */
 export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => void {
-  onUpdate(getInitialLogoUrl());
-
   const handleCustomUpdate = (e: Event) => {
     const custom = e as CustomEvent<string>;
     if (custom.detail) {
@@ -70,11 +68,9 @@ export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => 
             return;
           }
         }
-        // When deleted/missing on server, clear stale cache if needed and emit default
-        try {
-          localStorage.removeItem(LOGO_STORAGE_KEY);
-        } catch {}
-        onUpdate(DEFAULT_LOGO_IMAGE);
+        // Fallback
+        const initial = getInitialLogoUrl();
+        onUpdate(initial);
       },
       (error) => {
         if (isQuotaExceededError(error)) {
@@ -165,12 +161,6 @@ export async function resetSchoolLogo(
 
   try {
     localStorage.removeItem(LOGO_STORAGE_KEY);
-  } catch {
-    // ignore
-  }
-
-  try {
-    window.dispatchEvent(new CustomEvent('acu_school_logo_changed', { detail: DEFAULT_LOGO_IMAGE }));
   } catch {
     // ignore
   }

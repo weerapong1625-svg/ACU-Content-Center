@@ -1,119 +1,24 @@
-import ideaPortalStemImg from '../assets/images/idea_portal_stem_1795006423985.jpg';
-import ideaAiClassroomImg from '../assets/images/idea_ai_classroom_1795006424450.jpg';
-import ideaResearchLibraryImg from '../assets/images/idea_research_library_1795006424373.jpg';
-import ideaExamAnalyticsImg from '../assets/images/idea_exam_analytics_1795006425134.jpg';
-import ideaTeacherCommunityImg from '../assets/images/idea_teacher_community_1795006425639.jpg';
-
-export interface PortalPreviewTheme {
-  headerBg: string;
-  accentBg: string;
-  navItems: string[];
-  heroTitle: string;
-  heroSub: string;
-}
-
 export interface IdeaResource {
   id: string;
-  category: 'official_portal' | 'manual_guide' | 'research' | 'exams' | 'facebook' | 'education' | 'canva_ai' | 'resource_share';
+  category: 'official_portal' | 'manual_guide' | 'research' | 'exams' | 'facebook' | 'education' | 'canva_ai';
   categoryLabel: string;
   title: string;
   description: string;
   url: string;
-  previewImage?: string;
-  portalTheme?: PortalPreviewTheme;
   tags: string[];
   recommendedBadge?: string;
   featuredDaily?: boolean;
-  isOfficialCore?: boolean;
+  isOfficialCore?: boolean; // 6 core websites requested by user
 }
 
 export const IDEA_CATEGORIES = [
   { id: 'all', label: 'ทั้งหมด' },
   { id: 'official_portal', label: '🏛️ คลังความรู้ & พอร์ทัลหลัก' },
-  { id: 'manual_guide', label: '✨ เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ' },
+  { id: 'manual_guide', label: '📖 คู่มือการใช้ AI & แนวทางการสอน' },
   { id: 'research', label: '📚 วิจัย วิทยานิพนธ์ & วารสาร' },
   { id: 'exams', label: '📝 คลังข้อสอบ & เกณฑ์ประเมิน' },
-  { id: 'facebook', label: '👥 ชุมชนครู & แหล่งแชร์ไอเดีย' },
+  { id: 'facebook', label: '👥 เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย' },
 ] as const;
-
-export function getIdeaFallbackImage(category: string): string {
-  switch (category) {
-    case 'manual_guide':
-    case 'canva_ai':
-      return ideaAiClassroomImg;
-    case 'research':
-      return ideaResearchLibraryImg;
-    case 'exams':
-      return ideaExamAnalyticsImg;
-    case 'facebook':
-    case 'community':
-      return ideaTeacherCommunityImg;
-    case 'official_portal':
-    case 'education':
-    case 'resource_share':
-    default:
-      return ideaPortalStemImg;
-  }
-}
-
-export function getIdeaPreviewImage(category: string, customImageUrl?: string): string {
-  const trimmed = (customImageUrl || '').trim();
-  if (
-    trimmed &&
-    (trimmed.startsWith('/previews/') ||
-      trimmed.startsWith('https://') ||
-      trimmed.startsWith('http://') ||
-      trimmed.startsWith('data:image/'))
-  ) {
-    return trimmed;
-  }
-  return getIdeaFallbackImage(category);
-}
-
-export function getLiveWebsiteScreenshotUrl(url?: string): string {
-  const trimmed = (url || '').trim();
-  if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) return '';
-  return `https://image.thum.io/get/width/800/crop/450/noanimate/${trimmed}`;
-}
-
-export function extractIdeaDomain(rawUrl?: string): string {
-  const urlStr = (rawUrl || '').trim();
-  if (!urlStr || urlStr === '#') return '';
-  try {
-    const normalized =
-      urlStr.startsWith('http://') || urlStr.startsWith('https://') ? urlStr : `https://${urlStr}`;
-    const parsed = new URL(normalized);
-    return parsed.hostname.replace(/^www\./i, '');
-  } catch {
-    return '';
-  }
-}
-
-export function getIdeaFaviconUrl(rawUrl?: string): string {
-  const domain = extractIdeaDomain(rawUrl);
-  if (!domain) return '';
-  return `https://www.google.com/s2/favicons?domain=${encodeURIComponent(domain)}&sz=64`;
-}
-
-export function isBareFacebookUrl(rawUrl?: string): boolean {
-  const val = (rawUrl || '').trim().toLowerCase();
-  if (!val) return false;
-  return (
-    /^https?:\/\/(www\.|m\.|web\.)?facebook\.com\/?(\?.*)?$/.test(val) ||
-    /^https?:\/\/fb\.com\/?$/.test(val)
-  );
-}
-
-export function matchSeedPreviewByUrl(url?: string): { previewImage?: string; portalTheme?: PortalPreviewTheme } {
-  const domain = extractIdeaDomain(url).toLowerCase();
-  if (!domain) return {};
-  const match = IDEA_RESOURCES.find((r) => extractIdeaDomain(r.url).toLowerCase() === domain);
-  if (!match) return {};
-  return {
-    previewImage: match.previewImage,
-    portalTheme: match.portalTheme,
-  };
-}
 
 export const IDEA_RESOURCES: IdeaResource[] = [
   // =========================================================================
@@ -123,12 +28,11 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'core-01-scimath',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'SciMath คลังความรู้ สสวท.',
-    description: 'แหล่งรวมสื่อวิทย์-คณิต-เทคโนโลยีระดับชาติ ค้นหาแผนการสอน วิดีโอ และ E-Book สสวท. ฟรีครบทุกช่วงชั้น',
+    title: 'SciMath คลังความรู้ สสวท. (สถาบันส่งเสริมการสอนวิทยาศาสตร์และเทคโนโลยี)',
+    description: 'ศูนย์รวมบทความ นวัตกรรม สื่อการเรียนรู้ วิทยาศาสตร์ คณิตศาสตร์ เทคโนโลยี และสะเต็มศึกษา (STEM) ตามมาตรฐานหลักสูตรระดับชาติ',
     url: 'https://www.scimath.org/',
-    previewImage: '/previews/core-01-scimath.png',
-    tags: ['SciMath', 'สสวท.', 'วิทยาศาสตร์', 'STEM'],
-    recommendedBadge: 'เว็บหลัก สสวท.',
+    tags: ['SciMath', 'สสวท.', 'วิทยาศาสตร์', 'คณิตศาสตร์', 'STEM', 'สื่อการสอน'],
+    recommendedBadge: '⭐ เว็บหลัก สสวท.',
     featuredDaily: true,
     isOfficialCore: true,
   },
@@ -136,18 +40,11 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'core-03-obec',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'OBEC Content Center (คลังสื่อ สพฐ.)',
-    description: 'คลังสื่ออิเล็กทรอนิกส์กลางของ สพฐ. ดาวน์โหลด E-Book แผนจัดการเรียนรู้ และสื่อดิจิทัลมาตรฐานกระทรวงฯ',
-    url: 'https://contentcenter.obec.go.th/',
-    portalTheme: {
-      headerBg: 'from-sky-700 via-blue-800 to-indigo-900',
-      accentBg: 'bg-sky-400',
-      navItems: ['หน้าแรก', 'คลังสื่อ E-Book', 'วิดีโอสอน', 'แอปพลิเคชัน'],
-      heroTitle: 'OBEC Content Center',
-      heroSub: 'คลังเนื้อหาอิเล็กทรอนิกส์ สพฐ. ครบทุกกลุ่มสาระ',
-    },
-    tags: ['OBEC', 'สพฐ.', 'E-Book', 'แผนการสอน'],
-    recommendedBadge: 'คลังสื่อกลาง สพฐ.',
+    title: 'OBEC Content Center (คลังเนื้อหาอิเล็กทรอนิกส์ สพฐ.)',
+    description: 'ระบบคลังสื่อ นวัตกรรมการจัดการเรียนรู้ แผนการสอน แหล่งรวบรวม E-Book และบทเรียนอิเล็กทรอนิกส์มาตรฐาน สพฐ. กระทรวงศึกษาธิการ',
+    url: 'https://contentcenter.obec.go.th/store/22074',
+    tags: ['OBEC Content Center', 'สพฐ.', 'คลังสื่ออิเล็กทรอนิกส์', 'แผนการสอน', 'หนังสือเรียน'],
+    recommendedBadge: '⭐ คลังสื่อกลาง สพฐ.',
     featuredDaily: true,
     isOfficialCore: true,
   },
@@ -155,184 +52,89 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'core-04-opec',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'สำนักงานคณะกรรมการส่งเสริมการศึกษาเอกชน (สช.)',
-    description: 'ศูนย์รวมระเบียบ แนวทางพัฒนาหลักสูตร ประกันคุณภาพ และโครงการอบรมสำหรับครูโรงเรียนเอกชน',
-    url: 'https://opec.go.th/',
-    portalTheme: {
-      headerBg: 'from-cyan-800 via-teal-800 to-slate-900',
-      accentBg: 'bg-amber-400',
-      navItems: ['หน้าหลัก สช.', 'ประกาศ/ระเบียบ', 'พัฒนาครู', 'บริการ E-Service'],
-      heroTitle: 'OPEC · สช.',
-      heroSub: 'สำนักงานคณะกรรมการส่งเสริมการศึกษาเอกชน',
-    },
-    tags: ['สช.', 'OPEC', 'การศึกษาเอกชน', 'พัฒนาครู'],
-    recommendedBadge: 'เว็บไซต์หลัก สช.',
+    title: 'สำนักงานคณะกรรมการส่งเสริมการศึกษาเอกชน (สช. - OPEC)',
+    description: 'ศูนย์รวมข้อมูล ข่าวสาร ระเบียบ แนวทางการประกันคุณภาพการศึกษา นวัตกรรม และโครงการส่งเสริมศักยภาพครูโรงเรียนเอกชนทั่วประเทศ',
+    url: 'https://opec.go.th/news/detail/3373',
+    tags: ['สช.', 'OPEC', 'การศึกษาเอกชน', 'ระเบียบการสอน', 'พัฒนาครู'],
+    recommendedBadge: '⭐ เว็บไซต์หลัก สช.',
     featuredDaily: true,
     isOfficialCore: true,
   },
   {
-    id: 'edu-04-dltv',
+    id: 'edu-01-dlit',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'DLTV (แผนการสอน ใบงาน และสไลด์ฟรี)',
-    description: 'ดาวน์โหลดแผนการสอน ใบงาน PDF และสไลด์ PowerPoint สำเร็จรูปพร้อมใช้ ตั้งแต่ระดับอนุบาลถึงมัธยมศึกษา',
-    url: 'https://www.dltv.ac.th/',
-    previewImage: '/previews/edu-04-dltv.png',
-    tags: ['DLTV', 'ใบงานฟรี', 'แผนการสอน', 'PowerPoint'],
-    recommendedBadge: 'ดาวน์โหลดใบงานฟรี',
+    title: 'DLIT (Distance Learning Information Technology) สพฐ.',
+    description: 'คลังสื่อการเรียนรู้ออนไลน์ของกระทรวงศึกษาธิการ รวบรวมคลิปการสอน แผนการจัดการเรียนรู้ และสื่ออิเล็กทรอนิกส์ทุกกลุ่มสาระการเรียนรู้',
+    url: 'https://www.dlit.ac.th',
+    tags: ['DLIT', 'สพฐ.', 'ทุกกลุ่มสาระ', 'ประถม-มัธยม'],
+    recommendedBadge: 'คลังสื่อมาตรฐาน สพฐ.',
     featuredDaily: true,
   },
   {
     id: 'edu-02-ipst',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'IPST Learning Space (แพลตฟอร์มดิจิทัล สสวท.)',
-    description: 'รวมระบบเรียนออนไลน์ สื่อ AR/VR การทดลองเสมือน และคอร์สอบรมพัฒนาครูวิทยาศาสตร์-คณิตศาสตร์',
-    url: 'https://learningspace.ipst.ac.th/',
-    previewImage: '/previews/edu-02-ipst.png',
-    tags: ['สสวท.', 'สื่อ AR/VR', 'คอร์สครู', 'สะเต็ม'],
+    title: 'สสวท. IPST Learning Space (ระบบการเรียนรู้ดิจิทัล)',
+    description: 'ระบบการเรียนรู้ดิจิทัล สถาบันส่งเสริมการสอนวิทยาศาสตร์และเทคโนโลยี รวบรวมสื่อ AR/VR, วิดีโอจำลองการทดลอง และสื่อสะเต็มศึกษา',
+    url: 'https://learningspace.ipst.ac.th',
+    tags: ['สสวท.', 'วิทยาศาสตร์', 'คณิตศาสตร์', 'เทคโนโลยี', 'สะเต็ม'],
     recommendedBadge: 'ทางการ สสวท.',
-  },
-  {
-    id: 'edu-05-proj14',
-    category: 'official_portal',
-    categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'Project 14 สสวท. (คลังวิดีโอการสอน ป.1–ม.6)',
-    description: 'วิดีโออธิบายบทเรียนคณิต-วิทย์-เทคโนโลยี เรียงตามตัวชี้วัด เปิดประกอบการสอนหรือทบทวนได้ทันที',
-    url: 'https://proj14.ipst.ac.th/',
-    previewImage: '/previews/edu-05-proj14.png',
-    tags: ['Project 14', 'สสวท.', 'วิดีโอสอน', 'ป.1-ม.6'],
-    recommendedBadge: 'คลิปสอนเรียงตามบท',
   },
   {
     id: 'edu-03-tkpark',
     category: 'official_portal',
     categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'TK Public Online Library (ห้องสมุดดิจิทัลฟรี)',
-    description: 'ยืมอ่าน E-Book หนังสือเด็ก วรรณกรรม และหนังสือพัฒนาทักษะการสอนออนไลน์ฟรีทั่วประเทศ',
-    url: 'https://www.tkpark.or.th/',
-    previewImage: '/previews/edu-03-tkpark.png',
-    tags: ['TK Park', 'E-Book', 'ห้องสมุดดิจิทัล', 'อ่านฟรี'],
-  },
-  {
-    id: 'edu-01-dlit',
-    category: 'official_portal',
-    categoryLabel: 'คลังความรู้ & พอร์ทัลหลัก',
-    title: 'DLIT สพฐ. (คลังสื่อการเรียนรู้ออนไลน์ 8 กลุ่มสาระ)',
-    description: 'คลังคลิปการสอนจากครูต้นแบบ แผนการจัดการเรียนรู้ และทรัพยากรการสอนครบทุกกลุ่มสาระของ สพฐ.',
-    url: 'https://www.dlit.ac.th/',
-    portalTheme: {
-      headerBg: 'from-orange-700 via-amber-700 to-slate-900',
-      accentBg: 'bg-orange-400',
-      navItems: ['DLIT Classroom', 'DLIT Library', 'DLIT Resources', 'PLC'],
-      heroTitle: 'DLIT OBEC',
-      heroSub: 'เทคโนโลยีสารสนเทศเพื่อการศึกษาทางไกล สพฐ.',
-    },
-    tags: ['DLIT', 'สพฐ.', 'ทุกกลุ่มสาระ', 'ครูต้นแบบ'],
-    recommendedBadge: 'คลังสื่อ 8 กลุ่มสาระ',
+    title: 'TK Public Online Library (อุทยานการเรียนรู้ TK Park)',
+    description: 'คลังหนังสือดิจิทัล สื่อมัลติมีเดีย และแหล่งค้นคว้าพัฒนาองค์ความรู้สำหรับครูและนักเรียน ให้บริการฟรีทั่วประเทศ',
+    url: 'https://www.tkpark.or.th',
+    tags: ['TK Park', 'ห้องสมุดดิจิทัล', 'E-Book', 'คลังความรู้'],
   },
 
   // =========================================================================
-  // 2. เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ (AI, Simulations & Classroom Games)
+  // 2. คู่มือการใช้ AI & แนวทางการสอน (Manuals & Guidelines)
   // =========================================================================
   {
     id: 'core-02-ai-moe',
     category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'กระทรวงศึกษาธิการ (ศธ.) — นโยบายและคู่มือ AI การศึกษา',
-    description: 'ติดตามประกาศหลักสูตร คู่มือการใช้ AI อย่างปลอดภัยในห้องเรียน และแนวทางพัฒนาสมรรถนะครูไทย',
-    url: 'https://www.moe.go.th/',
-    portalTheme: {
-      headerBg: 'from-emerald-800 via-teal-900 to-slate-950',
-      accentBg: 'bg-emerald-400',
-      navItems: ['หน้าหลัก ศธ.', 'นโยบายการศึกษา', 'คลัง E-Book', 'ข่าวประชาสัมพันธ์'],
-      heroTitle: 'กระทรวงศึกษาธิการ (ศธ.)',
-      heroSub: 'Ministry of Education Thailand · คู่มือและนโยบายครู',
-    },
-    tags: ['AI การศึกษา', 'คู่มือครู', 'ศธ.', 'นโยบาย'],
-    recommendedBadge: 'เว็บไซต์หลัก ศธ.',
+    categoryLabel: 'คู่มือการใช้ AI & แนวทางการสอน',
+    title: 'E-Book คู่มือการใช้ AI สพฐ. กระทรวงศึกษาธิการ',
+    description: 'เอกสารและคู่มือทางการสำหรับการประยุกต์ใช้เทคโนโลยีปัญญาประดิษฐ์ (AI) ในการจัดการเรียนรู้ขั้นพื้นฐานอย่างปลอดภัย จริยธรรม และมีประสิทธิภาพ',
+    url: 'https://www.moe.go.th/e-book/%E0%B8%84%E0%B8%B9%E0%B9%88%E0%B8%A1%E0%B8%B7%E0%B8%AD%E0%B8%81%E0%B8%B2%E0%B8%A3%E0%B9%83%E0%B8%8A%E0%B9%89-ai-%E0%B8%AA%E0%B8%9E%E0%B8%90/',
+    tags: ['AI สพฐ.', 'คู่มือครู', 'กระทรวงศึกษาธิการ', 'E-Book', 'ปัญญาประดิษฐ์'],
+    recommendedBadge: '⭐ คู่มือหลัก ศธ.',
     featuredDaily: true,
     isOfficialCore: true,
   },
   {
-    id: 'tool-01-wordwall',
+    id: 'guide-01-competency',
     category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'Wordwall (สร้างเกมการสอน & แบบทดสอบใน 1 นาที)',
-    description: 'เปลี่ยนคำถามธรรมดาเป็นเกมจับคู่ วงล้อสุ่ม ควิซแข่งเวลา และใบงานพิมพ์แจก มีคลังเกมสำเร็จรูปกว่า 30 ล้านชิ้น',
-    url: 'https://wordwall.net/',
-    previewImage: '/previews/tool-01-wordwall.png',
-    tags: ['Wordwall', 'เกมการสอน', 'Active Learning', 'ควิซ'],
-    recommendedBadge: 'ครูนิยมใช้อันดับ 1',
+    categoryLabel: 'คู่มือการใช้ AI & แนวทางการสอน',
+    title: 'คู่มือกรอบสมรรถนะดิจิทัลสำหรับครูและบุคลากรทางการศึกษาไทย (ศธ.)',
+    description: 'เกณฑ์และแนวทางการพัฒนาตนเองด้านดิจิทัล ทักษะการประยุกต์ใช้เทคโนโลยีสารสนเทศเพื่อยกระดับห้องเรียน Active Learning',
+    url: 'https://www.moe.go.th',
+    tags: ['สมรรถนะดิจิทัล', 'กรอบพัฒนาครู', 'ศธ.', 'Active Learning'],
+    recommendedBadge: 'กรอบมาตรฐานวิชาชีพ',
     featuredDaily: true,
-  },
-  {
-    id: 'guide-05-phet',
-    category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'PhET Interactive Simulations (ห้องทดลองเสมือนจริง ภาษาไทย)',
-    description: 'จำลองการทดลองฟิสิกส์ เคมี ชีววิทยา และคณิตศาสตร์แบบ Interactive ให้นักเรียนลองปรับค่าได้จริงบนหน้าจอ',
-    url: 'https://phet.colorado.edu/th/',
-    previewImage: '/previews/guide-05-phet.png',
-    tags: ['PhET', 'ห้องทดลองเสมือน', 'STEM', 'ภาษาไทย'],
-    recommendedBadge: 'ทดลองเสมือนฟรี',
-    featuredDaily: true,
-  },
-  {
-    id: 'tool-03-geogebra',
-    category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'GeoGebra (สื่อคณิตศาสตร์ 2D/3D โต้ตอบฟรี)',
-    description: 'วาดกราฟ เรขาคณิต 3 มิติ สถิติ และแคลคูลัสแบบขยับตัวแปรโชว์หน้าชั้นเรียน ช่วยให้เด็กเห็นภาพคณิตศาสตร์ชัดขึ้น',
-    url: 'https://www.geogebra.org/',
-    previewImage: '/previews/tool-03-geogebra.png',
-    tags: ['GeoGebra', 'คณิตศาสตร์', 'กราฟ 3D', 'สื่อโต้ตอบ'],
-    recommendedBadge: 'เครื่องมือคณิตศาสตร์ฟรี',
-  },
-  {
-    id: 'guide-04-canva-edu',
-    category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'Canva for Education (AI สร้างสไลด์ & ใบงานฟรีสำหรับครู)',
-    description: 'ปลดล็อกเทมเพลตสไลด์ ใบงาน อินโฟกราฟิก และ Magic Studio AI ช่วยร่างบทเรียน-แต่งภาพประกอบฟรีสำหรับครู',
-    url: 'https://www.canva.com/th_th/education/',
-    portalTheme: {
-      headerBg: 'from-cyan-600 via-blue-600 to-violet-700',
-      accentBg: 'bg-cyan-300',
-      navItems: ['เทมเพลตสื่อ', 'Magic Studio AI', 'ไวท์บอร์ดห้องเรียน', 'สำหรับครู'],
-      heroTitle: 'Canva for Education',
-      heroSub: 'ออกแบบสไลด์ ใบงาน และสื่อ AI ฟรี 100% สำหรับครู',
-    },
-    tags: ['Canva Edu', 'AI สร้างสื่อ', 'ใบงาน', 'สไลด์สอน'],
-    recommendedBadge: 'ใช้ฟรีสำหรับครู',
-    featuredDaily: true,
-  },
-  {
-    id: 'guide-03-active',
-    category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'สพฐ. (OBEC) — แนวทาง Active Learning & โครงการพัฒนาครู',
-    description: 'เว็บไซต์หลักสำนักงานคณะกรรมการการศึกษาขั้นพื้นฐาน รวมประกาศ E-Service และแนวทางจัดการเรียนรู้เชิงรุก',
-    url: 'https://www.obec.go.th/',
-    previewImage: '/previews/guide-03-active.png',
-    tags: ['สพฐ.', 'OBEC', 'Active Learning', 'E-Service'],
   },
   {
     id: 'guide-02-wpa',
     category: 'manual_guide',
-    categoryLabel: 'เครื่องมือ AI & สื่อการสอนเชิงโต้ตอบ',
-    title: 'สำนักงาน ก.ค.ศ. (คู่มือวิทยฐานะ ว.PA & PA)',
-    description: 'หลักเกณฑ์และแบบฟอร์มข้อตกลงพัฒนางาน (PA) แนวทางเขียนแผนการสอนและประเมินคลิปการสอนตามเกณฑ์ล่าสุด',
-    url: 'https://otepc.go.th/',
-    portalTheme: {
-      headerBg: 'from-indigo-800 via-blue-900 to-slate-950',
-      accentBg: 'bg-amber-400',
-      navItems: ['ระบบ DPA', 'หลักเกณฑ์ ว.PA', 'หนังสือเวียน', 'คู่มือประเมิน'],
-      heroTitle: 'สำนักงาน ก.ค.ศ. (OTEPC)',
-      heroSub: 'เกณฑ์วิทยฐานะ ว.PA และแนวทางการพัฒนางานครู',
-    },
-    tags: ['ก.ค.ศ.', 'ว.PA', 'วิทยฐานะ', 'DPA'],
+    categoryLabel: 'คู่มือการใช้ AI & แนวทางการสอน',
+    title: 'คู่มือและหลักเกณฑ์การประเมินวิทยฐานะ ว.PA สำนักงาน ก.ค.ศ.',
+    description: 'เอกสารคู่มือแนวทางการจัดทำข้อตกลงในการพัฒนางาน (PA), การเขียนแผนจัดการเรียนรู้ และแนวทางการประเมินคลิปการสอนตามเกณฑ์ ก.ค.ศ.',
+    url: 'https://otepc.go.th',
+    tags: ['ก.ค.ศ.', 'ว.PA', 'วิทยฐานะ', 'คู่มือประเมิน', 'แผนการสอน'],
     recommendedBadge: 'เกณฑ์ทางการ ก.ค.ศ.',
+  },
+  {
+    id: 'guide-03-active',
+    category: 'manual_guide',
+    categoryLabel: 'คู่มือการใช้ AI & แนวทางการสอน',
+    title: 'คู่มือแนวทางการจัดการเรียนรู้เชิงรุก (Active Learning) สพฐ.',
+    description: 'แนวทางออกแบบกิจกรรมการเรียนรู้แบบ Active Learning มุ่งเน้นการคิดวิเคราะห์ กระบวนการกลุ่ม และการประเมินผลตามสภาพจริง',
+    url: 'https://www.obec.go.th',
+    tags: ['Active Learning', 'สพฐ.', 'การจัดการเรียนรู้', 'คู่มือครู'],
   },
 
   // =========================================================================
@@ -342,18 +144,11 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'core-05-tdc',
     category: 'research',
     categoryLabel: 'วิจัย & วารสารวิชาการ',
-    title: 'TDC ThaiLIS (คลังวิทยานิพนธ์ & วิจัยฉบับเต็ม)',
-    description: 'ค้นหาและดาวน์โหลดไฟล์ Full-Text วิทยานิพนธ์และงานวิจัยในชั้นเรียนจากมหาวิทยาลัยทั่วไทยเพื่อใช้อ้างอิง',
+    title: 'TDC ThaiLIS (Thai Digital Collection - คลังวิทยานิพนธ์และวิจัยไทย)',
+    description: 'ระบบสืบค้นและดาวน์โหลดเอกสารฉบับเต็ม (Full Text) วิทยานิพนธ์ รายงานการวิจัยทางการศึกษา และบทความวิจัยระดับชาติ',
     url: 'https://tdc.thailis.or.th/tdc/basic.php',
-    portalTheme: {
-      headerBg: 'from-violet-900 via-indigo-900 to-slate-950',
-      accentBg: 'bg-violet-400',
-      navItems: ['สืบค้นพื้นฐาน', 'สืบค้นขั้นสูง', 'วิทยานิพนธ์', 'รายงานวิจัย'],
-      heroTitle: 'TDC · ThaiLIS',
-      heroSub: 'ฐานข้อมูลวิทยานิพนธ์และงานวิจัยฉบับเต็มระดับชาติ',
-    },
-    tags: ['ThaiLIS', 'TDC', 'วิทยานิพนธ์', 'วิจัยชั้นเรียน'],
-    recommendedBadge: 'คลังวิจัยระดับชาติ',
+    tags: ['ThaiLIS', 'TDC', 'วิทยานิพนธ์', 'งานวิจัยในชั้นเรียน', 'Full Text'],
+    recommendedBadge: '⭐ คลังวิจัยระดับชาติ',
     featuredDaily: true,
     isOfficialCore: true,
   },
@@ -361,12 +156,11 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'core-06-tci-thaijo',
     category: 'research',
     categoryLabel: 'วิจัย & วารสารวิชาการ',
-    title: 'TCI ThaiJO (ฐานข้อมูลวารสารวิชาการไทยออนไลน์)',
-    description: 'รวมบทความวิจัยทางการศึกษาที่ผ่านการรับรองมาตรฐาน TCI กว่า 400,000+ บทความ ค้นคว้าอ้างอิงทำผลงาน ว.PA',
-    url: 'https://www.tci-thaijo.org/',
-    previewImage: '/previews/core-06-tci-thaijo.png',
-    tags: ['TCI', 'ThaiJO', 'วารสารวิชาการ', 'วิทยฐานะ'],
-    recommendedBadge: 'ฐานข้อมูลวารสาร TCI',
+    title: 'TCI ThaiJO (Thai Journals Online - ฐานข้อมูลวารสารวิชาการไทย)',
+    description: 'ศูนย์รวมวารสารวิชาการทางการศึกษา มนุษยศาสตร์ และวิทยาศาสตร์ ที่ผ่านการรับรองมาตรฐาน TCI ค้นคว้างานวิจัยอ้างอิงสำหรับวิทยฐานะ ว.PA',
+    url: 'https://www.tci-thaijo.org/en',
+    tags: ['TCI', 'ThaiJO', 'วารสารวิชาการ', 'วิทยฐานะ ว.PA', 'วิจัยทางการศึกษา'],
+    recommendedBadge: '⭐ ฐานข้อมูลวารสาร TCI',
     featuredDaily: true,
     isOfficialCore: true,
   },
@@ -374,149 +168,115 @@ export const IDEA_RESOURCES: IdeaResource[] = [
     id: 'res-01-tci',
     category: 'research',
     categoryLabel: 'วิจัย & วารสารวิชาการ',
-    title: 'ศูนย์ดัชนีการอ้างอิงวารสารไทย (TCI Centre)',
-    description: 'ตรวจสอบรายชื่อวารสารวิชาการกลุ่ม 1 และกลุ่ม 2 พร้อมดัชนีคุณภาพวารสารก่อนตีพิมพ์เผยแพร่ผลงานวิจัย',
-    url: 'https://tci-thailand.org/',
-    previewImage: '/previews/res-01-tci.png',
-    tags: ['TCI กลุ่ม 1', 'TCI กลุ่ม 2', 'ตีพิมพ์วิจัย'],
+    title: 'ศูนย์ดัชนีการอ้างอิงวารสารไทย (TCI Thailand)',
+    description: 'ตรวจสอบรายชื่อวารสารกลุ่มที่ 1 และ 2 การประเมินคุณภาพวารสารวิชาการ และฐานข้อมูลการอ้างอิงผลงานวิจัยระดับชาติ',
+    url: 'https://tci-thailand.org',
+    tags: ['TCI กลุ่ม 1', 'TCI กลุ่ม 2', 'คุณภาพวารสาร', 'ดัชนีอ้างอิง'],
   },
   {
     id: 'res-02-eric',
     category: 'research',
     categoryLabel: 'วิจัย & วารสารวิชาการ',
-    title: 'ERIC (ฐานข้อมูลวิจัยการศึกษาสากล)',
-    description: 'คลังงานวิจัยด้านการสอนและนวัตกรรมการศึกษาที่ใหญ่ที่สุดในโลก ค้นคว้าเอกสาร Peer-Reviewed PDF ฟรี',
-    url: 'https://eric.ed.gov/',
-    previewImage: '/previews/res-02-eric.png',
-    tags: ['ERIC', 'วิจัยสากล', 'Pedagogy', 'PDF ฟรี'],
+    title: 'ERIC - Education Resources Information Center',
+    description: 'ฐานข้อมูลงานวิจัยทางการศึกษาที่ใหญ่ที่สุดในโลก สนับสนุนโดยกระทรวงศึกษาธิการสหรัฐฯ ค้นคว้างานวิจัย Active Learning และนวัตกรรมสากล',
+    url: 'https://eric.ed.gov',
+    tags: ['ERIC', 'วิจัยสากล', 'Active Learning', 'Pedagogy'],
   },
   {
     id: 'res-03-onec',
     category: 'research',
     categoryLabel: 'วิจัย & วารสารวิชาการ',
-    title: 'สำนักงานเลขาธิการสภาการศึกษา (สกศ.)',
-    description: 'คลังรายงานวิจัย นโยบายการศึกษาชาติ และข้อมูลเปรียบเทียบสมรรถนะการศึกษาไทยกับนานาชาติ',
-    url: 'https://www.onec.go.th/',
-    portalTheme: {
-      headerBg: 'from-rose-900 via-red-950 to-slate-950',
-      accentBg: 'bg-rose-400',
-      navItems: ['นโยบายการศึกษา', 'รายงานวิจัย สกศ.', 'สถิติการศึกษา', 'ดาวน์โหลด'],
-      heroTitle: 'สกศ. · ONEC',
-      heroSub: 'สำนักงานเลขาธิการสภาการศึกษา กระทรวงศึกษาธิการ',
-    },
-    tags: ['สกศ.', 'ONEC', 'วิจัยนโยบาย', 'สถิติการศึกษา'],
+    title: 'สำนักงานเลขาธิการสภาการศึกษา (สกศ. - ONEC)',
+    description: 'คลังข้อมูลงานวิจัย นโยบายการศึกษาแห่งชาติ และสถิติแนวโน้มการจัดการศึกษาในระดับประเทศและนานาชาติ',
+    url: 'https://www.onec.go.th',
+    tags: ['สภาการศึกษา', 'สกศ.', 'วิจัยการศึกษา', 'นโยบายการศึกษา'],
   },
 
   // =========================================================================
   // 4. คลังข้อสอบ & เกณฑ์ประเมิน (Exams & Assessment)
   // =========================================================================
   {
-    id: 'ex-02-pisa',
-    category: 'exams',
-    categoryLabel: 'คลังข้อสอบ & เกณฑ์ประเมิน',
-    title: 'PISA Thailand (ตัวอย่างข้อสอบ & กรอบวัดสมรรถนะ สสวท.)',
-    description: 'คลังตัวอย่างข้อสอบ PISA การอ่าน-คณิต-วิทย์ พร้อมเฉลยแนวคิด และสื่ออินโฟกราฟิกฝึกคิดวิเคราะห์ขั้นสูง',
-    url: 'https://pisathailand.ipst.ac.th/',
-    previewImage: '/previews/ex-02-pisa.png',
-    tags: ['PISA', 'คิดวิเคราะห์', 'สสวท.', 'แนวข้อสอบ'],
-    recommendedBadge: 'มาตรฐาน PISA สสวท.',
-    featuredDaily: true,
-  },
-  {
     id: 'ex-01-niets',
     category: 'exams',
     categoryLabel: 'คลังข้อสอบ & เกณฑ์ประเมิน',
-    title: 'สทศ. NIETS (คลังข้อสอบ O-NET / A-Level & Blueprint)',
-    description: 'ดาวน์โหลดข้อสอบเก่าระดับชาติ Test Blueprint และผังการสร้างข้อสอบจริงจากสถาบันทดสอบทางการศึกษาแห่งชาติ',
-    url: 'https://www.niets.or.th/',
-    portalTheme: {
-      headerBg: 'from-blue-900 via-indigo-950 to-slate-950',
-      accentBg: 'bg-sky-400',
-      navItems: ['ข้อสอบ O-NET', 'Test Blueprint', 'ตารางสอบ', 'ค่าสถิติระดับชาติ'],
-      heroTitle: 'สทศ. · NIETS',
-      heroSub: 'คลังข้อสอบ O-NET และโครงสร้าง Test Blueprint',
-    },
-    tags: ['สทศ.', 'O-NET', 'Test Blueprint', 'ข้อสอบเก่า'],
+    title: 'คลังข้อสอบและ Test Blueprint สทศ. (NIETS)',
+    description: 'สถาบันทดสอบทางการศึกษาแห่งชาติ รวบรวมข้อสอบ O-NET, A-Level, โครงสร้างข้อสอบ (Test Blueprint) และตัวอย่างกระดาษคำตอบระดับประเทศ',
+    url: 'https://www.niets.or.th',
+    tags: ['สทศ.', 'NIETS', 'O-NET', 'Test Blueprint', 'เกณฑ์ข้อสอบ'],
     recommendedBadge: 'มาตรฐานระดับชาติ',
+    featuredDaily: true,
+  },
+  {
+    id: 'ex-02-pisa',
+    category: 'exams',
+    categoryLabel: 'คลังข้อสอบ & เกณฑ์ประเมิน',
+    title: 'PISA Thailand Portal (ศูนย์สอบและกรอบวัดผล PISA)',
+    description: 'ตัวอย่างข้อสอบ PISA ด้านการอ่าน คณิตศาสตร์ วิทยาศาสตร์ และแนวทางส่งเสริมสมรรถนะการคิดแก้ปัญหาขั้นสูง สสวท.',
+    url: 'https://pisathailand.ipst.ac.th',
+    tags: ['PISA', 'สมรรถนะการอ่าน', 'สสวท.', 'การคิดขั้นสูง'],
+    recommendedBadge: 'มาตรฐาน PISA สสวท.',
   },
   {
     id: 'ex-03-bet',
     category: 'exams',
     categoryLabel: 'คลังข้อสอบ & เกณฑ์ประเมิน',
-    title: 'สำนักทดสอบทางการศึกษา สพฐ. (NT / RT)',
-    description: 'คลังแบบทดสอบ NT ป.3 และ RT ป.1 พร้อมคู่มือวัดความฉลาดรู้และการประเมินตามตัวชี้วัด',
-    url: 'https://bet.obec.go.th/',
-    portalTheme: {
-      headerBg: 'from-teal-900 via-emerald-950 to-slate-950',
-      accentBg: 'bg-teal-400',
-      navItems: ['คลังข้อสอบ NT', 'แบบประเมิน RT', 'ความฉลาดรู้', 'คู่มือวัดผล'],
-      heroTitle: 'BET · OBEC',
-      heroSub: 'สำนักทดสอบทางการศึกษา สพฐ. (แบบทดสอบ NT / RT)',
-    },
-    tags: ['NT', 'RT', 'สำนักทดสอบ สพฐ.', 'วัดผล'],
+    title: 'สำนักทดสอบทางการศึกษา สพฐ. (BET OBEC)',
+    description: 'คลังเครื่องมือประเมินผลการเรียนรู้ แบบทดสอบมาตรฐาน NT, เครื่องมือวัดความฉลาดรู้ และแนวทางการประเมินตามตัวชี้วัด',
+    url: 'https://bet.obec.go.th',
+    tags: ['สำนักทดสอบ สพฐ.', 'NT', 'เครื่องมือประเมิน', 'วัดผลสัมฤทธิ์'],
   },
 
   // =========================================================================
-  // 5. ชุมชนครู & แหล่งแชร์ไอเดีย (Open Thai Teacher Communities)
+  // 5. เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย (Facebook Communities)
   // =========================================================================
   {
     id: 'fb-01-inskru',
     category: 'facebook',
-    categoryLabel: 'ชุมชนครู & แหล่งแชร์ไอเดีย',
-    title: 'insKru — ห้องสมุดไอเดียการสอนของครูไทย',
-    description: 'เปิดดูไอเดียกิจกรรม Active Learning เกมเปิดคาบ และเทคนิคจัดการชั้นเรียนจากเพื่อนครูทั่วไทยได้ทันทีไม่ต้องล็อกอิน',
-    url: 'https://inskru.com/',
-    previewImage: '/previews/fb-01-inskru.png',
-    tags: ['insKru', 'Active Learning', 'ไอเดียครู', 'เกมเปิดคาบ'],
-    recommendedBadge: 'เปิดชมได้ทันที',
+    categoryLabel: 'เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย',
+    title: 'insKru - พื้นที่แบ่งปันไอเดียการสอน',
+    description: 'คอมมูนิตี้ครูที่ใหญ่ที่สุดในประเทศไทย แหล่งรวมไอเดีย Active Learning บอร์ดเกมสอน กิจกรรมละลายพฤติกรรม และใบงานแบ่งปันจากครูทั่วประเทศ',
+    url: 'https://www.facebook.com/inskruinth/',
+    tags: ['insKru', 'Active Learning', 'ไอเดียครู', 'เกมการสอน', 'Facebook'],
+    recommendedBadge: 'เพจแนะนำอันดับ 1',
     featuredDaily: true,
   },
   {
-    id: 'fb-02-starfishlabz',
+    id: 'fb-02-krumalaew',
     category: 'facebook',
-    categoryLabel: 'ชุมชนครู & แหล่งแชร์ไอเดีย',
-    title: 'Starfish Labz — คอร์สพัฒนาครู & ชุมชน PLC ออนไลน์',
-    description: 'แหล่งรวมเวิร์กช็อป นวัตกรรม Makerspace เทคนิคสอนศตวรรษที่ 21 และหลักสูตรเรียนออนไลน์รับเกียรติบัตรฟรี',
-    url: 'https://www.starfishlabz.com/',
-    previewImage: '/previews/fb-02-starfishlabz.png',
-    tags: ['Starfish Labz', 'PLC', 'คอร์สฟรี', 'เกียรติบัตร'],
-    recommendedBadge: 'ชุมชนครู PLC ยอดนิยม',
+    categoryLabel: 'เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย',
+    title: 'เพจครูมาแล้ว (แบ่งปันสื่อการสอน ข่าวการศึกษา และวิทยฐานะ)',
+    description: 'เพจแชร์สื่อการสอนฟรี ใบงาน เอกสารวิทยฐานะ ว.PA แผนการจัดการเรียนรู้ และข่าวสารทางการศึกษาที่อัปเดตต่อเนื่อง',
+    url: 'https://www.facebook.com/krumalaew/',
+    tags: ['ครูมาแล้ว', 'สื่อการสอนฟรี', 'วิทยฐานะ', 'ว.PA', 'Facebook'],
+    recommendedBadge: 'เพจแชร์สื่อยอดนิยม',
     featuredDaily: true,
   },
   {
-    id: 'fb-03-trueplookpanya',
+    id: 'fb-03-kruploykong',
     category: 'facebook',
-    categoryLabel: 'ชุมชนครู & แหล่งแชร์ไอเดีย',
-    title: 'ทรูปลูกปัญญา (คลังบทเรียน ใบงาน & แผนสอน 8 กลุ่มสาระ)',
-    description: 'แหล่งค้นคว้าบทเรียน คลังข้อสอบ ใบงาน และสื่อวิดีโอแยกตามระดับชั้น เปิดให้ครูและนักเรียนเข้าใช้งานได้ทันที',
-    url: 'https://www.trueplookpanya.com/',
-    portalTheme: {
-      headerBg: 'from-red-700 via-rose-800 to-slate-900',
-      accentBg: 'bg-rose-400',
-      navItems: ['คลังความรู้', 'คลังข้อสอบ', 'แผนการสอน', 'ห้องเรียนครู'],
-      heroTitle: 'TruePlookpanya',
-      heroSub: 'คลังบทเรียน ใบงาน และข้อสอบออนไลน์ฟรี 8 กลุ่มสาระ',
-    },
-    tags: ['ทรูปลูกปัญญา', 'ใบงานฟรี', '8 กลุ่มสาระ', 'คลังข้อสอบ'],
-    recommendedBadge: 'ครบ 8 กลุ่มสาระ',
+    categoryLabel: 'เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย',
+    title: 'เพจครูปล่อยของ (สื่อนวัตกรรมและการจัดห้องเรียนสร้างสรรค์)',
+    description: 'เพจแลกเปลี่ยนสื่อทำมือ สื่อดิจิทัล แฟ้มสะสมผลงาน และเทคนิคการสอนที่ช่วยให้ห้องเรียนเต็มไปด้วยความสุขและเสียงหัวเราะ',
+    url: 'https://www.facebook.com/kruploykong/',
+    tags: ['ครูปล่อยของ', 'สื่อทำมือ', 'สื่อสร้างสรรค์', 'Facebook'],
   },
   {
-    id: 'fb-04-thaimooc',
+    id: 'fb-04-canva-group',
     category: 'facebook',
-    categoryLabel: 'ชุมชนครู & แหล่งแชร์ไอเดีย',
-    title: 'ThaiMOOC (เรียนออนไลน์ฟรีจากมหาวิทยาลัยทั่วไทย)',
-    description: 'คอร์สอัปสกิลดิจิทัล การสร้างสื่อยุค AI และการวิจัยทางการศึกษาจากคณาจารย์มหาวิทยาลัย เรียนฟรีมีเกียรติบัตร',
-    url: 'https://thaimooc.org/',
-    portalTheme: {
-      headerBg: 'from-sky-800 via-indigo-900 to-slate-950',
-      accentBg: 'bg-sky-400',
-      navItems: ['รายวิชาทั้งหมด', 'หมวดศึกษาศาสตร์', 'เทคโนโลยี AI', 'เกียรติบัตร'],
-      heroTitle: 'ThaiMOOC',
-      heroSub: 'ระบบเรียนออนไลน์เปิดกว้างระดับชาติ เรียนฟรีมีเกียรติบัตร',
-    },
-    tags: ['ThaiMOOC', 'เรียนฟรี', 'เกียรติบัตรครู', 'พัฒนาตนเอง'],
-    recommendedBadge: 'เรียนฟรีมีเกียรติบัตร',
+    categoryLabel: 'เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย',
+    title: 'Canva for Education Thailand Official Community',
+    description: 'กลุ่มเฟซบุ๊กทางการของครูผู้ใช้ Canva ในไทย อัปเดตเทมเพลตใหม่สำหรับวันสำคัญ คอร์สอบรมฟรี และเคล็ดลับการออกแบบสื่อเพื่อการศึกษา',
+    url: 'https://www.facebook.com/groups/canvaforeducationthailand/',
+    tags: ['Canva Group', 'อบรมฟรี', 'เทมเพลตครู', 'Facebook Group'],
+    recommendedBadge: 'คอมมูนิตี้ทางการ',
+  },
+  {
+    id: 'fb-05-hongpakru',
+    category: 'facebook',
+    categoryLabel: 'เพจเฟซบุ๊กแชร์สื่อ & ไอเดีย',
+    title: 'เพจห้องพักครู (แหล่งความรู้และสิทธิประโยชน์ครูไทย)',
+    description: 'อัปเดตข่าวสารระเบียบกระทรวงฯ ข้อมูลวิทยฐานะ ว.PA และเทคนิคการประเมินผลการเรียนรู้ของครูมืออาชีพ',
+    url: 'https://www.facebook.com',
+    tags: ['ข่าวครู', 'วิทยฐานะ ว.PA', 'ระเบียบการศึกษา', 'Facebook'],
   },
 ];
-
-

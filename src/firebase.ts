@@ -13,7 +13,7 @@ try {
   firestoreInstance = initializeFirestore(
     app,
     {
-      experimentalForceLongPolling: true,
+      experimentalAutoDetectLongPolling: true,
     },
     databaseId
   );

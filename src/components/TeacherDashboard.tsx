@@ -100,10 +100,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             .filter((num) => num >= 1 && num <= 5)
         );
         setUserInnovationsCount(distinctSlots.size);
-      }
+      },
+      profile?.fullName
     );
     return () => unsub();
-  }, [userEmail]);
+  }, [userEmail, profile?.fullName]);
 
   // Search & Filter state for Media Repository
   const [searchMedia, setSearchMedia] = useState('');
@@ -143,16 +144,6 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   useEffect(() => {
     const unsubscribe = subscribeFullUserProfile(userEmail, (loaded) => {
       setProfile(loaded);
-      try {
-        const norm = userEmail.toLowerCase().trim();
-        if (loaded.avatarUrl && !loaded.avatarUrl.includes('ui-avatars.com')) {
-          localStorage.setItem(`acu_user_avatar_${norm}`, loaded.avatarUrl);
-        } else {
-          localStorage.removeItem(`acu_user_avatar_${norm}`);
-        }
-      } catch {
-        // ignore
-      }
     });
     return () => {
       unsubscribe();
@@ -235,7 +226,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       number: '6',
       title: 'คลังไอเดีย (IDEA)',
       badge: 'พอร์ทัลคลังความรู้ & ไอเดียการสอน',
-      description: 'รวมเว็บไซต์หลักทางการ สสวท. สพฐ. สช. คู่มือ AI คลังวิจัย ThaiLIS/TCI ข้อสอบ และชุมชนครู insKru / Starfish Labz',
+      description: 'รวมเว็บไซต์หลักทางการ สสวท. สพฐ. สช. คู่มือ AI ศธ. คลังวิจัย ThaiLIS/TCI ข้อสอบ และเพจแชร์สื่อ',
       icon: Lightbulb,
       gradient: 'from-yellow-500 via-amber-500 to-orange-500',
       bgLight: 'bg-yellow-50/70 hover:bg-yellow-50',
@@ -309,14 +300,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     setNewIdeaDesc('');
   };
 
-  // Avatar calculation: once Firestore profile is loaded, prefer its exact avatarUrl cleanly
+  // Avatar calculation
   const storedLocalAvatar = typeof window !== 'undefined'
     ? (localStorage.getItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`) || localStorage.getItem(`acu_user_avatar_${userEmail}`) || '')
     : '';
-  const realAvatarUrl = profile
-    ? (profile.avatarUrl && !profile.avatarUrl.includes('ui-avatars.com') ? profile.avatarUrl : '')
-    : (storedLocalAvatar && !storedLocalAvatar.includes('ui-avatars.com') ? storedLocalAvatar : '');
-  const avatarSrc = realAvatarUrl || `https://ui-avatars.com/api/?name=${encodeURIComponent(
+  const avatarSrc = profile?.avatarUrl || storedLocalAvatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(
     profile?.fullName || userEmail
   )}&background=1e40af&color=ffffff&size=160&bold=true`;
 
@@ -884,16 +872,11 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
         onClose={() => setIsProfileModalOpen(false)}
         userEmail={userEmail}
         userName={profile?.fullName || profile?.displayName || userEmail}
-        avatarUrl={realAvatarUrl}
+        avatarUrl={avatarSrc}
         currentUserEmail={userEmail}
         onAvatarUpdated={(newAvatar) => {
           try {
-            const norm = userEmail.toLowerCase().trim();
-            if (newAvatar) {
-              localStorage.setItem(`acu_user_avatar_${norm}`, newAvatar);
-            } else {
-              localStorage.removeItem(`acu_user_avatar_${norm}`);
-            }
+            localStorage.setItem(`acu_user_avatar_${userEmail.toLowerCase().trim()}`, newAvatar);
           } catch {}
           setProfile(prev => prev ? { ...prev, avatarUrl: newAvatar } : null);
         }}

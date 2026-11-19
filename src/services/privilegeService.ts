@@ -4,20 +4,13 @@ import {
   setDoc,
   getDoc,
   onSnapshot,
+  query,
+  where,
+  updateDoc
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
-import {
-  subscribeSharedIdeas,
-  subscribeAllInnovations,
-  subscribeAllSubmissions,
-  subscribeTeacherMedia,
-  saveSharedIdea,
-  SharedIdeaItem,
-  InnovationSubmission,
-  FacilitySubmission,
-  TeacherMediaWork,
-} from './submissionService';
-import { getCleanRealName, subscribeAllUserProfiles, FullUserProfile } from './userProfileService';
+import { db } from '../firebase';
+import { ADMIN_TARGET_EMAIL } from './submissionService';
+import { getCleanRealName } from './userProfileService';
 
 export const TARGET_SHARE_COUNT = 20;
 export const PICKUP_LOCATION = 'ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์)';
@@ -130,62 +123,6 @@ export interface TeacherPrivilegeAdminItem {
 
 const CLAIMS_COLLECTION = 'reward_privilege_claims';
 
-// Multiplexed reward claims listener + cached summaries for 0ms opening
-let sharedLatestClaimsMap: Record<string, RewardClaimRecord> | null = null;
-const claimsListeners = new Set<(map: Record<string, RewardClaimRecord>) => void>();
-let unsubSharedClaimsFs: (() => void) | null = null;
-let sharedLatestPrivilegeSummaries: TeacherPrivilegeAdminItem[] | null = null;
-
-function broadcastClaimsMap(map: Record<string, RewardClaimRecord>): void {
-  sharedLatestClaimsMap = map;
-  claimsListeners.forEach((cb) => {
-    try {
-      cb(map);
-    } catch (e) {
-      console.warn('Claims listener error:', e);
-    }
-  });
-}
-
-function subscribeAllClaimsMap(cb: (map: Record<string, RewardClaimRecord>) => void): () => void {
-  claimsListeners.add(cb);
-  if (sharedLatestClaimsMap) {
-    cb(sharedLatestClaimsMap);
-  }
-  if (!unsubSharedClaimsFs) {
-    try {
-      unsubSharedClaimsFs = onSnapshot(
-        collection(db, CLAIMS_COLLECTION),
-        (snap) => {
-          const map: Record<string, RewardClaimRecord> = {};
-          snap.forEach((d) => {
-            const data = d.data() as RewardClaimRecord;
-            if (data.userEmail) {
-              map[data.userEmail.trim().toLowerCase()] = data;
-            }
-          });
-          broadcastClaimsMap(map);
-        },
-        (err) => {
-          if (isQuotaExceededError(err)) notifyQuotaExceeded();
-          broadcastClaimsMap(sharedLatestClaimsMap || {});
-        }
-      );
-    } catch {
-      broadcastClaimsMap(sharedLatestClaimsMap || {});
-    }
-  }
-  return () => {
-    claimsListeners.delete(cb);
-    if (claimsListeners.size === 0 && unsubSharedClaimsFs) {
-      try {
-        unsubSharedClaimsFs();
-      } catch {}
-      unsubSharedClaimsFs = null;
-    }
-  };
-}
-
 /**
  * Get safe document id for user email
  */
@@ -195,7 +132,6 @@ export function getClaimDocId(email: string): string {
 
 /**
  * Subscribe to a single user's privilege status in real time
- * Reuses already-multiplexed shared collections for instant 0ms rendering & zero extra collection reads.
  */
 export function subscribeUserPrivilegeStatus(
   userEmail: string,
@@ -225,11 +161,11 @@ export function subscribeUserPrivilegeStatus(
   let innovationsList: SharedPostItem[] = [];
   let facilitiesList: SharedPostItem[] = [];
   let mediaList: SharedPostItem[] = [];
-  let claimData: RewardClaimRecord | null = sharedLatestClaimsMap?.[normEmail] || null;
+  let claimData: RewardClaimRecord | null = null;
   let teacherDisplayName = userEmail.split('@')[0];
-  let scheduled = false;
 
   const computeAndEmit = () => {
+    // Combine all shared posts
     const allPostsMap = new Map<string, SharedPostItem>();
     [...ideasList, ...innovationsList, ...facilitiesList, ...mediaList].forEach((p) => {
       allPostsMap.set(p.id, p);
@@ -269,80 +205,100 @@ export function subscribeUserPrivilegeStatus(
     });
   };
 
-  const scheduleCompute = () => {
-    if (scheduled) return;
-    scheduled = true;
-    queueMicrotask(() => {
-      scheduled = false;
+  // 1. Listen to shared ideas
+  const unsubIdeas = onSnapshot(
+    query(collection(db, 'shared_ideas'), where('creatorEmail', '==', normEmail)),
+    (snap) => {
+      ideasList = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        ideasList.push({
+          id: d.id,
+          title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
+          source: 'idea',
+          sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
+          category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
+          url: data.url || '',
+          createdAt: data.createdAt || new Date().toISOString(),
+        });
+      });
       computeAndEmit();
-    });
-  };
+    },
+    () => computeAndEmit()
+  );
 
-  const unsubIdeas = subscribeSharedIdeas((all: SharedIdeaItem[]) => {
-    ideasList = all
-      .filter((d) => (d.creatorEmail || '').trim().toLowerCase() === normEmail && !d.id.startsWith('idea-seed-'))
-      .map((d) => ({
-        id: d.id,
-        title: d.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
-        source: 'idea' as const,
-        sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
-        category: d.categoryLabel || d.category || 'แหล่งการเรียนรู้',
-        url: d.url || '',
-        createdAt: d.createdAt || new Date().toISOString(),
-      }));
-    scheduleCompute();
-  });
-
-  const unsubInnovations = subscribeAllInnovations((all: InnovationSubmission[]) => {
-    innovationsList = all
-      .filter((d) => (d.userEmail || '').trim().toLowerCase() === normEmail)
-      .map((d) => {
-        if (d.teacherName) teacherDisplayName = d.teacherName;
-        return {
+  // 2. Listen to innovation submissions (5 items)
+  const unsubInnovations = onSnapshot(
+    query(collection(db, 'teacher_innovations_submissions'), where('userEmail', '==', normEmail)),
+    (snap) => {
+      innovationsList = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.teacherName) teacherDisplayName = data.teacherName;
+        innovationsList.push({
           id: d.id,
-          title: d.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${d.itemNumber || 1}: ${d.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
-          source: 'innovation' as const,
+          title: data.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
+          source: 'innovation',
           sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
-          category: d.mediaType || d.gradeLevel || 'สื่อนวัตกรรม',
-          url: d.onlineUrl || '',
-          createdAt: d.submittedAt || new Date().toISOString(),
-        };
+          category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
+          url: data.onlineUrl || '',
+          createdAt: data.submittedAt || new Date().toISOString(),
+        });
       });
-    scheduleCompute();
-  });
+      computeAndEmit();
+    },
+    () => computeAndEmit()
+  );
 
-  const unsubFacilities = subscribeAllSubmissions((all: FacilitySubmission[]) => {
-    facilitiesList = all
-      .filter((d) => (d.userEmail || '').trim().toLowerCase() === normEmail && Boolean(d.learningCenter))
-      .map((d) => {
-        if (d.teacherName) teacherDisplayName = d.teacherName;
-        return {
-          id: d.id,
-          title: `บันทึกการใช้ ${d.learningCenter}`,
-          source: 'facility' as const,
-          sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
-          category: d.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
-          createdAt: d.createdAt || d.usageDateTime || new Date().toISOString(),
-        };
+  // 3. Listen to facility usage records (33 learning centers)
+  const unsubFacilities = onSnapshot(
+    query(collection(db, 'system_test_submissions'), where('userEmail', '==', normEmail)),
+    (snap) => {
+      facilitiesList = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.learningCenter) {
+          if (data.teacherName) teacherDisplayName = data.teacherName;
+          facilitiesList.push({
+            id: d.id,
+            title: `บันทึกการใช้ ${data.learningCenter}`,
+            source: 'facility',
+            sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
+            category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
+            createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
+          });
+        }
       });
-    scheduleCompute();
-  });
+      computeAndEmit();
+    },
+    () => computeAndEmit()
+  );
 
-  const unsubMedia = subscribeTeacherMedia((all: TeacherMediaWork[]) => {
-    mediaList = all
-      .filter((d) => (d.submittedByEmail || '').trim().toLowerCase() === normEmail && Boolean(d.title) && !d.id.startsWith('seed-'))
-      .map((d) => ({
-        id: d.id,
-        title: d.title,
-        source: 'media' as const,
-        sourceLabel: 'คลังสื่อผลิตเอง',
-        category: d.subjectGroup || d.mediaType || 'คลังสื่อ',
-        url: d.onlineUrl || '',
-        createdAt: d.createdAt || new Date().toISOString(),
-      }));
-    scheduleCompute();
-  });
+  // 4. Listen to teacher media repository (self-produced media)
+  const unsubMedia = onSnapshot(
+    query(collection(db, 'teacher_media_repository'), where('submittedByEmail', '==', normEmail)),
+    (snap) => {
+      mediaList = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.title && !d.id.startsWith('seed-')) {
+          mediaList.push({
+            id: d.id,
+            title: data.title,
+            source: 'media',
+            sourceLabel: 'คลังสื่อผลิตเอง',
+            category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
+            url: data.onlineUrl || '',
+            createdAt: data.createdAt || new Date().toISOString(),
+          });
+        }
+      });
+      computeAndEmit();
+    },
+    () => computeAndEmit()
+  );
 
+  // 5. Listen to reward claim doc
   const docRef = doc(db, CLAIMS_COLLECTION, getClaimDocId(normEmail));
   const unsubClaim = onSnapshot(
     docRef,
@@ -352,13 +308,10 @@ export function subscribeUserPrivilegeStatus(
       } else {
         claimData = null;
       }
-      scheduleCompute();
+      computeAndEmit();
     },
-    () => scheduleCompute()
+    () => computeAndEmit()
   );
-
-  // Emit initial state synchronously right away from multiplexed RAM caches
-  computeAndEmit();
 
   return () => {
     unsubIdeas();
@@ -406,9 +359,6 @@ export async function submitTeacherRewardClaim(data: {
     };
 
     await setDoc(docRef, payload, { merge: true });
-    if (sharedLatestClaimsMap) {
-      broadcastClaimsMap({ ...sharedLatestClaimsMap, [normEmail]: payload });
-    }
     return { success: true };
   } catch (err: any) {
     console.error('Error submitting reward claim:', err);
@@ -434,8 +384,6 @@ export async function adminUpdateRewardClaim(data: {
     const nowIso = new Date().toISOString();
 
     const updatePayload: Partial<RewardClaimRecord> = {
-      id: docId,
-      userEmail: normEmail,
       claimStatus: data.claimStatus,
       updatedAt: nowIso,
       pickupLocation: PICKUP_LOCATION,
@@ -461,13 +409,6 @@ export async function adminUpdateRewardClaim(data: {
     }
 
     await setDoc(docRef, updatePayload, { merge: true });
-    if (sharedLatestClaimsMap) {
-      const existing = sharedLatestClaimsMap[normEmail] || ({} as RewardClaimRecord);
-      broadcastClaimsMap({
-        ...sharedLatestClaimsMap,
-        [normEmail]: { ...existing, ...updatePayload } as RewardClaimRecord,
-      });
-    }
     return { success: true };
   } catch (err: any) {
     console.error('Error updating reward claim by admin:', err);
@@ -486,123 +427,77 @@ export async function quickShareEducationalResource(data: {
   userEmail: string;
   teacherName: string;
 }): Promise<{ success: boolean; id?: string; error?: string }> {
-  return saveSharedIdea({
-    title: data.title,
-    description: data.description.trim() || 'แชร์แหล่งการเรียนรู้เพื่อการพัฒนาคุณภาพการศึกษาและสิทธิพิเศษคลังสื่อ',
-    category: 'resource_share',
-    categoryLabel: data.category || 'แหล่งการเรียนรู้/สื่อนวัตกรรม',
-    url: data.url,
-    tags: ['สิทธิพิเศษคลังสื่อ', 'แชร์แหล่งเรียนรู้', '20โพสต์รับรางวัล'],
-    creatorEmail: data.userEmail,
-    creatorName: data.teacherName,
-  });
+  try {
+    const id = `idea_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+    const nowIso = new Date().toISOString();
+    const docRef = doc(db, 'shared_ideas', id);
+
+    const payload = {
+      id,
+      title: data.title.trim(),
+      description: data.description.trim() || 'แชร์แหล่งการเรียนรู้เพื่อการพัฒนาคุณภาพการศึกษาและสิทธิพิเศษคลังสื่อ',
+      category: 'resource_share',
+      categoryLabel: data.category || 'แหล่งการเรียนรู้/สื่อนวัตกรรม',
+      url: data.url?.trim() || '',
+      tags: ['สิทธิพิเศษคลังสื่อ', 'แชร์แหล่งเรียนรู้', '20โพสต์รับรางวัล'],
+      creatorEmail: data.userEmail.trim().toLowerCase(),
+      creatorName: data.teacherName.trim() || data.userEmail,
+      createdAt: nowIso,
+      ratingAvg: 5.0,
+      ratingCount: 1,
+      userRatings: {
+        [data.userEmail.replace(/[^a-zA-Z0-9]/g, '_')]: 5,
+      },
+    };
+
+    await setDoc(docRef, payload);
+    return { success: true, id };
+  } catch (err: any) {
+    console.error('Failed to quick share educational resource:', err);
+    return { success: false, error: err?.message || 'แชร์แหล่งการเรียนรู้ไม่สำเร็จ' };
+  }
 }
 
 /**
  * Subscribe to ALL teachers' privilege and rewards status for the Admin Dashboard
- * Uses shared multiplexed streams + O(N) Map grouping + instant 0ms cached emit.
  */
 export function subscribeAllTeachersPrivilegeStatus(
   onUpdate: (summaries: TeacherPrivilegeAdminItem[]) => void
 ): () => void {
-  if (sharedLatestPrivilegeSummaries) {
-    onUpdate(sharedLatestPrivilegeSummaries);
-  }
-
-  let allIdeas: SharedIdeaItem[] = [];
-  let allInnovations: InnovationSubmission[] = [];
-  let allFacilities: FacilitySubmission[] = [];
-  let allMedia: TeacherMediaWork[] = [];
-  let claimsMap: Record<string, RewardClaimRecord> = sharedLatestClaimsMap || {};
-  let profilesMap: Record<string, FullUserProfile> = {};
-  let scheduled = false;
+  let allIdeas: { creatorEmail: string; post: SharedPostItem }[] = [];
+  let allInnovations: { userEmail: string; teacherName?: string; gradeLevel?: string; post: SharedPostItem }[] = [];
+  let allFacilities: { userEmail: string; teacherName?: string; subjectGroup?: string; post: SharedPostItem }[] = [];
+  let allMedia: { submittedByEmail: string; post: SharedPostItem }[] = [];
+  let claimsMap: Record<string, RewardClaimRecord> = {};
+  let profilesMap: Record<string, any> = {};
 
   const computeAll = () => {
-    const postsByEmail = new Map<string, Map<string, SharedPostItem>>();
-    const innovMetaByEmail = new Map<string, { teacherName?: string; gradeLevel?: string }>();
-    const facMetaByEmail = new Map<string, { teacherName?: string; subjectGroup?: string }>();
+    // Gather all teacher emails
     const allEmails = new Set<string>();
-
-    const addPost = (rawEmail: string | undefined, post: SharedPostItem) => {
-      const em = (rawEmail || '').trim().toLowerCase();
-      if (!em) return;
-      allEmails.add(em);
-      let emailPosts = postsByEmail.get(em);
-      if (!emailPosts) {
-        emailPosts = new Map<string, SharedPostItem>();
-        postsByEmail.set(em, emailPosts);
-      }
-      emailPosts.set(post.id, post);
-    };
-
-    for (const i of allIdeas) {
-      if (!i.creatorEmail || i.id.startsWith('idea-seed-')) continue;
-      addPost(i.creatorEmail, {
-        id: i.id,
-        title: i.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
-        source: 'idea',
-        sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
-        category: i.categoryLabel || i.category || 'แหล่งการเรียนรู้',
-        url: i.url || '',
-        createdAt: i.createdAt || '',
-      });
-    }
-
-    for (const i of allInnovations) {
-      if (!i.userEmail) continue;
-      const em = i.userEmail.trim().toLowerCase();
-      if (i.teacherName && !innovMetaByEmail.has(em)) {
-        innovMetaByEmail.set(em, { teacherName: i.teacherName, gradeLevel: i.gradeLevel });
-      }
-      addPost(em, {
-        id: i.id,
-        title: i.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${i.itemNumber || 1}: ${i.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
-        source: 'innovation',
-        sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
-        category: i.mediaType || i.gradeLevel || 'สื่อนวัตกรรม',
-        url: i.onlineUrl || '',
-        createdAt: i.submittedAt || '',
-      });
-    }
-
-    for (const f of allFacilities) {
-      if (!f.userEmail || !f.learningCenter) continue;
-      const em = f.userEmail.trim().toLowerCase();
-      if (f.teacherName && !facMetaByEmail.has(em)) {
-        facMetaByEmail.set(em, { teacherName: f.teacherName, subjectGroup: f.subjectGroup });
-      }
-      addPost(em, {
-        id: f.id,
-        title: `บันทึกการใช้ ${f.learningCenter}`,
-        source: 'facility',
-        sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
-        category: f.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
-        createdAt: f.createdAt || f.usageDateTime || '',
-      });
-    }
-
-    for (const m of allMedia) {
-      if (!m.submittedByEmail || m.id.startsWith('seed-')) continue;
-      addPost(m.submittedByEmail, {
-        id: m.id,
-        title: m.title || 'คลังสื่อผลิตเอง',
-        source: 'media',
-        sourceLabel: 'คลังสื่อผลิตเอง',
-        category: m.subjectGroup || m.mediaType || 'คลังสื่อ',
-        url: m.onlineUrl || '',
-        createdAt: m.createdAt || '',
-      });
-    }
-
-    for (const e of Object.keys(claimsMap)) allEmails.add(e.trim().toLowerCase());
-    for (const e of Object.keys(profilesMap)) allEmails.add(e.trim().toLowerCase());
+    allIdeas.forEach((i) => i.creatorEmail && allEmails.add(i.creatorEmail));
+    allInnovations.forEach((i) => i.userEmail && allEmails.add(i.userEmail));
+    allFacilities.forEach((f) => f.userEmail && allEmails.add(f.userEmail));
+    allMedia.forEach((m) => m.submittedByEmail && allEmails.add(m.submittedByEmail));
+    Object.keys(claimsMap).forEach((e) => allEmails.add(e));
+    Object.keys(profilesMap).forEach((e) => allEmails.add(e));
 
     const resultList: TeacherPrivilegeAdminItem[] = [];
 
-    allEmails.forEach((email) => {
+    allEmails.forEach((rawEmail) => {
+      const email = rawEmail.trim().toLowerCase();
       if (!email) return;
-      const emailPostsMap = postsByEmail.get(email);
-      const uniquePosts = emailPostsMap ? Array.from(emailPostsMap.values()) : [];
+
+      // Collect teacher posts
+      const posts: SharedPostItem[] = [];
+      allIdeas.filter((i) => i.creatorEmail === email).forEach((i) => posts.push(i.post));
+      allInnovations.filter((i) => i.userEmail === email).forEach((i) => posts.push(i.post));
+      allFacilities.filter((f) => f.userEmail === email).forEach((f) => posts.push(f.post));
+      allMedia.filter((m) => m.submittedByEmail === email).forEach((m) => posts.push(m.post));
+
+      // Deduplicate posts by ID
+      const uniquePostsMap = new Map<string, SharedPostItem>();
+      posts.forEach((p) => uniquePostsMap.set(p.id, p));
+      const uniquePosts = Array.from(uniquePostsMap.values());
       uniquePosts.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
 
       const totalShares = uniquePosts.length;
@@ -611,11 +506,14 @@ export function subscribeAllTeachersPrivilegeStatus(
 
       const claim = claimsMap[email];
       const profile = profilesMap[email];
-      const innovMatch = innovMetaByEmail.get(email);
-      const facMatch = facMetaByEmail.get(email);
 
+      // Discover best teacher name
+      const innovMatch = allInnovations.find((i) => i.userEmail === email && i.teacherName);
+      const facMatch = allFacilities.find((f) => f.userEmail === email && f.teacherName);
       const rawName = claim?.teacherName || profile?.fullName || innovMatch?.teacherName || facMatch?.teacherName || profile?.displayName || email.split('@')[0];
       const name = getCleanRealName(rawName, email);
+
+      // Department or subject
       const department = profile?.school || innovMatch?.gradeLevel || facMatch?.subjectGroup || 'โรงเรียนอัสสัมชัญอุบลราชธานี';
 
       let claimStatus: 'not_eligible' | 'eligible' | 'pending_pickup' | 'received' = 'not_eligible';
@@ -641,11 +539,12 @@ export function subscribeAllTeachersPrivilegeStatus(
         receivedAt: claim?.receivedAt || null,
         pickupLocation: PICKUP_LOCATION,
         adminNote: claim?.adminNote || '',
-        updatedAt: claim?.updatedAt || '',
+        updatedAt: claim?.updatedAt || new Date().toISOString(),
         posts: uniquePosts,
       });
     });
 
+    // Sort: received/pending_pickup first, then eligible (>= 20), then by total shares descending
     resultList.sort((a, b) => {
       const score = (item: TeacherPrivilegeAdminItem) => {
         if (item.claimStatus === 'received') return 4;
@@ -658,48 +557,151 @@ export function subscribeAllTeachersPrivilegeStatus(
       return b.totalShares - a.totalShares;
     });
 
-    sharedLatestPrivilegeSummaries = resultList;
     onUpdate(resultList);
   };
 
-  const scheduleCompute = () => {
-    if (scheduled) return;
-    scheduled = true;
-    queueMicrotask(() => {
-      scheduled = false;
+  // 1. Shared ideas
+  const unsubIdeas = onSnapshot(
+    collection(db, 'shared_ideas'),
+    (snap) => {
+      allIdeas = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.creatorEmail) {
+          allIdeas.push({
+            creatorEmail: data.creatorEmail.trim().toLowerCase(),
+            post: {
+              id: d.id,
+              title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
+              source: 'idea',
+              sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
+              category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
+              url: data.url || '',
+              createdAt: data.createdAt || new Date().toISOString(),
+            },
+          });
+        }
+      });
       computeAll();
-    });
-  };
+    },
+    () => computeAll()
+  );
 
-  const unsubIdeas = subscribeSharedIdeas((list) => {
-    allIdeas = list;
-    scheduleCompute();
-  });
+  // 2. Innovations
+  const unsubInnov = onSnapshot(
+    collection(db, 'teacher_innovations_submissions'),
+    (snap) => {
+      allInnovations = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.userEmail) {
+          allInnovations.push({
+            userEmail: data.userEmail.trim().toLowerCase(),
+            teacherName: data.teacherName,
+            gradeLevel: data.gradeLevel,
+            post: {
+              id: d.id,
+              title: data.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
+              source: 'innovation',
+              sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
+              category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
+              url: data.onlineUrl || '',
+              createdAt: data.submittedAt || new Date().toISOString(),
+            },
+          });
+        }
+      });
+      computeAll();
+    },
+    () => computeAll()
+  );
 
-  const unsubInnov = subscribeAllInnovations((list) => {
-    allInnovations = list;
-    scheduleCompute();
-  });
+  // 3. Facilities
+  const unsubFac = onSnapshot(
+    collection(db, 'system_test_submissions'),
+    (snap) => {
+      allFacilities = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.userEmail && data.learningCenter) {
+          allFacilities.push({
+            userEmail: data.userEmail.trim().toLowerCase(),
+            teacherName: data.teacherName,
+            subjectGroup: data.subjectGroup,
+            post: {
+              id: d.id,
+              title: `บันทึกการใช้ ${data.learningCenter}`,
+              source: 'facility',
+              sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
+              category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
+              createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
+            },
+          });
+        }
+      });
+      computeAll();
+    },
+    () => computeAll()
+  );
 
-  const unsubFac = subscribeAllSubmissions((list) => {
-    allFacilities = list;
-    scheduleCompute();
-  });
+  // 4. Teacher Media Repository
+  const unsubMedia = onSnapshot(
+    collection(db, 'teacher_media_repository'),
+    (snap) => {
+      allMedia = [];
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.submittedByEmail && !d.id.startsWith('seed-')) {
+          allMedia.push({
+            submittedByEmail: data.submittedByEmail.trim().toLowerCase(),
+            post: {
+              id: d.id,
+              title: data.title || 'คลังสื่อผลิตเอง',
+              source: 'media',
+              sourceLabel: 'คลังสื่อผลิตเอง',
+              category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
+              url: data.onlineUrl || '',
+              createdAt: data.createdAt || new Date().toISOString(),
+            },
+          });
+        }
+      });
+      computeAll();
+    },
+    () => computeAll()
+  );
 
-  const unsubMedia = subscribeTeacherMedia((list) => {
-    allMedia = list;
-    scheduleCompute();
-  });
+  // 5. Reward claims
+  const unsubClaims = onSnapshot(
+    collection(db, CLAIMS_COLLECTION),
+    (snap) => {
+      claimsMap = {};
+      snap.forEach((d) => {
+        const data = d.data() as RewardClaimRecord;
+        if (data.userEmail) {
+          claimsMap[data.userEmail.trim().toLowerCase()] = data;
+        }
+      });
+      computeAll();
+    },
+    () => computeAll()
+  );
 
-  const unsubClaims = subscribeAllClaimsMap((map) => {
-    claimsMap = map;
-    scheduleCompute();
-  });
-
-  const unsubProfiles = subscribeAllUserProfiles((map) => {
-    profilesMap = map;
-    scheduleCompute();
-  });
+  // 6. User profiles for real names and roles
+  const unsubProfiles = onSnapshot(
+    collection(db, 'user_profiles'),
+    (snap) => {
+      profilesMap = {};
+      snap.forEach((d) => {
+        const data = d.data();
+        if (data.email) {
+          profilesMap[data.email.trim().toLowerCase()] = data;
+        }
+      });
+      computeAll();
+    },
+    () => computeAll()
+  );
 
   return () => {
     unsubIdeas();
