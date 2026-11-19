@@ -27,6 +27,7 @@ import {
   syncLoginLogsFromServer,
 } from './services/auditService';
 import {
+  clearSessionAvatarSyncMemo,
   getCachedUserProfile,
   syncUserAvatarOnAuthOrLogin,
 } from './services/userProfileService';
@@ -169,6 +170,7 @@ export default function App() {
 
   const handleLogout = useCallback((reason?: 'manual' | 'timeout') => {
     setLoggedInUser(null);
+    clearSessionAvatarSyncMemo();
     signOut(auth).catch(() => {
       // ignore signOut errors
     });
@@ -187,6 +189,7 @@ export default function App() {
 
   const handleLoginSuccess = (email: string, loginMethod?: string) => {
     const normalized = email.toLowerCase().trim();
+    clearSessionAvatarSyncMemo(normalized);
     setLoggedInUser(normalized);
     setSessionTimedOut(false);
     try {
@@ -195,7 +198,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, true).catch(() => {});
+    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser).catch(() => {});
     recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 

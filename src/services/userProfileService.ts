@@ -11,7 +11,6 @@ import {
   deleteDoc, 
   writeBatch, 
   query, 
-  where,
   limit
 } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
@@ -266,86 +265,108 @@ function setStoredAvatarUrl(email: string, avatarUrl: string): void {
   }
 }
 
+// Guard concurrent / redundant login syncs and cache single users/{uid} read per session
+const inFlightAvatarSyncs = new Map<string, Promise<FullUserProfile | null>>();
+const lastAvatarSyncTime = new Map<string, number>();
+const sessionUsersDocCache = new Map<string, {
+  uid: string;
+  data: Record<string, any> | null;
+  photoURL: string;
+  hasDeadBlob: boolean;
+}>();
+
 /**
- * Look up user's photo document in Firestore `users` collection:
- * 1) Match by canonical `users/{uid}` first
- * 2) Fallback query by normalized lowercase `email` (`limit(1)`)
+ * Clear per-session avatar sync memoization (e.g., on logout or explicit login)
  */
-async function lookupUsersDocByUidOrEmail(
-  email: string,
-  explicitUid?: string
+export function clearSessionAvatarSyncMemo(email?: string): void {
+  if (email) {
+    const norm = email.toLowerCase().trim();
+    for (const key of Array.from(inFlightAvatarSyncs.keys())) {
+      if (key.startsWith(`${norm}::`)) inFlightAvatarSyncs.delete(key);
+    }
+    for (const key of Array.from(lastAvatarSyncTime.keys())) {
+      if (key.startsWith(`${norm}::`)) lastAvatarSyncTime.delete(key);
+    }
+    const uid = resolveUserUid(norm);
+    if (uid) sessionUsersDocCache.delete(uid);
+  } else {
+    inFlightAvatarSyncs.clear();
+    lastAvatarSyncTime.clear();
+    sessionUsersDocCache.clear();
+  }
+}
+
+/**
+ * Strictly read ONLY the current user's single document by UID (`doc(db, 'users', uid)`).
+ * Wrapped in strict silent try/catch so permission-denied or quota errors NEVER block main data.
+ * Caches result per session to prevent redundant reads.
+ */
+async function readSingleUserDocByUid(
+  uid: string,
+  forceRefresh = false
 ): Promise<{
   uid: string;
-  docId: string;
   data: Record<string, any> | null;
   photoURL: string;
   hasDeadBlob: boolean;
 }> {
-  const normEmail = (email || '').toLowerCase().trim();
-  const uid = resolveUserUid(normEmail, explicitUid);
-  if (!normEmail && !uid) {
-    return { uid: '', docId: '', data: null, photoURL: '', hasDeadBlob: false };
+  const cleanUid = (uid || '').trim();
+  if (!cleanUid) {
+    return { uid: '', data: null, photoURL: '', hasDeadBlob: false };
   }
 
-  // 1) Try users/{uid} first
-  if (uid) {
-    try {
-      const snap = await getDoc(doc(db, 'users', uid));
-      if (snap.exists()) {
-        const d = snap.data();
-        const rawPhoto = d.photoURL || d.avatarUrl || '';
-        const cleanPhoto = sanitizeAvatarUrl(rawPhoto);
-        const hasDeadBlob = isBlobUrl(d.photoURL) || isBlobUrl(d.avatarUrl);
-        if (cleanPhoto || hasDeadBlob) {
-          return { uid, docId: snap.id, data: d, photoURL: cleanPhoto, hasDeadBlob };
-        }
-        // Keep data reference in case email query finds another doc with a custom photoURL
-        const fallbackQuery = normEmail
-          ? await getDocs(query(collection(db, 'users'), where('email', '==', normEmail), limit(1)))
-          : null;
-        const matched = fallbackQuery?.docs?.[0];
-        if (matched && matched.id !== snap.id) {
-          const md = matched.data();
-          const mClean = sanitizeAvatarUrl(md.photoURL || md.avatarUrl);
-          if (mClean) {
-            return {
-              uid,
-              docId: matched.id,
-              data: md,
-              photoURL: mClean,
-              hasDeadBlob: isBlobUrl(md.photoURL) || isBlobUrl(md.avatarUrl),
-            };
-          }
-        }
-        return { uid, docId: snap.id, data: d, photoURL: '', hasDeadBlob: false };
-      }
-    } catch (err) {
-      if (isQuotaExceededError(err)) notifyQuotaExceeded();
+  if (!forceRefresh && sessionUsersDocCache.has(cleanUid)) {
+    return sessionUsersDocCache.get(cleanUid)!;
+  }
+
+  try {
+    const snap = await getDoc(doc(db, 'users', cleanUid));
+    if (snap.exists()) {
+      const d = snap.data();
+      const rawPhoto = d.photoURL || d.avatarUrl || '';
+      const cleanPhoto = sanitizeAvatarUrl(rawPhoto);
+      const hasDeadBlob = isBlobUrl(d.photoURL) || isBlobUrl(d.avatarUrl);
+      const result = {
+        uid: cleanUid,
+        data: d,
+        photoURL: isUiAvatarPlaceholder(cleanPhoto) ? '' : cleanPhoto,
+        hasDeadBlob,
+      };
+      sessionUsersDocCache.set(cleanUid, result);
+      return result;
     }
+    const emptyResult = { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
+    sessionUsersDocCache.set(cleanUid, emptyResult);
+    return emptyResult;
+  } catch {
+    // Strictly isolated: silently fall back on permission-denied / quota / network errors
+    return { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
   }
+}
 
-  // 2) Fallback: query users collection by normalized lowercase email
-  if (normEmail) {
-    try {
-      const q = query(collection(db, 'users'), where('email', '==', normEmail), limit(1));
-      const snap = await getDocs(q);
-      if (!snap.empty) {
-        const found = snap.docs[0];
-        const d = found.data();
-        return {
-          uid: uid || found.id,
-          docId: found.id,
-          data: d,
-          photoURL: sanitizeAvatarUrl(d.photoURL || d.avatarUrl),
-          hasDeadBlob: isBlobUrl(d.photoURL) || isBlobUrl(d.avatarUrl),
-        };
-      }
-    } catch (err) {
-      if (isQuotaExceededError(err)) notifyQuotaExceeded();
-    }
+/**
+ * Strictly write ONLY to the user's single document (`doc(db, 'users', uid)`) inside silent try/catch.
+ */
+async function writeSingleUserDocByUid(
+  uid: string,
+  payload: Record<string, any>
+): Promise<void> {
+  const cleanUid = (uid || '').trim();
+  if (!cleanUid) return;
+  try {
+    await setDoc(doc(db, 'users', cleanUid), payload, { merge: true });
+    const existing = sessionUsersDocCache.get(cleanUid);
+    const nextData = { ...(existing?.data || {}), ...payload };
+    const cleanPhoto = sanitizeAvatarUrl(nextData.photoURL || nextData.avatarUrl);
+    sessionUsersDocCache.set(cleanUid, {
+      uid: cleanUid,
+      data: nextData,
+      photoURL: isUiAvatarPlaceholder(cleanPhoto) ? '' : cleanPhoto,
+      hasDeadBlob: false,
+    });
+  } catch {
+    // Strictly isolated: permission-denied or quota errors on users/{uid} never break app or main data
   }
-
-  return { uid, docId: uid, data: null, photoURL: '', hasDeadBlob: false };
 }
 
 /**
@@ -384,7 +405,7 @@ export async function saveUserPhotoToFirestore(
     });
   }
 
-  // 2) Persist immediately to Firestore `users/{uid}` and mirror to `user_profiles/{safeDocId}`
+  // 2) Persist immediately to Firestore `users/{uid}` and mirror to `user_profiles/{safeDocId}` (isolated try/catch)
   const photoPayload = {
     uid: resolvedUid,
     email: normEmail,
@@ -393,16 +414,12 @@ export async function saveUserPhotoToFirestore(
     updatedAt: nowIso,
   };
 
-  const results = await Promise.allSettled([
-    setDoc(doc(db, 'users', resolvedUid), photoPayload, { merge: true }),
-    setDoc(doc(db, 'user_profiles', safeDocId), photoPayload, { merge: true }),
-  ]);
+  await writeSingleUserDocByUid(resolvedUid, photoPayload);
 
-  const anyQuota = results.some(
-    (r) => r.status === 'rejected' && isQuotaExceededError(r.reason)
-  );
-  if (anyQuota) {
-    notifyQuotaExceeded();
+  try {
+    await setDoc(doc(db, 'user_profiles', safeDocId), photoPayload, { merge: true });
+  } catch {
+    // Non-fatal: localStorage cache already holds the updated avatar
   }
 
   // 3) Update Firebase Auth profile if signed in with matching account & URL fits Auth length limits
@@ -434,15 +451,13 @@ export async function saveUserPhotoToFirestore(
   return cleanUrl;
 }
 
-// Guard concurrent / redundant login syncs to protect Firestore daily read quota
-const inFlightAvatarSyncs = new Map<string, Promise<FullUserProfile | null>>();
-const lastAvatarSyncTime = new Map<string, number>();
-
 /**
- * Synchronize user profile picture on login or auth state restoration (`onAuthStateChanged`):
- * - Checks `users/{uid}` first, falling back to normalized lowercase `email` query, then `user_profiles`
+ * Synchronize user profile picture ONCE on login or auth state restoration (`onAuthStateChanged`):
+ * - Reads ONLY the user's single document by UID (`doc(db, 'users', resolvedUid)`) inside strict try/catch
+ * - Never performs collection-wide queries on `users`
  * - Never overwrites a custom Firestore `photoURL` with the default Auth provider photo
  * - Auto-recovers valid cached Base64 `data:image/` avatars up to Firestore if Firestore is empty or holds a dead `blob:` URL
+ * - Reuses `localStorage` cache once fetched during the login session
  */
 export async function syncUserAvatarOnAuthOrLogin(
   email: string,
@@ -457,26 +472,32 @@ export async function syncUserAvatarOnAuthOrLogin(
   const normEmail = (email || authUser?.email || '').toLowerCase().trim();
   if (!normEmail) return null;
 
-  const syncKey = `${normEmail}::${authUser?.uid || ''}`;
+  const resolvedUid = resolveUserUid(normEmail, authUser?.uid);
+  const syncKey = `${normEmail}::${resolvedUid}`;
   const existingInFlight = inFlightAvatarSyncs.get(syncKey);
   if (existingInFlight) return existingInFlight;
 
+  const cachedNow = getCachedUserProfile(normEmail);
   const lastTime = lastAvatarSyncTime.get(syncKey) || 0;
-  if (!force && Date.now() - lastTime < 15000) {
-    return getCachedUserProfile(normEmail);
+  if (!force && (Date.now() - lastTime < 60000 || (sessionUsersDocCache.has(resolvedUid) && cachedNow))) {
+    return cachedNow;
   }
 
   const runSync = (async (): Promise<FullUserProfile | null> => {
     try {
-      const resolvedUid = resolveUserUid(normEmail, authUser?.uid);
       const safeDocId = getSafeDocId(normEmail);
 
-      const [usersLookup, profileSnap] = await Promise.all([
-        lookupUsersDocByUidOrEmail(normEmail, resolvedUid),
-        getDoc(doc(db, 'user_profiles', safeDocId)).catch(() => null),
-      ]);
+      // Isolated single-doc reads: permission-denied or quota errors on users/{uid} or user_profiles silently fall back
+      const usersLookup = await readSingleUserDocByUid(resolvedUid, force);
 
-      const profileData = profileSnap && profileSnap.exists() ? profileSnap.data() : null;
+      let profileData: Record<string, any> | null = null;
+      try {
+        const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
+        profileData = profileSnap.exists() ? profileSnap.data() : null;
+      } catch {
+        profileData = null;
+      }
+
       const firestoreUsersPhoto = sanitizeAvatarUrl(
         usersLookup.data?.photoURL || usersLookup.data?.avatarUrl
       );
@@ -512,25 +533,19 @@ export async function syncUserAvatarOnAuthOrLogin(
         // Strict Priority 1: Firestore custom photo ALWAYS wins; NEVER overwrite with Auth photoURL
         finalAvatar = firestoreCustomPhoto;
 
-        // Backfill users/{uid} if custom photo lived only in legacy user_profiles or old doc ID
-        if (
-          !isCustomAvatarUrl(firestoreUsersPhoto) ||
-          usersLookup.docId !== resolvedUid ||
-          !isCustomAvatarUrl(firestoreProfileAvatar)
-        ) {
-          await Promise.allSettled([
-            setDoc(
-              doc(db, 'users', resolvedUid),
-              {
-                uid: resolvedUid,
-                email: normEmail,
-                photoURL: finalAvatar,
-                avatarUrl: finalAvatar,
-                updatedAt: nowIso,
-              },
-              { merge: true }
-            ),
-            setDoc(
+        // Backfill users/{uid} or user_profiles if custom photo lived in only one of them
+        if (!isCustomAvatarUrl(firestoreUsersPhoto)) {
+          await writeSingleUserDocByUid(resolvedUid, {
+            uid: resolvedUid,
+            email: normEmail,
+            photoURL: finalAvatar,
+            avatarUrl: finalAvatar,
+            updatedAt: nowIso,
+          });
+        }
+        if (!isCustomAvatarUrl(firestoreProfileAvatar)) {
+          try {
+            await setDoc(
               doc(db, 'user_profiles', safeDocId),
               {
                 uid: resolvedUid,
@@ -540,25 +555,23 @@ export async function syncUserAvatarOnAuthOrLogin(
                 updatedAt: nowIso,
               },
               { merge: true }
-            ),
-          ]);
+            );
+          } catch {
+            // ignore
+          }
         }
       } else if (localBase64Candidate) {
         // Auto-Recovery: localStorage has valid Base64 while Firestore is empty or had dead blob:
         finalAvatar = localBase64Candidate;
-        await Promise.allSettled([
-          setDoc(
-            doc(db, 'users', resolvedUid),
-            {
-              uid: resolvedUid,
-              email: normEmail,
-              photoURL: finalAvatar,
-              avatarUrl: finalAvatar,
-              updatedAt: nowIso,
-            },
-            { merge: true }
-          ),
-          setDoc(
+        await writeSingleUserDocByUid(resolvedUid, {
+          uid: resolvedUid,
+          email: normEmail,
+          photoURL: finalAvatar,
+          avatarUrl: finalAvatar,
+          updatedAt: nowIso,
+        });
+        try {
+          await setDoc(
             doc(db, 'user_profiles', safeDocId),
             {
               uid: resolvedUid,
@@ -568,37 +581,37 @@ export async function syncUserAvatarOnAuthOrLogin(
               updatedAt: nowIso,
             },
             { merge: true }
-          ),
-        ]);
+          );
+        } catch {
+          // ignore
+        }
       } else if (authPhoto && !isUiAvatarPlaceholder(authPhoto)) {
         // Priority 2: Firebase Auth photoURL ONLY when Firestore has no custom photo
         finalAvatar = authPhoto;
-        await Promise.allSettled([
-          setDoc(
-            doc(db, 'users', resolvedUid),
-            {
-              uid: resolvedUid,
-              email: normEmail,
-              photoURL: finalAvatar,
-              updatedAt: nowIso,
-            },
-            { merge: true }
-          ),
-        ]);
+        await writeSingleUserDocByUid(resolvedUid, {
+          uid: resolvedUid,
+          email: normEmail,
+          photoURL: finalAvatar,
+          updatedAt: nowIso,
+        });
       } else if (firestoreHasDeadBlob) {
         // Scrub any legacy dead blob: URL stored in Firestore
-        await Promise.allSettled([
-          setDoc(
-            doc(db, 'users', resolvedUid),
-            { uid: resolvedUid, email: normEmail, photoURL: '', avatarUrl: '', updatedAt: nowIso },
-            { merge: true }
-          ),
-          setDoc(
+        await writeSingleUserDocByUid(resolvedUid, {
+          uid: resolvedUid,
+          email: normEmail,
+          photoURL: '',
+          avatarUrl: '',
+          updatedAt: nowIso,
+        });
+        try {
+          await setDoc(
             doc(db, 'user_profiles', safeDocId),
             { uid: resolvedUid, email: normEmail, photoURL: '', avatarUrl: '', updatedAt: nowIso },
             { merge: true }
-          ),
-        ]);
+          );
+        } catch {
+          // ignore
+        }
       } else {
         finalAvatar = firestoreUsersPhoto || firestoreProfileAvatar || '';
       }
@@ -672,12 +685,8 @@ export async function syncUserAvatarOnAuthOrLogin(
         window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: syncedProfile }));
       }
       return syncedProfile;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        notifyQuotaExceeded();
-      } else {
-        console.warn('Notice syncing user avatar on login:', err);
-      }
+    } catch {
+      // Strictly isolated: never fail or propagate errors from avatar/profile sync
       return getCachedUserProfile(normEmail);
     } finally {
       inFlightAvatarSyncs.delete(syncKey);
@@ -711,8 +720,8 @@ function sanitizeInnovations(items: any): InnovationItem[] {
 }
 
 /**
- * Real-time subscription to full user profile in Firestore (`users/{uid}` + `user_profiles`).
- * Automatically synchronizes profile data and avatar across all mobile and desktop devices.
+ * Real-time subscription to user's `user_profiles` document + single-read session-cached `users/{uid}` photo.
+ * Isolated with silent try/catch so profile/avatar errors NEVER block or break main app data.
  */
 export function subscribeFullUserProfile(
   email: string,
@@ -721,11 +730,14 @@ export function subscribeFullUserProfile(
   const normEmail = (email || '').toLowerCase().trim();
   if (!normEmail) return () => {};
 
+  const resolvedUid = resolveUserUid(normEmail);
   let profileDocData: Record<string, any> | null = null;
-  let usersDocData: Record<string, any> | null = null;
+  let usersDocData: Record<string, any> | null = sessionUsersDocCache.get(resolvedUid)?.data || null;
   let hasResolvedOnce = false;
+  let isActive = true;
 
   const emitMerged = () => {
+    if (!isActive) return;
     const cached = getCachedUserProfile(normEmail);
     const authPhoto = getMatchingAuthPhotoUrl(normEmail);
     const mergedAvatar = resolveDisplayAvatarUrl({
@@ -733,16 +745,20 @@ export function subscribeFullUserProfile(
       firestoreAvatarUrl: profileDocData?.photoURL || profileDocData?.avatarUrl,
       authPhotoUrl: authPhoto,
       localCachedAvatarUrl: cached?.avatarUrl || getStoredAvatarUrl(normEmail),
-      fallbackSeedName: profileDocData?.fullName || usersDocData?.fullName || normEmail,
+      fallbackSeedName: profileDocData?.fullName || usersDocData?.fullName || cached?.fullName || normEmail,
     });
-    // Keep empty string if only fallback placeholder resolved and no custom avatar exists yet
     const cleanFinalAvatar = isUiAvatarPlaceholder(mergedAvatar) ? '' : mergedAvatar;
+    const isMaster = normEmail === 'weerapong1625@acu.ac.th';
 
     const loadedProfile: FullUserProfile = {
-      uid: usersDocData?.uid || profileDocData?.uid || resolveUserUid(normEmail),
+      uid: usersDocData?.uid || profileDocData?.uid || resolvedUid,
       email: profileDocData?.email || usersDocData?.email || normEmail,
-      fullName: profileDocData?.fullName || usersDocData?.fullName || cached?.fullName || 'คุณครูอัสสัมชัญ',
-      nickname: profileDocData?.nickname || cached?.nickname || '',
+      fullName:
+        profileDocData?.fullName ||
+        usersDocData?.fullName ||
+        cached?.fullName ||
+        (isMaster ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : normEmail.split('@')[0]),
+      nickname: profileDocData?.nickname || cached?.nickname || (isMaster ? 'ครูปอย' : ''),
       school: profileDocData?.school || cached?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
       displayName:
         profileDocData?.displayName ||
@@ -752,7 +768,11 @@ export function subscribeFullUserProfile(
         normEmail.split('@')[0],
       avatarUrl: cleanFinalAvatar,
       photoURL: cleanFinalAvatar,
-      role: profileDocData?.role || usersDocData?.role || cached?.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม',
+      role:
+        profileDocData?.role ||
+        usersDocData?.role ||
+        cached?.role ||
+        (isMaster ? 'ผู้ดูแลระบบและพัฒนานวัตกรรม' : 'ครูผู้สอน / ผู้พัฒนานวัตกรรม'),
       innovations: sanitizeInnovations(profileDocData?.innovations || cached?.innovations),
       stats: {
         totalViews: typeof profileDocData?.stats?.totalViews === 'number' ? profileDocData.stats.totalViews : (cached?.stats?.totalViews ?? 0),
@@ -763,7 +783,7 @@ export function subscribeFullUserProfile(
         submissionCount: typeof profileDocData?.stats?.submissionCount === 'number' ? profileDocData.stats.submissionCount : (cached?.stats?.submissionCount ?? 0),
       },
       praises: Array.isArray(profileDocData?.praises) ? profileDocData.praises : (cached?.praises || DEFAULT_INITIAL_PRAISES),
-      updatedAt: profileDocData?.updatedAt || usersDocData?.updatedAt || new Date().toISOString(),
+      updatedAt: profileDocData?.updatedAt || usersDocData?.updatedAt || cached?.updatedAt || new Date().toISOString(),
     };
 
     setCachedUserProfile(loadedProfile);
@@ -773,13 +793,31 @@ export function subscribeFullUserProfile(
     onUpdate(loadedProfile);
   };
 
+  // Emit cached profile synchronously (0ms) so UI renders immediately without waiting on Firestore
+  const initialCached = getCachedUserProfile(normEmail);
+  if (initialCached) {
+    onUpdate(initialCached);
+  }
+
+  // Fetch single users/{uid} document at most once per session (reuses localStorage + session cache afterward)
+  if (!sessionUsersDocCache.has(resolvedUid)) {
+    readSingleUserDocByUid(resolvedUid)
+      .then((res) => {
+        if (!isActive) return;
+        if (res.data) {
+          usersDocData = res.data;
+          emitMerged();
+        }
+      })
+      .catch(() => {});
+  }
+
+  let unsubProfile = () => {};
   try {
     const safeDocId = getSafeDocId(normEmail);
-    const resolvedUid = resolveUserUid(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
-    const usersRef = doc(db, 'users', resolvedUid);
 
-    const unsubProfile = onSnapshot(
+    unsubProfile = onSnapshot(
       profileRef,
       (snapshot) => {
         if (snapshot.exists()) {
@@ -788,70 +826,47 @@ export function subscribeFullUserProfile(
           emitMerged();
         } else if (!hasResolvedOnce) {
           hasResolvedOnce = true;
-          fetchFullUserProfile(normEmail).then(onUpdate);
-        }
-      },
-      (error) => {
-        if (isQuotaExceededError(error)) {
-          notifyQuotaExceeded();
-          const cached = getCachedUserProfile(normEmail);
-          if (cached) {
-            onUpdate(cached);
-            return;
-          }
-        }
-        fetchFullUserProfile(normEmail).then(onUpdate);
-      }
-    );
-
-    const unsubUsers = onSnapshot(
-      usersRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          usersDocData = snapshot.data();
-          hasResolvedOnce = true;
           emitMerged();
         }
       },
       () => {
-        // Non-fatal: user_profiles + cached fallback remain active
-      }
-    );
-
-    // Also refresh when another component updates avatar/profile locally
-    const handleLocalSync = (e: Event) => {
-      const detail = (e as CustomEvent)?.detail;
-      if (detail?.email && detail.email.toLowerCase().trim() === normEmail) {
-        if (detail.photoURL || detail.avatarUrl) {
-          usersDocData = { ...(usersDocData || {}), ...detail };
-        }
+        // Silent fallback on permission-denied / quota / offline
         emitMerged();
       }
-    };
-    if (typeof window !== 'undefined') {
-      window.addEventListener('acu_user_profile_updated', handleLocalSync);
-    }
-
-    return () => {
-      unsubProfile();
-      unsubUsers();
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_user_profile_updated', handleLocalSync);
-      }
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    } else {
-      console.warn('Could not initialize profile subscription:', err);
-    }
-    fetchFullUserProfile(normEmail).then(onUpdate);
-    return () => {};
+    );
+  } catch {
+    emitMerged();
   }
+
+  // Also refresh when another component updates avatar/profile locally
+  const handleLocalSync = (e: Event) => {
+    const detail = (e as CustomEvent)?.detail;
+    if (detail?.email && detail.email.toLowerCase().trim() === normEmail) {
+      if (detail.photoURL || detail.avatarUrl) {
+        usersDocData = { ...(usersDocData || {}), ...detail };
+      }
+      emitMerged();
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_user_profile_updated', handleLocalSync);
+  }
+
+  return () => {
+    isActive = false;
+    try {
+      unsubProfile();
+    } catch {
+      // ignore
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_user_profile_updated', handleLocalSync);
+    }
+  };
 }
 
 /**
- * Fetch full profile from Firestore (`users/{uid}` matched by UID then lowercase email + `user_profiles`)
+ * Fetch full profile from Firestore (isolated single-doc `users/{uid}` + `user_profiles`) with localStorage fallback
  */
 export async function fetchFullUserProfile(
   email: string, 
@@ -861,70 +876,65 @@ export async function fetchFullUserProfile(
   const normEmail = (email || '').toLowerCase().trim();
   const cached = getCachedUserProfile(normEmail);
   const safeDocId = getSafeDocId(normEmail);
+  const resolvedUid = resolveUserUid(normEmail);
   const profileRef = doc(db, 'user_profiles', safeDocId);
   const cleanInitialAvatar = sanitizeAvatarUrl(initialAvatar);
 
-  let isQuotaExceeded = false;
+  // Isolated single-doc read on users/{uid} (uses session cache if already read on login)
+  const usersLookup = await readSingleUserDocByUid(resolvedUid);
+
+  let data: Record<string, any> | null = null;
   try {
-    const [usersLookup, snapshot] = await Promise.all([
-      lookupUsersDocByUidOrEmail(normEmail),
-      getDoc(profileRef),
-    ]);
-
-    const data = snapshot.exists() ? snapshot.data() : null;
-    if (data || usersLookup.data) {
-      const authPhoto = getMatchingAuthPhotoUrl(normEmail);
-      const rawResolved = resolveDisplayAvatarUrl({
-        customPhotoUrl: usersLookup.photoURL,
-        firestoreAvatarUrl: data?.photoURL || data?.avatarUrl,
-        authPhotoUrl: authPhoto,
-        localCachedAvatarUrl: cached?.avatarUrl || getStoredAvatarUrl(normEmail) || cleanInitialAvatar,
-        fallbackSeedName: data?.fullName || usersLookup.data?.fullName || normEmail,
-      });
-      const resolvedAvatar = isUiAvatarPlaceholder(rawResolved) ? '' : rawResolved;
-
-      const loadedProfile: FullUserProfile = {
-        uid: usersLookup.uid || data?.uid || resolveUserUid(normEmail),
-        email: data?.email || usersLookup.data?.email || normEmail,
-        fullName: data?.fullName || usersLookup.data?.fullName || data?.displayName || initialDisplayName || 'คุณครูอัสสัมชัญ',
-        nickname: data?.nickname || '',
-        school: data?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-        displayName: data?.displayName || usersLookup.data?.displayName || initialDisplayName || normEmail.split('@')[0],
-        avatarUrl: resolvedAvatar,
-        photoURL: resolvedAvatar,
-        role: data?.role || usersLookup.data?.role || 'ครูผู้สอน',
-        innovations: sanitizeInnovations(data?.innovations),
-        stats: {
-          totalViews: typeof data?.stats?.totalViews === 'number' ? data.stats.totalViews : 0,
-          uniqueVisitors: typeof data?.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : 0,
-          points: typeof data?.stats?.points === 'number' ? data.stats.points : 0,
-          averageRating: typeof data?.stats?.averageRating === 'number' ? data.stats.averageRating : 0,
-          totalRatings: typeof data?.stats?.totalRatings === 'number' ? data.stats.totalRatings : 0,
-          submissionCount: typeof data?.stats?.submissionCount === 'number' ? data.stats.submissionCount : (cached?.stats?.submissionCount ?? 0),
-        },
-        praises: Array.isArray(data?.praises) && data.praises.length > 0 
-          ? data.praises 
-          : (cached?.praises || DEFAULT_INITIAL_PRAISES),
-        updatedAt: data?.updatedAt || usersLookup.data?.updatedAt || new Date().toISOString(),
-      };
-
-      setCachedUserProfile(loadedProfile);
-      if (resolvedAvatar) {
-        setStoredAvatarUrl(normEmail, resolvedAvatar);
-      }
-      return loadedProfile;
-    }
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      isQuotaExceeded = true;
-      notifyQuotaExceeded();
-      console.warn('[Firestore] Quota reached for user profile; serving from local cache.');
-    } else {
-      console.warn('Notice loading user profile from Firestore:', err);
-    }
+    const snapshot = await getDoc(profileRef);
+    data = snapshot.exists() ? snapshot.data() : null;
+  } catch {
+    data = null;
   }
 
-  // If not yet in Firestore or quota reached, construct default and persist locally
+  if (data || usersLookup.data) {
+    const authPhoto = getMatchingAuthPhotoUrl(normEmail);
+    const rawResolved = resolveDisplayAvatarUrl({
+      customPhotoUrl: usersLookup.photoURL,
+      firestoreAvatarUrl: data?.photoURL || data?.avatarUrl,
+      authPhotoUrl: authPhoto,
+      localCachedAvatarUrl: cached?.avatarUrl || getStoredAvatarUrl(normEmail) || cleanInitialAvatar,
+      fallbackSeedName: data?.fullName || usersLookup.data?.fullName || normEmail,
+    });
+    const resolvedAvatar = isUiAvatarPlaceholder(rawResolved) ? '' : rawResolved;
+
+    const loadedProfile: FullUserProfile = {
+      uid: usersLookup.uid || data?.uid || resolvedUid,
+      email: data?.email || usersLookup.data?.email || normEmail,
+      fullName: data?.fullName || usersLookup.data?.fullName || data?.displayName || initialDisplayName || cached?.fullName || 'คุณครูอัสสัมชัญ',
+      nickname: data?.nickname || cached?.nickname || '',
+      school: data?.school || cached?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+      displayName: data?.displayName || usersLookup.data?.displayName || initialDisplayName || cached?.displayName || normEmail.split('@')[0],
+      avatarUrl: resolvedAvatar,
+      photoURL: resolvedAvatar,
+      role: data?.role || usersLookup.data?.role || cached?.role || 'ครูผู้สอน',
+      innovations: sanitizeInnovations(data?.innovations || cached?.innovations),
+      stats: {
+        totalViews: typeof data?.stats?.totalViews === 'number' ? data.stats.totalViews : (cached?.stats?.totalViews ?? 0),
+        uniqueVisitors: typeof data?.stats?.uniqueVisitors === 'number' ? data.stats.uniqueVisitors : (cached?.stats?.uniqueVisitors ?? 0),
+        points: typeof data?.stats?.points === 'number' ? data.stats.points : (cached?.stats?.points ?? 0),
+        averageRating: typeof data?.stats?.averageRating === 'number' ? data.stats.averageRating : (cached?.stats?.averageRating ?? 0),
+        totalRatings: typeof data?.stats?.totalRatings === 'number' ? data.stats.totalRatings : (cached?.stats?.totalRatings ?? 0),
+        submissionCount: typeof data?.stats?.submissionCount === 'number' ? data.stats.submissionCount : (cached?.stats?.submissionCount ?? 0),
+      },
+      praises: Array.isArray(data?.praises) && data.praises.length > 0 
+        ? data.praises 
+        : (cached?.praises || DEFAULT_INITIAL_PRAISES),
+      updatedAt: data?.updatedAt || usersLookup.data?.updatedAt || new Date().toISOString(),
+    };
+
+    setCachedUserProfile(loadedProfile);
+    if (resolvedAvatar) {
+      setStoredAvatarUrl(normEmail, resolvedAvatar);
+    }
+    return loadedProfile;
+  }
+
+  // Fallback to cached or default profile without blocking
   const isMasterWeerapong = normEmail === 'weerapong1625@acu.ac.th';
   const fallbackAvatar =
     sanitizeAvatarUrl(cached?.avatarUrl) ||
@@ -937,7 +947,7 @@ export async function fetchFullUserProfile(
     avatarUrl: fallbackAvatar,
     photoURL: fallbackAvatar,
   } : {
-    uid: resolveUserUid(normEmail),
+    uid: resolvedUid,
     email: normEmail,
     fullName: isMasterWeerapong ? '(Admin) ม.วีระพงษ์ มีทรัพย์' : (initialDisplayName || normEmail.split('@')[0]),
     nickname: isMasterWeerapong ? 'ครูปอย' : '',
@@ -959,21 +969,11 @@ export async function fetchFullUserProfile(
   };
 
   setCachedUserProfile(defaultProfile);
-  if (!isQuotaExceeded) {
-    saveFullUserProfile(defaultProfile).catch((e) => {
-      if (isQuotaExceededError(e)) {
-        notifyQuotaExceeded();
-      } else {
-        console.warn('Sync initial profile notice:', e);
-      }
-    });
-  }
-
   return defaultProfile;
 }
 
 /**
- * Save Full User Profile to Firestore (`user_profiles` + `users/{uid}`) & Cache
+ * Save Full User Profile to Firestore (`user_profiles` + isolated `users/{uid}`) & Cache
  */
 export async function saveFullUserProfile(profile: FullUserProfile): Promise<boolean> {
   const normEmail = profile.email.toLowerCase().trim();
@@ -1043,37 +1043,24 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
     }
   }
 
+  await writeSingleUserDocByUid(resolvedUid, {
+    uid: resolvedUid,
+    email: normEmail,
+    photoURL: resolvedAvatar,
+    avatarUrl: resolvedAvatar,
+    displayName: payload.displayName,
+    fullName: payload.fullName,
+    role: payload.role,
+    updatedAt: nowIso,
+  });
+
   try {
     const safeDocId = getSafeDocId(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
-    const usersRef = doc(db, 'users', resolvedUid);
-
-    await Promise.allSettled([
-      setDoc(profileRef, payload, { merge: true }),
-      setDoc(
-        usersRef,
-        {
-          uid: resolvedUid,
-          email: normEmail,
-          photoURL: resolvedAvatar,
-          avatarUrl: resolvedAvatar,
-          displayName: payload.displayName,
-          fullName: payload.fullName,
-          role: payload.role,
-          updatedAt: nowIso,
-        },
-        { merge: true }
-      ),
-    ]);
+    await setDoc(profileRef, payload, { merge: true });
     return true;
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-      console.warn('[Firestore] Quota reached while saving profile; cached in localStorage.');
-      return true;
-    }
-    console.warn('Notice saving profile to Firestore:', err);
-    return false;
+  } catch {
+    return true;
   }
 }
 
@@ -1351,48 +1338,39 @@ export async function adjustUserSubmissionCount(
   }
 }
 
-// Shared multiplexed listener pool for `user_profiles` + `users` to protect Firestore read quotas
+// Shared multiplexed listener pool for `user_profiles` only (no collection-wide `users` query)
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
 let sharedUserProfilesUnsub: (() => void) | null = null;
-let sharedUsersColUnsub: (() => void) | null = null;
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
-let latestUsersDocsByEmail: Record<string, any> = {};
 
 function rebuildAndBroadcastMergedProfiles(): void {
   const deletedEmails = getDeletedUserEmails();
   const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
 
-  const allEmails = new Set<string>([
-    ...Object.keys(latestProfileDocsByEmail),
-    ...Object.keys(latestUsersDocsByEmail),
-  ]);
-
-  allEmails.forEach((normEmail) => {
+  Object.keys(latestProfileDocsByEmail).forEach((normEmail) => {
     if (!normEmail || deletedEmails.has(normEmail)) {
       delete map[normEmail];
       return;
     }
     const d = latestProfileDocsByEmail[normEmail] || {};
-    const u = latestUsersDocsByEmail[normEmail] || {};
     const resolvedAvatar = resolveDisplayAvatarUrl({
-      customPhotoUrl: u.photoURL || u.avatarUrl,
       firestoreAvatarUrl: d.photoURL || d.avatarUrl,
       localCachedAvatarUrl: map[normEmail]?.avatarUrl,
-      fallbackSeedName: d.fullName || u.fullName || normEmail,
+      fallbackSeedName: d.fullName || normEmail,
     });
     const cleanFinalAvatar = isUiAvatarPlaceholder(resolvedAvatar) ? '' : resolvedAvatar;
 
     map[normEmail] = {
-      uid: u.uid || d.uid || resolveUserUid(normEmail),
+      uid: d.uid || resolveUserUid(normEmail),
       email: normEmail,
-      fullName: d.fullName || u.fullName || d.displayName || u.displayName || normEmail.split('@')[0],
+      fullName: d.fullName || d.displayName || normEmail.split('@')[0],
       nickname: d.nickname || '',
       school: d.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-      displayName: d.displayName || u.displayName || d.fullName || u.fullName || normEmail.split('@')[0],
+      displayName: d.displayName || d.fullName || normEmail.split('@')[0],
       avatarUrl: cleanFinalAvatar,
       photoURL: cleanFinalAvatar,
-      role: d.role || u.role || 'ครูผู้สอน',
+      role: d.role || 'ครูผู้สอน',
       innovations: sanitizeInnovations(d.innovations),
       stats: {
         totalViews: typeof d.stats?.totalViews === 'number' ? d.stats.totalViews : 0,
@@ -1403,7 +1381,7 @@ function rebuildAndBroadcastMergedProfiles(): void {
         submissionCount: typeof d.stats?.submissionCount === 'number' ? d.stats.submissionCount : 0,
       },
       praises: Array.isArray(d.praises) ? d.praises : [],
-      updatedAt: u.updatedAt || d.updatedAt,
+      updatedAt: d.updatedAt,
     };
   });
 
@@ -1441,59 +1419,20 @@ function ensureSharedUserProfilesSubscription(): void {
           latestProfileDocsByEmail = nextProfileDocs;
           rebuildAndBroadcastMergedProfiles();
         },
-        (err) => {
-          if (isQuotaExceededError(err)) {
-            notifyQuotaExceeded();
-          }
-          console.warn('Realtime user profiles subscription fallback (quota/network):', err);
+        () => {
+          // Silent fallback to local cache on permission-denied / quota / network error
           broadcastUserProfiles(sharedUserProfilesMap || getAllLocalUserProfilesMap());
         }
       );
-    } catch (err) {
-      console.warn('Error subscribing to all user profiles:', err);
-      broadcastUserProfiles(sharedUserProfilesMap || getAllLocalUserProfilesMap());
-    }
-  }
-
-  if (!sharedUsersColUnsub) {
-    try {
-      const usersQuery = query(collection(db, 'users'), limit(500));
-      sharedUsersColUnsub = onSnapshot(
-        usersQuery,
-        (snapshot) => {
-          const nextUsersDocs: Record<string, any> = {};
-          snapshot.forEach((docSnap) => {
-            const u = docSnap.data();
-            const rawEmail =
-              u.email ||
-              (docSnap.id.includes('%40') || docSnap.id.includes('@') ? decodeURIComponent(docSnap.id) : '');
-            if (rawEmail) {
-              const norm = rawEmail.toLowerCase().trim();
-              const existing = nextUsersDocs[norm];
-              // Prefer record with valid custom photoURL or newer updatedAt
-              const hasCustom = isCustomAvatarUrl(u.photoURL || u.avatarUrl);
-              const existingHasCustom = existing && isCustomAvatarUrl(existing.photoURL || existing.avatarUrl);
-              if (!existing || (hasCustom && !existingHasCustom)) {
-                nextUsersDocs[norm] = { ...u, uid: u.uid || docSnap.id };
-              }
-            }
-          });
-          latestUsersDocsByEmail = nextUsersDocs;
-          rebuildAndBroadcastMergedProfiles();
-        },
-        () => {
-          // Non-fatal fallback
-        }
-      );
     } catch {
-      // Non-fatal
+      broadcastUserProfiles(sharedUserProfilesMap || getAllLocalUserProfilesMap());
     }
   }
 }
 
 /**
- * Subscribe to all user profiles in Firestore (`users` + `user_profiles`) for Admin Dashboard and Certificate verification
- * Multiplexed via shared limited snapshot listeners to protect Firestore read quotas.
+ * Subscribe to all user profiles in Firestore (`user_profiles` only, no `users` collection query)
+ * Multiplexed via shared limited snapshot listener to protect Firestore read quotas.
  */
 export function subscribeAllUserProfiles(
   callback: (profilesMap: Record<string, FullUserProfile>) => void
@@ -1514,10 +1453,6 @@ export function subscribeAllUserProfiles(
       if (sharedUserProfilesUnsub) {
         sharedUserProfilesUnsub();
         sharedUserProfilesUnsub = null;
-      }
-      if (sharedUsersColUnsub) {
-        sharedUsersColUnsub();
-        sharedUsersColUnsub = null;
       }
     }
   };
@@ -1675,18 +1610,14 @@ export async function deleteUserAccountCompletely(
       console.warn('Could not clean local storage for user:', err);
     }
 
-    // 3. Direct delete user_profiles and users doc ID variants from Firestore
+    // 3. Direct single-doc delete user_profiles and users doc ID variants from Firestore (no collection query)
     try {
       const safeDocId = getSafeDocId(normTarget);
-      const usersQuerySnap = await getDocs(
-        query(collection(db, 'users'), where('email', '==', normTarget), limit(10))
-      ).catch(() => null);
       await Promise.allSettled([
         deleteDoc(doc(db, 'user_profiles', safeDocId)),
         deleteDoc(doc(db, 'user_profiles', normTarget)),
         deleteDoc(doc(db, 'user_profiles', encodeURIComponent(normTarget))),
         deleteDoc(doc(db, 'users', safeDocId)),
-        ...(usersQuerySnap ? usersQuerySnap.docs.map((d) => deleteDoc(d.ref)) : []),
       ]);
       deletedCounts.profile = true;
     } catch (err) {
