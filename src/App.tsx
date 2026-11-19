@@ -22,9 +22,7 @@ import { auth } from './firebase';
 import {
   getBangkokDateParts,
   logUserLogin,
-  subscribeAllLoginLogs,
   flushPendingLoginLogs,
-  syncLoginLogsFromServer,
 } from './services/auditService';
 import {
   clearSessionAvatarSyncMemo,
@@ -91,14 +89,11 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  // Keep shared login_logs listener warm, flush pending outbox, sync profile avatar from Firestore, and pull authoritative server state
+  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated if needed
   React.useEffect(() => {
     if (!loggedInUser) return;
-    syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser).catch(() => {});
+    syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser, false).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
-    const unsub = subscribeAllLoginLogs(() => {});
-    syncLoginLogsFromServer(true).catch(() => {});
-    return () => unsub();
   }, [loggedInUser]);
 
   // Unified single-point visit recorder to guarantee consistent logging across devices
@@ -198,7 +193,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser).catch(() => {});
+    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, true).catch(() => {});
     recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 

@@ -18,11 +18,13 @@ import {
   CheckCircle2,
   Calendar,
   Plus,
-  Heart
+  Heart,
+  RefreshCw
 } from 'lucide-react';
 import { 
   TeacherMediaWork, 
   subscribeTeacherMedia, 
+  refreshTeacherMedia,
   rateTeacherMedia, 
   toggleLikeTeacherMedia,
   updateTeacherMedia,
@@ -99,6 +101,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<TeacherMediaWork | null>(null);
   const [isDeletingTarget, setIsDeletingTarget] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -156,13 +159,23 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     []
   );
 
-  // Subscribe once to teacher media works (0ms instant cached render + live Firestore sync)
+  // Subscribe once to teacher media works (0ms instant cached render + one-time fetch)
   useEffect(() => {
     const unsub = subscribeTeacherMedia((items) => {
       setRawMediaList(items);
     });
     return () => unsub();
   }, []);
+
+  const handleRefreshMedia = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshTeacherMedia(true);
+      showSuccessFeedback('อัปเดตคลังสื่อล่าสุดเรียบร้อยแล้ว');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Compute sorted/shuffled list in memory in 0ms without re-subscribing to Firestore
   const mediaList = useMemo(() => {
@@ -439,6 +452,17 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             >
               <Shuffle className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">สุ่มสื่อชุดใหม่</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleRefreshMedia}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลคลังสื่อล่าสุด"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
 
             <button

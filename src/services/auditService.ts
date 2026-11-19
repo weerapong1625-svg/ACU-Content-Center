@@ -1,5 +1,5 @@
-import { collection, serverTimestamp, getDocs, query, orderBy, limit, doc, setDoc, getDoc, onSnapshot, writeBatch } from 'firebase/firestore';
-import { db } from '../firebase';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch } from 'firebase/firestore';
+import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 import { sanitizeAvatarUrl } from '../utils/avatarUtils';
 
@@ -30,16 +30,17 @@ export interface UserProfileData {
 export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
+const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
 
 // In-memory debounce map to prevent rapid duplicate logs for the same user on this device
 let lastLogTime = 0;
 let lastLogEmail = '';
 
-// Shared multiplexed Firestore subscription state (prevents duplicate listeners & ensures 100% identical data across components)
+// Shared local listener registry (zero Firestore onSnapshot reads)
 const logListeners = new Set<(logs: LoginLogEntry[]) => void>();
-let sharedUnsubscribeFirestore: (() => void) | null = null;
 let sharedLatestLogs: LoginLogEntry[] | null = null;
-let hasReceivedServerSnapshot = false;
+let hasFetchedLoginLogsFromServer = false;
+let inFlightLoginLogsFetch: Promise<LoginLogEntry[]> | null = null;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
 
@@ -730,169 +731,206 @@ export function deleteLoginLogsByEmail(targetEmail: string): void {
     }
   }
 
-  // Async delete from Firestore
+  // Async delete from Firestore (indexed filter + limit)
   try {
-    getDocs(collection(db, 'login_logs')).then((snapshot) => {
-      const matchingDocs = snapshot.docs.filter(
-        d => (d.data().email || '').toLowerCase().trim() === norm
-      );
-      if (matchingDocs.length > 0) {
-        const batch = writeBatch(db);
-        matchingDocs.forEach(d => batch.delete(d.ref));
-        batch.commit().catch(() => {});
-      }
-    }).catch(() => {});
+    getDocs(query(collection(db, 'login_logs'), where('email', '==', norm), limit(200)))
+      .then((snapshot) => {
+        if (!snapshot.empty) {
+          const batch = writeBatch(db);
+          snapshot.docs.forEach(d => batch.delete(d.ref));
+          batch.commit().catch(() => {});
+        }
+      })
+      .catch(() => {});
   } catch {
     // ignore
   }
 }
 
-function ensureSharedFirestoreSubscription(): void {
-  if (sharedUnsubscribeFirestore) return;
+function ensureLocalLogWindowSync(): void {
+  if (typeof window === 'undefined' || windowSyncListenersAttached) return;
+  windowSyncListenersAttached = true;
 
-  // Flush any pending logs from previous offline sessions
-  flushPendingLoginLogs().catch(() => {});
-
-  if (typeof window !== 'undefined' && !windowSyncListenersAttached) {
-    windowSyncListenersAttached = true;
-    const handleResumeSync = () => {
+  const handleResumeSync = () => {
+    flushPendingLoginLogs().catch(() => {});
+  };
+  const handleVisibility = () => {
+    if (document.visibilityState === 'visible') {
       flushPendingLoginLogs().catch(() => {});
-    };
-    const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
-        flushPendingLoginLogs().catch(() => {});
-      }
-    };
-    const handleStorage = (e: StorageEvent) => {
-      if (e.key === LOGIN_LOGS_STORAGE_KEY && !hasReceivedServerSnapshot) {
-        const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-        broadcastLogsToListeners(merged);
-      }
-    };
-    const handleUserDeleted = () => {
-      const base = sharedLatestLogs || getLocalLoginLogs();
-      const cleaned = sanitizeAuthenticLogs(base);
-      saveLocalLoginLogs(cleaned, true);
-    };
+    }
+  };
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === LOGIN_LOGS_STORAGE_KEY) {
+      const merged = mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+      broadcastLogsToListeners(merged);
+    }
+  };
+  const handleUserDeleted = () => {
+    const base = sharedLatestLogs || getLocalLoginLogs();
+    const cleaned = sanitizeAuthenticLogs(base);
+    saveLocalLoginLogs(cleaned, true);
+  };
+  const handleCustomLogsUpdated = () => {
+    const base = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+    broadcastLogsToListeners(base);
+  };
 
-    window.addEventListener('online', handleResumeSync);
-    window.addEventListener('focus', handleResumeSync);
-    document.addEventListener('visibilitychange', handleVisibility);
-    window.addEventListener('storage', handleStorage);
-    window.addEventListener('acu_user_deleted', handleUserDeleted);
-  }
+  window.addEventListener('online', handleResumeSync);
+  window.addEventListener('focus', handleResumeSync);
+  document.addEventListener('visibilitychange', handleVisibility);
+  window.addEventListener('storage', handleStorage);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
+  window.addEventListener('acu_login_logs_updated', handleCustomLogsUpdated);
+}
 
-  try {
-    const logsRef = collection(db, 'login_logs');
-    const logsQuery = query(logsRef, limit(1000));
-    sharedUnsubscribeFirestore = onSnapshot(
-      logsQuery,
-      (snapshot) => {
-        const fsLogs: LoginLogEntry[] = [];
-        const confirmedIds = new Set<string>();
+function mapLoginLogSnapshot(docSnap: any): LoginLogEntry {
+  const d = docSnap.data();
+  const resolvedEmail = (d.email || d.userEmail || '').toString().trim().toLowerCase();
+  const resolvedTimestamp =
+    d.loginTimestamp ||
+    (d.createdAt?.toDate
+      ? d.createdAt.toDate().toISOString()
+      : typeof d.createdAt === 'string'
+        ? d.createdAt
+        : '') ||
+    d.timestamp ||
+    new Date().toISOString();
+  const tsDate = new Date(resolvedTimestamp);
+  const validDate = !isNaN(tsDate.getTime());
 
-        snapshot.forEach((docSnap) => {
-          const d = docSnap.data();
-          const resolvedEmail = (d.email || d.userEmail || '').toString().trim().toLowerCase();
-          const resolvedTimestamp =
-            d.loginTimestamp ||
-            (d.createdAt?.toDate
-              ? d.createdAt.toDate().toISOString()
-              : typeof d.createdAt === 'string'
-                ? d.createdAt
-                : '') ||
-            d.timestamp ||
-            new Date().toISOString();
-          const tsDate = new Date(resolvedTimestamp);
-          const validDate = !isNaN(tsDate.getTime());
+  return {
+    id: docSnap.id,
+    clientLogId: d.clientLogId || docSnap.id,
+    deviceId: d.deviceId || '',
+    email: resolvedEmail,
+    displayName: d.displayName || resolvedEmail.split('@')[0] || 'ผู้ใช้งาน',
+    role: d.role || 'teacher',
+    loginMethod: d.loginMethod || 'Email Login',
+    status: d.status || 'online',
+    loginTimestamp: resolvedTimestamp,
+    loginDate:
+      d.loginDate ||
+      (validDate ? tsDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }) : '-'),
+    loginTime:
+      d.loginTime ||
+      (validDate ? tsDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'),
+    source: d.source || 'ACU Portal',
+    avatarUrl: sanitizeAvatarUrl(d.avatarUrl),
+  };
+}
 
-          confirmedIds.add(docSnap.id);
-          if (d.clientLogId) confirmedIds.add(String(d.clientLogId));
-
-          fsLogs.push({
-            id: docSnap.id,
-            clientLogId: d.clientLogId || docSnap.id,
-            deviceId: d.deviceId || '',
-            email: resolvedEmail,
-            displayName: d.displayName || resolvedEmail.split('@')[0] || 'ผู้ใช้งาน',
-            role: d.role || 'teacher',
-            loginMethod: d.loginMethod || 'Email Login',
-            status: d.status || 'online',
-            loginTimestamp: resolvedTimestamp,
-            loginDate:
-              d.loginDate ||
-              (validDate ? tsDate.toLocaleDateString('th-TH', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'short', year: 'numeric' }) : '-'),
-            loginTime:
-              d.loginTime ||
-              (validDate ? tsDate.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '-'),
-            source: d.source || 'ACU Portal',
-            avatarUrl: sanitizeAvatarUrl(d.avatarUrl),
-          });
-        });
-
-        let merged: LoginLogEntry[];
-        if (!snapshot.metadata.fromCache) {
-          hasReceivedServerSnapshot = true;
-          // Server confirmed docs can leave the outbox
-          removePendingLoginLogByIds(confirmedIds);
-          // Authoritative server state + only unconfirmed outbox items from this device
-          const remainingPending = getPendingLoginLogs();
-          merged = mergeLogs(fsLogs, remainingPending);
-        } else {
-          // Cache-only emission while offline/connecting: do not overwrite newer server state if already received
-          const fallbackLocal = hasReceivedServerSnapshot && sharedLatestLogs
-            ? sharedLatestLogs
-            : mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-          merged = mergeLogs(fsLogs, fallbackLocal);
-        }
-
-        saveLocalLoginLogs(merged, false);
-        broadcastLogsToListeners(merged);
-      },
-      (err) => {
-        console.warn('Realtime login logs Firestore subscription fallback (quota/network):', err);
-        const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-        broadcastLogsToListeners(fallback);
-      }
-    );
-  } catch (err) {
-    console.warn('Error subscribing to login logs:', err);
-    const fallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-    broadcastLogsToListeners(fallback);
-  }
+function isAdminLogViewer(callerEmail?: string): boolean {
+  const adminEmail = 'weerapong1625@acu.ac.th';
+  const candidates = [
+    callerEmail,
+    auth?.currentUser?.email,
+    typeof window !== 'undefined' ? localStorage.getItem('acu_current_user_email') : null,
+  ];
+  return candidates.some((em) => (em || '').trim().toLowerCase() === adminEmail);
 }
 
 /**
- * Real-time subscription to all login / visit logs for Admin Dashboard and User Profiles
- * Uses a single shared Firestore listener so every component and device stays 100% synchronized.
+ * One-time getDocs fetch of latest login logs (limit 30) — invoked ONLY when Admin opens the Login Logs tab
+ * or explicitly refreshes, and cached in memory + localStorage to protect Firestore daily read quotas.
+ * Regular users (Teachers/Students) NEVER read the login_logs collection.
+ */
+export async function fetchAdminLoginLogsOnce(
+  forceRefresh = false,
+  maxCount = 30,
+  callerEmail?: string
+): Promise<LoginLogEntry[]> {
+  const safeLimit = Math.min(Math.max(1, maxCount), 30);
+  const localFallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+
+  if (!isAdminLogViewer(callerEmail)) {
+    return localFallback;
+  }
+
+  if (!forceRefresh && hasFetchedLoginLogsFromServer && sharedLatestLogs) {
+    return sharedLatestLogs;
+  }
+
+  if (!forceRefresh && inFlightLoginLogsFetch) {
+    return inFlightLoginLogsFetch;
+  }
+
+  inFlightLoginLogsFetch = (async () => {
+    try {
+      await flushPendingLoginLogs();
+
+      const logsRef = collection(db, 'login_logs');
+      let snapshot;
+      try {
+        snapshot = await getDocs(query(logsRef, orderBy('loginTimestamp', 'desc'), limit(safeLimit)));
+      } catch {
+        try {
+          snapshot = await getDocs(query(logsRef, orderBy('createdAt', 'desc'), limit(safeLimit)));
+        } catch {
+          snapshot = await getDocs(query(logsRef, limit(safeLimit)));
+        }
+      }
+
+      const fsLogs: LoginLogEntry[] = [];
+      const confirmedIds = new Set<string>();
+      snapshot.forEach((docSnap) => {
+        const mapped = mapLoginLogSnapshot(docSnap);
+        confirmedIds.add(docSnap.id);
+        if (mapped.clientLogId) confirmedIds.add(String(mapped.clientLogId));
+        fsLogs.push(mapped);
+      });
+
+      hasFetchedLoginLogsFromServer = true;
+      removePendingLoginLogByIds(confirmedIds);
+
+      const remainingPending = getPendingLoginLogs();
+      const merged = mergeLogs(fsLogs, remainingPending);
+      try {
+        localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(Date.now()));
+      } catch {}
+      saveLocalLoginLogs(merged, false);
+      broadcastLogsToListeners(merged);
+      return merged;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('Login logs one-time fetch fallback (using cached logs):', err);
+      broadcastLogsToListeners(localFallback);
+      return localFallback;
+    } finally {
+      inFlightLoginLogsFetch = null;
+    }
+  })();
+
+  return inFlightLoginLogsFetch;
+}
+
+/**
+ * Zero-read local subscription to login logs (emits cached/memory logs and local updates).
+ * Does NOT open any Firestore onSnapshot listener or issue background queries.
+ * Admin Logs tab explicitly calls fetchAdminLoginLogsOnce() on tab open / refresh.
  */
 export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void): () => void {
   logListeners.add(callback);
+  ensureLocalLogWindowSync();
 
-  // Immediately emit current authoritative in-memory snapshot or local/pending cache
   const initial = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
   callback(initial);
 
-  // Ensure the shared real-time Firestore subscription is active
-  ensureSharedFirestoreSubscription();
-
   return () => {
     logListeners.delete(callback);
-    if (logListeners.size === 0 && sharedUnsubscribeFirestore) {
-      sharedUnsubscribeFirestore();
-      sharedUnsubscribeFirestore = null;
-      hasReceivedServerSnapshot = false;
-    }
   };
 }
 
 /**
- * Flush pending login logs and return current synchronized logs snapshot (quota-safe via shared listener)
+ * Flush pending login logs and optionally fetch latest 30 logs when explicitly forced by Admin
  */
-export async function syncLoginLogsFromServer(_force = false): Promise<LoginLogEntry[]> {
+export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   try {
     await flushPendingLoginLogs();
-    ensureSharedFirestoreSubscription();
+    if (force) {
+      return await fetchAdminLoginLogsOnce(true, 30);
+    }
   } catch {
     // non-fatal fallback to local cache
   }
@@ -900,11 +938,10 @@ export async function syncLoginLogsFromServer(_force = false): Promise<LoginLogE
 }
 
 /**
- * Acquire reference-counted live stats sync backed by the shared onSnapshot listener (zero polling reads)
+ * Zero-read compatibility helper (background live polling/listeners disabled to protect Firestore quota)
  */
 export function acquireLiveStatsSync(_intervalMs = 3500): () => void {
-  const noopListener = () => {};
-  return subscribeAllLoginLogs(noopListener);
+  return () => {};
 }
 
 /**
@@ -966,33 +1003,16 @@ export function generateLoginLogsCSV(logs: LoginLogEntry[]): string {
 }
 
 /**
- * Fetch latest login logs for the System Test dashboard
+ * Fetch latest login logs for the Admin System Test dashboard (reuses cached logs unless forceRefresh=true)
  */
-export async function fetchRecentLoginLogs(maxCount = 10): Promise<LoginLogEntry[]> {
-  try {
-    const logsRef = collection(db, 'login_logs');
-    const q = query(logsRef, orderBy('createdAt', 'desc'), limit(maxCount));
-    const snapshot = await getDocs(q);
-    const logs: LoginLogEntry[] = [];
-    snapshot.forEach((docSnap) => {
-      const d = docSnap.data();
-      logs.push({
-        id: docSnap.id,
-        email: d.email || '',
-        displayName: d.displayName || '',
-        role: d.role || 'guest',
-        loginMethod: d.loginMethod || 'Google SSO',
-        status: d.status || 'online',
-        loginTimestamp: d.loginTimestamp || new Date().toISOString(),
-        source: d.source || 'System Test',
-        avatarUrl: sanitizeAvatarUrl(d.avatarUrl),
-      });
-    });
-    return logs;
-  } catch (err) {
-    console.warn('Failed to fetch login logs from Firestore (using local fallback):', err);
-    return getLocalLoginLogs().slice(0, maxCount);
-  }
+export async function fetchRecentLoginLogs(
+  maxCount = 30,
+  forceRefresh = false,
+  callerEmail?: string
+): Promise<LoginLogEntry[]> {
+  const safeCount = Math.min(Math.max(1, maxCount), 30);
+  const logs = await fetchAdminLoginLogsOnce(forceRefresh, safeCount, callerEmail);
+  return logs.slice(0, safeCount);
 }
 
 /**

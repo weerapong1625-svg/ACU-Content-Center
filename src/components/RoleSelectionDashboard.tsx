@@ -29,9 +29,6 @@ import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
   fetchRecentLoginLogs, 
-  subscribeAllLoginLogs,
-  acquireLiveStatsSync,
-  syncLoginLogsFromServer,
   LoginLogEntry, 
   fetchUserProfile 
 } from '../services/auditService';
@@ -40,7 +37,7 @@ import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
 import { TeacherDashboard } from './TeacherDashboard';
 import { AdminDashboard } from './AdminDashboard';
-import { SUPER_ADMIN_EMAIL } from '../services/logoService';
+import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import {
   resolveDisplayAvatarUrl,
   sanitizeAvatarUrl,
@@ -165,28 +162,21 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   };
 
   const handleOpenSystemTest = async () => {
+    if (!isSuperAdmin(userEmail)) return;
     setShowSystemTestModal(true);
     setIsLoadingLogs(true);
-    const logs = await fetchRecentLoginLogs(10);
+    const logs = await fetchRecentLoginLogs(30, false, userEmail);
     setRecentLogs(logs);
     setIsLoadingLogs(false);
   };
 
-  // Keep System Test modal live-synced when two devices log in simultaneously
-  useEffect(() => {
-    if (!showSystemTestModal) return;
-    const unsub = subscribeAllLoginLogs((allLogs) => {
-      if (allLogs.length > 0) {
-        setRecentLogs(allLogs.slice(0, 10));
-      }
-    });
-    const releaseLiveSync = acquireLiveStatsSync(3500);
-    syncLoginLogsFromServer(true).catch(() => {});
-    return () => {
-      unsub();
-      releaseLiveSync();
-    };
-  }, [showSystemTestModal]);
+  const handleRefreshSystemTestLogs = async () => {
+    if (!isSuperAdmin(userEmail)) return;
+    setIsLoadingLogs(true);
+    const logs = await fetchRecentLoginLogs(30, true, userEmail);
+    setRecentLogs(logs);
+    setIsLoadingLogs(false);
+  };
 
   const handleOpenAdminPortal = () => {
     setAdminPasswordInput('');
@@ -587,14 +577,18 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
             <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
             <span>Firebase Connected (Firestore)</span>
           </span>
-          <span>•</span>
-          <button
-            type="button"
-            onClick={handleOpenSystemTest}
-            className="text-sky-300 hover:text-sky-100 underline transition-colors"
-          >
-            System Test Audit
-          </button>
+          {isSuperAdmin(userEmail) && (
+            <>
+              <span>•</span>
+              <button
+                type="button"
+                onClick={handleOpenSystemTest}
+                className="text-sky-300 hover:text-sky-100 underline transition-colors"
+              >
+                System Test Audit
+              </button>
+            </>
+          )}
         </div>
       </footer>
 
@@ -655,9 +649,9 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                 <span>ประวัติการลงชื่อเข้าใช้งานล่าสุด</span>
                 <button
                   type="button"
-                  onClick={handleOpenSystemTest}
+                  onClick={handleRefreshSystemTestLogs}
                   disabled={isLoadingLogs}
-                  className="text-blue-400 hover:text-blue-300 flex items-center gap-1"
+                  className="text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3 h-3 ${isLoadingLogs ? 'animate-spin' : ''}`} />
                   <span>รีเฟรช</span>

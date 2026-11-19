@@ -1,16 +1,22 @@
-import { doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { SUPER_ADMIN_EMAIL, getInitialLogoUrl } from './logoService';
 import { ADMIN_TARGET_EMAIL } from './submissionService';
 
 export const CERTIFICATE_LOGO_DOC_ID = 'certificate_logo';
 export const CERTIFICATE_LOGO_STORAGE_KEY = 'acu_certificate_logo_config';
+const SETTINGS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface CertificateLogoConfig {
   logoUrl: string;
   updatedBy?: string;
   updatedAt?: string;
+  cachedAt?: number;
+  isDefaultFallback?: boolean;
 }
+
+let inFlightCertLogoFetch: Promise<string> | null = null;
+let sessionCertLogoFetched = false;
 
 /**
  * Check if the email has admin rights to modify certificate logo
@@ -25,27 +31,98 @@ export function canManageCertificateLogo(email?: string | null): boolean {
   );
 }
 
-/**
- * Synchronously get initial certificate logo URL from local storage or fallback to school logo
- */
-export function getInitialCertificateLogoUrl(): string {
+function readCachedCertLogoEntry(): CertificateLogoConfig | null {
   try {
     const raw = localStorage.getItem(CERTIFICATE_LOGO_STORAGE_KEY);
     if (raw) {
-      const cached = JSON.parse(raw);
-      if (cached && typeof cached.logoUrl === 'string' && cached.logoUrl.trim()) {
-        return cached.logoUrl;
+      const cached = JSON.parse(raw) as CertificateLogoConfig;
+      if (cached && typeof cached.logoUrl === 'string') {
+        return cached;
       }
     }
   } catch (err) {
     console.warn('Could not read cached certificate logo:', err);
   }
-  // Fall back to current official school logo
+  return null;
+}
+
+function isCertLogoCacheFresh(cached: CertificateLogoConfig | null): boolean {
+  if (!cached || typeof cached.cachedAt !== 'number') return false;
+  return Date.now() - cached.cachedAt < SETTINGS_CACHE_TTL_MS;
+}
+
+/**
+ * Synchronously get initial certificate logo URL from local storage or fallback to school logo
+ */
+export function getInitialCertificateLogoUrl(): string {
+  const cached = readCachedCertLogoEntry();
+  if (cached && !cached.isDefaultFallback && cached.logoUrl.trim()) {
+    return cached.logoUrl;
+  }
   return getInitialLogoUrl();
 }
 
 /**
- * Real-time subscription to certificate logo in Firestore
+ * One-time getDoc fetch for certificate logo with 24h localStorage cache
+ */
+export async function fetchCertificateLogoOnce(force = false): Promise<string> {
+  const cached = readCachedCertLogoEntry();
+  if (!force && (sessionCertLogoFetched || isCertLogoCacheFresh(cached))) {
+    return getInitialCertificateLogoUrl();
+  }
+
+  if (!force && inFlightCertLogoFetch) {
+    return inFlightCertLogoFetch;
+  }
+
+  inFlightCertLogoFetch = (async () => {
+    try {
+      const docRef = doc(db, 'system_settings', CERTIFICATE_LOGO_DOC_ID);
+      const snapshot = await getDoc(docRef);
+      sessionCertLogoFetched = true;
+
+      if (snapshot.exists()) {
+        const data = snapshot.data() as CertificateLogoConfig;
+        if (data?.logoUrl) {
+          try {
+            localStorage.setItem(
+              CERTIFICATE_LOGO_STORAGE_KEY,
+              JSON.stringify({ ...data, cachedAt: Date.now(), isDefaultFallback: false })
+            );
+          } catch {}
+          try {
+            window.dispatchEvent(new CustomEvent('acu_certificate_logo_changed', { detail: data.logoUrl }));
+          } catch {}
+          return data.logoUrl;
+        }
+      }
+
+      const fallbackUrl = getInitialLogoUrl();
+      try {
+        localStorage.setItem(
+          CERTIFICATE_LOGO_STORAGE_KEY,
+          JSON.stringify({ logoUrl: '', cachedAt: Date.now(), isDefaultFallback: true })
+        );
+      } catch {}
+      return fallbackUrl;
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        notifyQuotaExceeded();
+        console.warn('[Firestore] Daily read quota exceeded for certificate logo fetch; using cached/default logo.');
+      } else {
+        console.warn('Certificate logo fetch fallback:', error);
+      }
+      return getInitialCertificateLogoUrl();
+    } finally {
+      inFlightCertLogoFetch = null;
+    }
+  })();
+
+  return inFlightCertLogoFetch;
+}
+
+/**
+ * Smart-cached subscription to certificate logo in Firestore (24h TTL + local event sync)
  */
 export function subscribeCertificateLogo(onUpdate: (url: string) => void): () => void {
   onUpdate(getInitialCertificateLogoUrl());
@@ -58,53 +135,21 @@ export function subscribeCertificateLogo(onUpdate: (url: string) => void): () =>
   };
   window.addEventListener('acu_certificate_logo_changed', handleCustomUpdate);
 
-  try {
-    const docRef = doc(db, 'system_settings', CERTIFICATE_LOGO_DOC_ID);
-    const unsubscribe = onSnapshot(
-      docRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data() as CertificateLogoConfig;
-          if (data?.logoUrl) {
-            try {
-              localStorage.setItem(CERTIFICATE_LOGO_STORAGE_KEY, JSON.stringify(data));
-            } catch {
-              // ignore
-            }
-            onUpdate(data.logoUrl);
-            return;
-          }
-        }
-        try {
-          localStorage.removeItem(CERTIFICATE_LOGO_STORAGE_KEY);
-        } catch {}
-        onUpdate(getInitialLogoUrl());
-      },
-      (error) => {
-        if (isQuotaExceededError(error)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Daily read quota exceeded for certificate logo subscription; using cached/default logo.');
-        } else {
-          console.warn('Realtime certificate logo subscription error:', error);
-        }
-        onUpdate(getInitialCertificateLogoUrl());
+  let active = true;
+  fetchCertificateLogoOnce(false)
+    .then((url) => {
+      if (active && url) {
+        onUpdate(url);
       }
-    );
+    })
+    .catch(() => {
+      if (active) onUpdate(getInitialCertificateLogoUrl());
+    });
 
-    return () => {
-      window.removeEventListener('acu_certificate_logo_changed', handleCustomUpdate);
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    console.warn('Failed to initialize certificate logo listener:', err);
-    onUpdate(getInitialCertificateLogoUrl());
-    return () => {
-      window.removeEventListener('acu_certificate_logo_changed', handleCustomUpdate);
-    };
-  }
+  return () => {
+    active = false;
+    window.removeEventListener('acu_certificate_logo_changed', handleCustomUpdate);
+  };
 }
 
 /**
@@ -128,7 +173,11 @@ export async function saveCertificateLogo(
   };
 
   try {
-    localStorage.setItem(CERTIFICATE_LOGO_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(
+      CERTIFICATE_LOGO_STORAGE_KEY,
+      JSON.stringify({ ...payload, cachedAt: Date.now(), isDefaultFallback: false })
+    );
+    sessionCertLogoFetched = true;
   } catch (err) {
     console.warn('LocalStorage save error:', err);
   }
@@ -170,7 +219,11 @@ export async function resetCertificateLogo(
   }
 
   try {
-    localStorage.removeItem(CERTIFICATE_LOGO_STORAGE_KEY);
+    localStorage.setItem(
+      CERTIFICATE_LOGO_STORAGE_KEY,
+      JSON.stringify({ logoUrl: '', cachedAt: Date.now(), isDefaultFallback: true })
+    );
+    sessionCertLogoFetched = true;
   } catch {
     // ignore
   }

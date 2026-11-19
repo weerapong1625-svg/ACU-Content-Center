@@ -46,6 +46,7 @@ import { SchoolLogo } from './SchoolLogo';
 import { 
   FullUserProfile, 
   subscribeAllUserProfiles, 
+  refreshAllUserProfiles,
   getCleanRealName,
   deleteUserAccountCompletely 
 } from '../services/userProfileService';
@@ -63,6 +64,7 @@ import { UserProfileModal } from './UserProfileModal';
 import { 
   TeacherPrivilegeAdminItem, 
   subscribeAllTeachersPrivilegeStatus, 
+  refreshRewardClaims,
   generatePrivilegesCSV, 
   generatePrivilegesTSV,
   TARGET_SHARE_COUNT,
@@ -90,6 +92,9 @@ import {
   subscribeAllInnovations, 
   subscribeAllSubmissions,
   subscribeTeacherMedia,
+  refreshAllInnovations,
+  refreshAllFacilities,
+  refreshTeacherMedia,
   syncUserSubmissionCountIfOutOfSync,
   saveCriteriaPoster,
   subscribeCriteriaPoster,
@@ -124,6 +129,7 @@ import {
 import {
   LoginLogEntry,
   subscribeAllLoginLogs,
+  fetchAdminLoginLogsOnce,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
   resetAllLoginLogs,
@@ -171,6 +177,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
+  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
 
   // 0. Special Privileges and 20-Share Rewards Management
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
@@ -419,6 +427,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubPrivileges();
     };
   }, []);
+
+  // Fetch latest 30 login logs ONLY when Admin explicitly opens the Visitors/Logs tab
+  useEffect(() => {
+    if (activeTab === 'visitors') {
+      setIsRefreshingLogs(true);
+      fetchAdminLoginLogsOnce(false, 30, userEmail)
+        .finally(() => setIsRefreshingLogs(false));
+    }
+  }, [activeTab, userEmail]);
+
+  const handleRefreshLoginLogs = async () => {
+    setIsRefreshingLogs(true);
+    try {
+      await fetchAdminLoginLogsOnce(true, 30, userEmail);
+      showToast('อัปเดตประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
+    } finally {
+      setIsRefreshingLogs(false);
+    }
+  };
+
+  const handleRefreshAllAdminData = async () => {
+    setIsRefreshingAll(true);
+    try {
+      await Promise.all([
+        refreshAllInnovations(true),
+        refreshAllFacilities(true),
+        refreshTeacherMedia(true),
+        refreshAllUserProfiles(true),
+        refreshRewardClaims(true),
+        activeTab === 'visitors' ? fetchAdminLoginLogsOnce(true, 30, userEmail) : Promise.resolve([]),
+      ]);
+      showToast('ซิงค์ข้อมูลล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
+    } finally {
+      setIsRefreshingAll(false);
+    }
+  };
 
   // Compute aggregated summaries across BOTH teacher_innovations_submissions & teacher_media_repository
   const teacherSummaries = useMemo(() => {
@@ -1565,6 +1609,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
             <button
               type="button"
+              onClick={handleRefreshAllAdminData}
+              disabled={isRefreshingAll}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="ดึงข้อมูลล่าสุดจากฐานข้อมูล"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+              <span>รีเฟรชข้อมูล</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setActiveTab('settings')}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
               title="เปลี่ยนภาพโลโก้และตั้งค่า"
@@ -2063,6 +2118,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
                   />
                 </div>
+
+                <button
+                  type="button"
+                  onClick={handleRefreshLoginLogs}
+                  disabled={isRefreshingLogs}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  title="ดึงประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช (30 ล่าสุด)</span>
+                </button>
 
                 <button
                   type="button"

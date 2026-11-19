@@ -20,7 +20,8 @@ import {
   Mail,
   Database,
   Edit3,
-  Trash2
+  Trash2,
+  RefreshCw
 } from 'lucide-react';
 import { 
   SUBJECT_GROUPS, 
@@ -32,6 +33,7 @@ import {
   deleteFacilitySubmission,
   subscribeUserSubmissions, 
   subscribeAllSubmissions, 
+  refreshAllFacilities,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify
@@ -78,6 +80,7 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -104,6 +107,17 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     });
     return () => unsub();
   }, []);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshAllFacilities(true);
+      setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 2500);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Handle Period Checkbox Toggle (ผู้ตอบจะเลือกเท่าไรก็ได้)
   const togglePeriod = (period: string) => {
@@ -341,14 +355,26 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             </div>
           </div>
 
-          <button
-            type="button"
-            id="close-facility-submission-btn"
-            onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">รีเฟรช</span>
+            </button>
+            <button
+              type="button"
+              id="close-facility-submission-btn"
+              onClick={onClose}
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Navigation Tabs */}

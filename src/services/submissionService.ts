@@ -9,7 +9,6 @@ import {
   where, 
   orderBy,
   limit,
-  onSnapshot, 
   updateDoc, 
   increment 
 } from 'firebase/firestore';
@@ -1238,10 +1237,11 @@ export async function deleteInnovationSubmission(
   }
 }
 
-// Shared multiplexed listeners for teacher_innovations_submissions to protect Firestore read quotas
+// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; protects Firestore read quotas)
 const allInnovationsListeners = new Set<(submissions: InnovationSubmission[]) => void>();
-let sharedInnovationsUnsub: (() => void) | null = null;
 let sharedLatestInnovations: InnovationSubmission[] | null = null;
+let hasFetchedInnovationsThisSession = false;
+let inFlightInnovationsFetch: Promise<InnovationSubmission[]> | null = null;
 let innovationsWindowListenerAttached = false;
 
 function broadcastAllInnovations(list: InnovationSubmission[]): void {
@@ -1255,59 +1255,74 @@ function broadcastAllInnovations(list: InnovationSubmission[]): void {
   });
 }
 
-function ensureSharedInnovationsSubscription(): void {
-  if (typeof window !== 'undefined' && !innovationsWindowListenerAttached) {
-    innovationsWindowListenerAttached = true;
-    window.addEventListener('acu_innovations_changed', () => {
-      const cached = getStoredInnovations();
-      cached.sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
-      broadcastAllInnovations(cached);
-    });
-  }
+function getSortedStoredInnovations(): InnovationSubmission[] {
+  const cached = getStoredInnovations().filter((item) => item && item.isDeleted !== true && !isMediaIdBlocked(item.id));
+  cached.sort((a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime());
+  return cached;
+}
 
-  if (sharedInnovationsUnsub) return;
+function ensureInnovationsWindowListeners(): void {
+  if (typeof window === 'undefined' || innovationsWindowListenerAttached) return;
+  innovationsWindowListenerAttached = true;
 
-  try {
-    const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
-    sharedInnovationsUnsub = onSnapshot(
-      colQuery,
-      (snapshot) => {
-        const liveList: InnovationSubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as InnovationSubmission;
-          const docId = data?.id || docSnap.id;
-          if (!isMediaIdBlocked(docId) && !isMediaIdBlocked(docSnap.id) && data?.isDeleted !== true) {
-            liveList.push({ ...data, id: docId });
-          }
-        });
-
-        liveList.sort(
-          (a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime()
-        );
-        saveStoredInnovations(liveList);
-        broadcastAllInnovations(liveList);
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Quota reached for subscribeAllInnovations; serving from local cache.');
-        } else {
-          console.warn('subscribeAllInnovations listener notice:', err);
-        }
-        broadcastAllInnovations(sharedLatestInnovations || getStoredInnovations());
-      }
-    );
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    broadcastAllInnovations(sharedLatestInnovations || getStoredInnovations());
-  }
+  const handleChanged = () => {
+    broadcastAllInnovations(getSortedStoredInnovations());
+  };
+  window.addEventListener('acu_innovations_changed', handleChanged);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
 /**
- * Subscribe to user's innovation submissions in real time.
- * Multiplexes via the shared `subscribeAllInnovations` stream in memory (zero extra Firestore listeners).
+ * One-time getDocs fetch for teacher_innovations_submissions (deduplicated per session unless forceRefresh=true)
+ */
+export async function refreshAllInnovations(forceRefresh = true): Promise<InnovationSubmission[]> {
+  const localFallback = sharedLatestInnovations || getSortedStoredInnovations();
+
+  if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
+    return sharedLatestInnovations;
+  }
+
+  if (!forceRefresh && inFlightInnovationsFetch) {
+    return inFlightInnovationsFetch;
+  }
+
+  inFlightInnovationsFetch = (async () => {
+    try {
+      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
+      const snapshot = await getDocs(colQuery);
+      const liveList: InnovationSubmission[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as InnovationSubmission;
+        const docId = data?.id || docSnap.id;
+        if (!isMediaIdBlocked(docId) && !isMediaIdBlocked(docSnap.id) && data?.isDeleted !== true) {
+          liveList.push({ ...data, id: docId });
+        }
+      });
+
+      liveList.sort(
+        (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+      );
+      hasFetchedInnovationsThisSession = true;
+      saveStoredInnovations(liveList);
+      broadcastAllInnovations(liveList);
+      return liveList;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('refreshAllInnovations fallback to local cache:', err);
+      broadcastAllInnovations(localFallback);
+      return localFallback;
+    } finally {
+      inFlightInnovationsFetch = null;
+    }
+  })();
+
+  return inFlightInnovationsFetch;
+}
+
+/**
+ * Subscribe to user's innovation submissions using the shared smart-cached stream in memory (0 extra reads).
  */
 export function subscribeUserInnovations(
   userEmail: string,
@@ -1334,7 +1349,7 @@ export function subscribeUserInnovations(
           fullName: normTargetName,
         });
       })
-      .sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
+      .sort((a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime());
   };
 
   return subscribeAllInnovations((allItems) => {
@@ -1343,25 +1358,21 @@ export function subscribeUserInnovations(
 }
 
 /**
- * Subscribe to ALL innovation submissions (for Google Sheets summary and admin overview).
- * Multiplexes a single `limit(500)` Firestore listener and emits cached data immediately.
+ * Smart-cached subscription to ALL innovation submissions (serves local cache immediately, fetches once per page load).
  */
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
 ): () => void {
   allInnovationsListeners.add(callback);
+  ensureInnovationsWindowListeners();
 
-  const initial = sharedLatestInnovations || getStoredInnovations();
+  const initial = sharedLatestInnovations || getSortedStoredInnovations();
   callback(initial);
 
-  ensureSharedInnovationsSubscription();
+  refreshAllInnovations(false).catch(() => {});
 
   return () => {
     allInnovationsListeners.delete(callback);
-    if (allInnovationsListeners.size === 0 && sharedInnovationsUnsub) {
-      sharedInnovationsUnsub();
-      sharedInnovationsUnsub = null;
-    }
   };
 }
 
@@ -1424,6 +1435,55 @@ export function exportInnovationsToGoogleSheetsCSV(submissions: InnovationSubmis
 // FIREBASE OPERATIONS: 2. บันทึกแหล่งเรียนรู้ภายในโรงเรียน (Button 4)
 // =========================================================================
 
+function notifyFacilitiesChanged(): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_facilities_changed'));
+    }
+  } catch {}
+}
+
+export function getStoredFacilities(): FacilitySubmission[] {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(FACILITY_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        const deletedUsers = getDeletedUserEmails();
+        const cleaned = parsed.filter(
+          (item: FacilitySubmission) =>
+            item &&
+            item.learningCenter &&
+            !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
+        );
+        cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+        return cleaned;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to read facilities cache:', err);
+  }
+  return [];
+}
+
+export function saveStoredFacilities(list: FacilitySubmission[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const deletedUsers = getDeletedUserEmails();
+    const cleaned = list.filter(
+      (item) =>
+        item &&
+        item.learningCenter &&
+        !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
+    );
+    cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    localStorage.setItem(FACILITY_STORAGE_KEY, JSON.stringify(cleaned));
+  } catch (err) {
+    console.warn('Failed to save facilities cache:', err);
+  }
+}
+
 /**
  * Save facility usage record into Firestore project: System Test
  */
@@ -1437,25 +1497,30 @@ export async function saveFacilitySubmission(data: {
   imageUrl?: string;
   userEmail: string;
 }): Promise<{ success: boolean; id: string; error?: string }> {
+  const id = `fac_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+  const nowIso = new Date().toISOString();
+
+  const payload: FacilitySubmission = {
+    id,
+    teacherName: data.teacherName.trim(),
+    subjectGroup: data.subjectGroup,
+    learningCenter: data.learningCenter,
+    periods: data.periods,
+    usageDateTime: data.usageDateTime,
+    feedback: data.feedback.trim(),
+    imageUrl: data.imageUrl || '',
+    userEmail: data.userEmail.trim().toLowerCase(),
+    status: 'บันทึกสำเร็จ',
+    createdAt: nowIso,
+    updatedAt: nowIso,
+  };
+
   try {
-    const id = `fac_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
-    const nowIso = new Date().toISOString();
+    const current = getStoredFacilities();
+    saveStoredFacilities([payload, ...current.filter((item) => item.id !== id)]);
+  } catch {}
 
-    const payload: FacilitySubmission = {
-      id,
-      teacherName: data.teacherName.trim(),
-      subjectGroup: data.subjectGroup,
-      learningCenter: data.learningCenter,
-      periods: data.periods,
-      usageDateTime: data.usageDateTime,
-      feedback: data.feedback.trim(),
-      imageUrl: data.imageUrl || '',
-      userEmail: data.userEmail.trim(),
-      status: 'บันทึกสำเร็จ',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    };
-
+  try {
     const docRef = doc(db, SYSTEM_TEST_COLLECTION, id);
     await setDoc(docRef, {
       ...payload,
@@ -1463,8 +1528,14 @@ export async function saveFacilitySubmission(data: {
       notifiedAdminEmail: ADMIN_TARGET_EMAIL,
     });
 
+    notifyFacilitiesChanged();
     return { success: true, id };
   } catch (error: any) {
+    notifyFacilitiesChanged();
+    if (isQuotaExceededError(error)) {
+      notifyQuotaExceeded();
+      return { success: true, id };
+    }
     console.error('Error saving facility submission to Firestore:', error);
     return { success: false, id: '', error: error.message || 'บันทึกข้อมูลไม่สำเร็จ' };
   }
@@ -1491,10 +1562,16 @@ export async function updateFacilitySubmission(
       return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขข้อมูลของผู้อื่น (เฉพาะเจ้าของหรือ Admin)' };
     }
 
+    const updatedAt = new Date().toISOString();
     await updateDoc(docRef, {
       ...updates,
-      updatedAt: new Date().toISOString(),
+      updatedAt,
     });
+
+    saveStoredFacilities(
+      getStoredFacilities().map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
+    );
+    notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error updating facility submission:', err);
@@ -1523,6 +1600,8 @@ export async function deleteFacilitySubmission(
     }
 
     await deleteDoc(docRef);
+    saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+    notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error deleting facility submission:', err);
@@ -1530,49 +1609,11 @@ export async function deleteFacilitySubmission(
   }
 }
 
-/**
- * Subscribe in real-time to submissions created by current user
- */
-export function subscribeUserSubmissions(
-  userEmail: string,
-  callback: (submissions: FacilitySubmission[]) => void
-): () => void {
-  if (!userEmail) {
-    callback([]);
-    return () => {};
-  }
-
-  try {
-    const colRef = collection(db, SYSTEM_TEST_COLLECTION);
-    const q = query(colRef, where('userEmail', '==', userEmail.trim()));
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const list: FacilitySubmission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data.learningCenter) {
-            list.push(data as FacilitySubmission);
-          }
-        });
-        list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-        callback(list);
-      },
-      (err) => {
-        console.warn('subscribeUserSubmissions listener warning:', err);
-      }
-    );
-    return unsubscribe;
-  } catch (err) {
-    console.error('subscribeUserSubmissions failed:', err);
-    return () => {};
-  }
-}
-
 const allFacilityListeners = new Set<(submissions: FacilitySubmission[]) => void>();
-let sharedFacilitiesUnsub: (() => void) | null = null;
 let sharedLatestFacilities: FacilitySubmission[] | null = null;
+let hasFetchedFacilitiesThisSession = false;
+let inFlightFacilitiesFetch: Promise<FacilitySubmission[]> | null = null;
+let facilitiesWindowListenerAttached = false;
 
 function broadcastAllFacilities(list: FacilitySubmission[]): void {
   sharedLatestFacilities = list;
@@ -1585,49 +1626,100 @@ function broadcastAllFacilities(list: FacilitySubmission[]): void {
   });
 }
 
+function ensureFacilitiesWindowListeners(): void {
+  if (typeof window === 'undefined' || facilitiesWindowListenerAttached) return;
+  facilitiesWindowListenerAttached = true;
+
+  const handleChanged = () => {
+    broadcastAllFacilities(getStoredFacilities());
+  };
+  window.addEventListener('acu_facilities_changed', handleChanged);
+  window.addEventListener('acu_user_deleted', handleChanged);
+}
+
 /**
- * Subscribe in real-time to ALL facility usage records (multiplexed & limited)
+ * One-time getDocs fetch for facility usage records (deduplicated per session unless forceRefresh=true)
+ */
+export async function refreshAllFacilities(forceRefresh = true): Promise<FacilitySubmission[]> {
+  const localFallback = sharedLatestFacilities || getStoredFacilities();
+
+  if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
+    return sharedLatestFacilities;
+  }
+
+  if (!forceRefresh && inFlightFacilitiesFetch) {
+    return inFlightFacilitiesFetch;
+  }
+
+  inFlightFacilitiesFetch = (async () => {
+    try {
+      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
+      const snapshot = await getDocs(colQuery);
+      const deletedUsers = getDeletedUserEmails();
+      const list: FacilitySubmission[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as FacilitySubmission;
+        if (data?.learningCenter && !deletedUsers.has((data.userEmail || '').trim().toLowerCase())) {
+          list.push({ ...data, id: data.id || docSnap.id });
+        }
+      });
+      list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      hasFetchedFacilitiesThisSession = true;
+      saveStoredFacilities(list);
+      broadcastAllFacilities(list);
+      return list;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('refreshAllFacilities fallback to local cache:', err);
+      broadcastAllFacilities(localFallback);
+      return localFallback;
+    } finally {
+      inFlightFacilitiesFetch = null;
+    }
+  })();
+
+  return inFlightFacilitiesFetch;
+}
+
+/**
+ * Subscribe to submissions created by current user (filtered in memory from shared smart-cached stream; 0 extra reads)
+ */
+export function subscribeUserSubmissions(
+  userEmail: string,
+  callback: (submissions: FacilitySubmission[]) => void
+): () => void {
+  if (!userEmail) {
+    callback([]);
+    return () => {};
+  }
+
+  const normEmail = userEmail.trim().toLowerCase();
+  return subscribeAllSubmissions((all) => {
+    const filtered = all
+      .filter((item) => (item.userEmail || '').trim().toLowerCase() === normEmail)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    callback(filtered);
+  });
+}
+
+/**
+ * Smart-cached subscription to ALL facility usage records (serves local cache immediately, fetches once per page load)
  */
 export function subscribeAllSubmissions(
   callback: (submissions: FacilitySubmission[]) => void
 ): () => void {
   allFacilityListeners.add(callback);
-  if (sharedLatestFacilities) {
-    callback(sharedLatestFacilities);
-  }
+  ensureFacilitiesWindowListeners();
 
-  if (!sharedFacilitiesUnsub) {
-    try {
-      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
-      sharedFacilitiesUnsub = onSnapshot(
-        colQuery,
-        (snapshot) => {
-          const list: FacilitySubmission[] = [];
-          snapshot.forEach((docSnap) => {
-            const data = docSnap.data();
-            if (data.learningCenter) {
-              list.push(data as FacilitySubmission);
-            }
-          });
-          list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          broadcastAllFacilities(list);
-        },
-        (err) => {
-          console.warn('subscribeAllSubmissions listener warning:', err);
-          if (sharedLatestFacilities) broadcastAllFacilities(sharedLatestFacilities);
-        }
-      );
-    } catch (err) {
-      console.error('subscribeAllSubmissions failed:', err);
-    }
-  }
+  const initial = sharedLatestFacilities || getStoredFacilities();
+  callback(initial);
+
+  refreshAllFacilities(false).catch(() => {});
 
   return () => {
     allFacilityListeners.delete(callback);
-    if (allFacilityListeners.size === 0 && sharedFacilitiesUnsub) {
-      sharedFacilitiesUnsub();
-      sharedFacilitiesUnsub = null;
-    }
   };
 }
 
@@ -1690,8 +1782,9 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
-let sharedTeacherMediaUnsub: (() => void) | null = null;
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
+let hasFetchedTeacherMediaThisSession = false;
+let inFlightTeacherMediaFetch: Promise<TeacherMediaWork[]> | null = null;
 let teacherMediaWindowListenerAttached = false;
 
 function broadcastTeacherMedia(works: TeacherMediaWork[]): void {
@@ -1706,77 +1799,93 @@ function broadcastTeacherMedia(works: TeacherMediaWork[]): void {
 }
 
 function getFilteredStoredTeacherMedia(): TeacherMediaWork[] {
+  const deletedUsers = getDeletedUserEmails();
   const cached = getStoredTeacherMedia().filter(
-    (w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0
+    (w) =>
+      !isMediaIdBlocked(w.id) &&
+      w.isDeleted !== true &&
+      w.title?.trim().length > 0 &&
+      !extractMediaEmails(w).every((em) => deletedUsers.has(em) && extractMediaEmails(w).length > 0)
   );
   cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   return cached;
 }
 
-function ensureSharedTeacherMediaSubscription(): void {
-  if (typeof window !== 'undefined' && !teacherMediaWindowListenerAttached) {
-    teacherMediaWindowListenerAttached = true;
-    window.addEventListener('acu_teacher_media_changed', () => {
-      broadcastTeacherMedia(getFilteredStoredTeacherMedia());
-    });
-  }
-
-  if (sharedTeacherMediaUnsub) return;
-
-  try {
-    const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
-    sharedTeacherMediaUnsub = onSnapshot(
-      colQuery,
-      (snapshot) => {
-        const liveList: TeacherMediaWork[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data() as TeacherMediaWork;
-          const docId = data?.id || docSnap.id;
-          liveList.push({ ...data, id: docId });
-        });
-
-        const realWorks = liveList.filter(
-          (w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0
-        );
-
-        realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-        saveStoredTeacherMedia(realWorks);
-        broadcastTeacherMedia(realWorks);
-      },
-      (err) => {
-        if (isQuotaExceededError(err)) {
-          notifyQuotaExceeded();
-        }
-        console.warn('subscribeTeacherMedia fallback:', err);
-        broadcastTeacherMedia(sharedLatestTeacherMedia || getFilteredStoredTeacherMedia());
-      }
-    );
-  } catch (err) {
-    console.error('subscribeTeacherMedia failed:', err);
-    broadcastTeacherMedia(sharedLatestTeacherMedia || getFilteredStoredTeacherMedia());
-  }
+function ensureTeacherMediaWindowListeners(): void {
+  if (typeof window === 'undefined' || teacherMediaWindowListenerAttached) return;
+  teacherMediaWindowListenerAttached = true;
+  const handleChanged = () => {
+    broadcastTeacherMedia(getFilteredStoredTeacherMedia());
+  };
+  window.addEventListener('acu_teacher_media_changed', handleChanged);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
 /**
- * Subscribe to Teacher Media Repository with live updates (Displays real teacher submissions only).
- * Multiplexed via a single limited listener and immediately serves cached works.
+ * One-time getDocs fetch for teacher_media_repository (deduplicated per session unless forceRefresh=true)
+ */
+export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
+  const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
+
+  if (!forceRefresh && hasFetchedTeacherMediaThisSession && sharedLatestTeacherMedia) {
+    return sharedLatestTeacherMedia;
+  }
+
+  if (!forceRefresh && inFlightTeacherMediaFetch) {
+    return inFlightTeacherMediaFetch;
+  }
+
+  inFlightTeacherMediaFetch = (async () => {
+    try {
+      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
+      const snapshot = await getDocs(colQuery);
+      const liveList: TeacherMediaWork[] = [];
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as TeacherMediaWork;
+        const docId = data?.id || docSnap.id;
+        liveList.push({ ...data, id: docId });
+      });
+
+      const realWorks = liveList.filter(
+        (w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0
+      );
+
+      realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      hasFetchedTeacherMediaThisSession = true;
+      saveStoredTeacherMedia(realWorks);
+      broadcastTeacherMedia(realWorks);
+      return realWorks;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('refreshTeacherMedia fallback:', err);
+      broadcastTeacherMedia(localFallback);
+      return localFallback;
+    } finally {
+      inFlightTeacherMediaFetch = null;
+    }
+  })();
+
+  return inFlightTeacherMediaFetch;
+}
+
+/**
+ * Smart-cached subscription to Teacher Media Repository (serves localStorage immediately, fetches once per page load).
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
 ): () => void {
   teacherMediaListeners.add(callback);
+  ensureTeacherMediaWindowListeners();
 
   const initial = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
   callback(initial);
 
-  ensureSharedTeacherMediaSubscription();
+  refreshTeacherMedia(false).catch(() => {});
 
   return () => {
     teacherMediaListeners.delete(callback);
-    if (teacherMediaListeners.size === 0 && sharedTeacherMediaUnsub) {
-      sharedTeacherMediaUnsub();
-      sharedTeacherMediaUnsub = null;
-    }
   };
 }
 
@@ -2196,9 +2305,63 @@ function sanitizeSharedIdeaRecord(item: SharedIdeaItem): SharedIdeaItem {
   };
 }
 
+function notifySharedIdeasChanged(): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_shared_ideas_changed'));
+    }
+  } catch {}
+}
+
+export function getStoredSharedIdeas(): SharedIdeaItem[] {
+  const mergedMap = new Map<string, SharedIdeaItem>();
+  DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+
+  if (typeof window !== 'undefined') {
+    try {
+      const raw = localStorage.getItem(SHARED_IDEAS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          parsed.forEach((item) => {
+            if (item && item.id) {
+              mergedMap.set(item.id, sanitizeSharedIdeaRecord(item as SharedIdeaItem));
+            }
+          });
+        }
+      }
+    } catch {}
+  }
+
+  const deletedUsers = getDeletedUserEmails();
+  const list = Array.from(mergedMap.values()).filter(
+    (item) => !deletedUsers.has((item.creatorEmail || '').trim().toLowerCase())
+  );
+  list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  return list;
+}
+
+export function saveStoredSharedIdeas(list: SharedIdeaItem[]): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
+    clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    localStorage.setItem(SHARED_IDEAS_STORAGE_KEY, JSON.stringify(clean));
+  } catch {}
+}
+
+export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
+  const current = getStoredSharedIdeas();
+  const next = [sanitizeSharedIdeaRecord(idea), ...current.filter((i) => i.id !== idea.id)];
+  saveStoredSharedIdeas(next);
+  notifySharedIdeasChanged();
+}
+
 const sharedIdeasListeners = new Set<(ideas: SharedIdeaItem[]) => void>();
-let sharedIdeasUnsub: (() => void) | null = null;
 let sharedLatestIdeas: SharedIdeaItem[] | null = null;
+let hasFetchedSharedIdeasThisSession = false;
+let inFlightSharedIdeasFetch: Promise<SharedIdeaItem[]> | null = null;
+let sharedIdeasWindowListenerAttached = false;
 
 function broadcastSharedIdeas(ideas: SharedIdeaItem[]): void {
   sharedLatestIdeas = ideas;
@@ -2211,53 +2374,86 @@ function broadcastSharedIdeas(ideas: SharedIdeaItem[]): void {
   });
 }
 
+function ensureSharedIdeasWindowListeners(): void {
+  if (typeof window === 'undefined' || sharedIdeasWindowListenerAttached) return;
+  sharedIdeasWindowListenerAttached = true;
+
+  const handleChanged = () => {
+    broadcastSharedIdeas(getStoredSharedIdeas());
+  };
+  window.addEventListener('acu_shared_ideas_changed', handleChanged);
+  window.addEventListener('acu_user_deleted', handleChanged);
+}
+
 /**
- * Subscribe to Shared Ideas in real time (multiplexed & limited)
+ * One-time getDocs fetch for shared_ideas (deduplicated per session unless forceRefresh=true)
+ */
+export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIdeaItem[]> {
+  const localFallback = sharedLatestIdeas || getStoredSharedIdeas();
+
+  if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
+    return sharedLatestIdeas;
+  }
+
+  if (!forceRefresh && inFlightSharedIdeasFetch) {
+    return inFlightSharedIdeasFetch;
+  }
+
+  inFlightSharedIdeasFetch = (async () => {
+    try {
+      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
+      const snapshot = await getDocs(colQuery);
+      const liveList: SharedIdeaItem[] = [];
+      snapshot.forEach((docSnap) => {
+        liveList.push(sanitizeSharedIdeaRecord({ ...(docSnap.data() as SharedIdeaItem), id: docSnap.id }));
+      });
+
+      const deletedUsers = getDeletedUserEmails();
+      const mergedMap = new Map<string, SharedIdeaItem>();
+      DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+      liveList.forEach((i) => {
+        if (!deletedUsers.has((i.creatorEmail || '').trim().toLowerCase())) {
+          mergedMap.set(i.id, i);
+        }
+      });
+
+      const finalIdeas = Array.from(mergedMap.values());
+      finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      hasFetchedSharedIdeasThisSession = true;
+      saveStoredSharedIdeas(finalIdeas);
+      broadcastSharedIdeas(finalIdeas);
+      return finalIdeas;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('refreshSharedIdeas fallback to cache/seed:', err);
+      broadcastSharedIdeas(localFallback);
+      return localFallback;
+    } finally {
+      inFlightSharedIdeasFetch = null;
+    }
+  })();
+
+  return inFlightSharedIdeasFetch;
+}
+
+/**
+ * Smart-cached subscription to Shared Ideas (serves local cache immediately, fetches once per page load)
  */
 export function subscribeSharedIdeas(
   callback: (ideas: SharedIdeaItem[]) => void
 ): () => void {
   sharedIdeasListeners.add(callback);
-  if (sharedLatestIdeas) {
-    callback(sharedLatestIdeas);
-  }
+  ensureSharedIdeasWindowListeners();
 
-  if (!sharedIdeasUnsub) {
-    try {
-      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
-      sharedIdeasUnsub = onSnapshot(
-        colQuery,
-        (snapshot) => {
-          const liveList: SharedIdeaItem[] = [];
-          snapshot.forEach((docSnap) => {
-            liveList.push(sanitizeSharedIdeaRecord(docSnap.data() as SharedIdeaItem));
-          });
+  const initial = sharedLatestIdeas || getStoredSharedIdeas();
+  callback(initial);
 
-          const mergedMap = new Map<string, SharedIdeaItem>();
-          DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
-          liveList.forEach((i) => mergedMap.set(i.id, i));
-
-          const finalIdeas = Array.from(mergedMap.values());
-          finalIdeas.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
-          broadcastSharedIdeas(finalIdeas);
-        },
-        (err) => {
-          console.warn('subscribeSharedIdeas fallback to seed:', err);
-          broadcastSharedIdeas(sharedLatestIdeas || DEFAULT_SEED_IDEAS);
-        }
-      );
-    } catch (err) {
-      console.error('subscribeSharedIdeas failed:', err);
-      broadcastSharedIdeas(sharedLatestIdeas || DEFAULT_SEED_IDEAS);
-    }
-  }
+  refreshSharedIdeas(false).catch(() => {});
 
   return () => {
     sharedIdeasListeners.delete(callback);
-    if (sharedIdeasListeners.size === 0 && sharedIdeasUnsub) {
-      sharedIdeasUnsub();
-      sharedIdeasUnsub = null;
-    }
   };
 }
 
@@ -2298,6 +2494,7 @@ export async function saveSharedIdea(data: {
       },
     };
 
+    addSharedIdeaToLocalCache(payload);
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, id);
     await setDoc(docRef, payload);
     return { success: true, id };
@@ -2336,11 +2533,17 @@ export async function rateSharedIdea(
         ratingCount: count,
         userRatings,
       });
+      saveStoredSharedIdeas(
+        getStoredSharedIdeas().map((item) =>
+          item.id === ideaId ? { ...item, ratingAvg: avg, ratingCount: count, userRatings } : item
+        )
+      );
+      notifySharedIdeasChanged();
       return true;
     } else {
       // Seed item being rated for the first time
       const seed = DEFAULT_SEED_IDEAS.find((s) => s.id === ideaId);
-      const initialRatings: { [key: string]: number } = seed?.userRatings || {};
+      const initialRatings: { [key: string]: number } = seed?.userRatings ? { ...seed.userRatings } : {};
       initialRatings[safeEmailKey] = stars;
 
       const ratingValues = Object.values(initialRatings) as number[];
@@ -2348,7 +2551,7 @@ export async function rateSharedIdea(
       const sum = ratingValues.reduce((a, b) => a + b, 0);
       const avg = Number((sum / count).toFixed(1));
 
-      await setDoc(docRef, {
+      const fullPayload: SharedIdeaItem = {
         ...(seed || {
           id: ideaId,
           title: 'ไอเดียการจัดการเรียนรู้',
@@ -2363,7 +2566,9 @@ export async function rateSharedIdea(
         ratingAvg: avg,
         ratingCount: count,
         userRatings: initialRatings,
-      });
+      };
+      await setDoc(docRef, fullPayload);
+      addSharedIdeaToLocalCache(fullPayload);
       return true;
     }
   } catch (err) {
@@ -2386,6 +2591,8 @@ export async function deleteSharedIdea(
     if (!snap.exists()) {
       // Might be a local seed, check if admin
       if (currentUserEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
+        saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+        notifySharedIdeasChanged();
         return { success: true };
       }
       return { success: false, error: 'ไม่พบรายการไอเดียที่ต้องการลบ' };
@@ -2397,6 +2604,8 @@ export async function deleteSharedIdea(
     }
 
     await deleteDoc(docRef);
+    saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+    notifySharedIdeasChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error deleting shared idea:', err);
@@ -2426,6 +2635,10 @@ export async function updateSharedIdea(
     }
 
     await updateDoc(docRef, updates);
+    saveStoredSharedIdeas(
+      getStoredSharedIdeas().map((i) => (i.id === ideaId ? { ...i, ...updates } : i))
+    );
+    notifySharedIdeasChanged();
     return { success: true };
   } catch (err: any) {
     console.error('Error updating shared idea:', err);
@@ -2462,6 +2675,14 @@ export async function rateTeacherMedia(
         userRatings,
         views: increment(1),
       });
+      saveStoredTeacherMedia(
+        getStoredTeacherMedia().map((m) =>
+          m.id === mediaId
+            ? { ...m, ratingAvg: avg, ratingCount: count, userRatings, views: (m.views || 0) + 1 }
+            : m
+        )
+      );
+      notifyTeacherMediaChanged();
       return true;
     } else {
       // Create it from seed or initial
@@ -2469,7 +2690,7 @@ export async function rateTeacherMedia(
       const initialRatings: { [key: string]: number } = {};
       initialRatings[safeEmailKey] = rating;
 
-      await setDoc(docRef, {
+      const newWork = {
         ...(seed || {
           id: mediaId,
           title: 'สื่อนวัตกรรมการจัดการเรียนรู้',
@@ -2485,7 +2706,12 @@ export async function rateTeacherMedia(
         ratingAvg: rating,
         ratingCount: 1,
         userRatings: initialRatings,
-      });
+      } as TeacherMediaWork;
+
+      await setDoc(docRef, newWork);
+      const existing = getStoredTeacherMedia();
+      saveStoredTeacherMedia([newWork, ...existing.filter((m) => m.id !== mediaId)]);
+      notifyTeacherMediaChanged();
       return true;
     }
   } catch (err) {
@@ -2542,6 +2768,13 @@ export async function toggleLikeTeacherMedia(
       { merge: true }
     );
 
+    saveStoredTeacherMedia(
+      getStoredTeacherMedia().map((m) =>
+        m.id === mediaId ? { ...m, likes: newLikes, likedBy } : m
+      )
+    );
+    notifyTeacherMediaChanged();
+
     // If media has an author email, sync stats.points on their user profile in Firestore
     if (authorEmail && authorEmail.trim()) {
       try {
@@ -2574,11 +2807,28 @@ export async function toggleLikeTeacherMedia(
 const CRITERIA_POSTER_DOC_ID = 'media_criteria_infographic';
 export const DEFAULT_CRITERIA_POSTER = '/ประเภทสื่อ .png';
 export const CRITERIA_STORAGE_KEY = 'acu_media_criteria_poster';
+const CRITERIA_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+let hasFetchedCriteriaPosterThisSession = false;
+let inFlightCriteriaPosterFetch: Promise<string> | null = null;
 
 export interface CriteriaPosterConfig {
   imageUrl: string;
   updatedBy?: string;
   updatedAt?: string;
+  cachedAt?: number;
+}
+
+function isCriteriaCacheFresh(): boolean {
+  try {
+    const raw = localStorage.getItem(CRITERIA_STORAGE_KEY);
+    if (!raw) return false;
+    const cached = JSON.parse(raw) as CriteriaPosterConfig;
+    if (!cached?.imageUrl || typeof cached.cachedAt !== 'number') return false;
+    return Date.now() - cached.cachedAt < CRITERIA_CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
 }
 
 export function getInitialCriteriaPosterUrl(): string {
@@ -2594,48 +2844,64 @@ export function getInitialCriteriaPosterUrl(): string {
   return DEFAULT_CRITERIA_POSTER;
 }
 
+export async function fetchCriteriaPosterOnce(forceRefresh = false): Promise<string> {
+  const localUrl = getInitialCriteriaPosterUrl();
+  if (!forceRefresh && (hasFetchedCriteriaPosterThisSession || isCriteriaCacheFresh())) {
+    return localUrl;
+  }
+  if (!forceRefresh && inFlightCriteriaPosterFetch) {
+    return inFlightCriteriaPosterFetch;
+  }
+
+  inFlightCriteriaPosterFetch = (async () => {
+    try {
+      const docRef = doc(db, 'system_settings', CRITERIA_POSTER_DOC_ID);
+      const snapshot = await getDoc(docRef);
+      hasFetchedCriteriaPosterThisSession = true;
+      if (snapshot.exists()) {
+        const data = snapshot.data() as CriteriaPosterConfig;
+        if (data?.imageUrl) {
+          try {
+            localStorage.setItem(CRITERIA_STORAGE_KEY, JSON.stringify({ ...data, cachedAt: Date.now() }));
+          } catch {}
+          return data.imageUrl;
+        }
+      }
+      return localUrl;
+    } catch {
+      return localUrl;
+    } finally {
+      inFlightCriteriaPosterFetch = null;
+    }
+  })();
+
+  return inFlightCriteriaPosterFetch;
+}
+
 export function subscribeCriteriaPoster(onUpdate: (url: string) => void): () => void {
+  let isActive = true;
   const handleCustomUpdate = (e: Event) => {
     const custom = e as CustomEvent<string>;
-    if (custom.detail) {
+    if (custom.detail && isActive) {
       onUpdate(custom.detail);
     }
   };
   window.addEventListener('acu_criteria_poster_changed', handleCustomUpdate);
 
-  try {
-    const docRef = doc(db, 'system_settings', CRITERIA_POSTER_DOC_ID);
-    const unsubscribe = onSnapshot(
-      docRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data() as CriteriaPosterConfig;
-          if (data?.imageUrl) {
-            try {
-              localStorage.setItem(CRITERIA_STORAGE_KEY, JSON.stringify(data));
-            } catch {
-              // ignore
-            }
-            onUpdate(data.imageUrl);
-            return;
-          }
-        }
-        onUpdate(getInitialCriteriaPosterUrl());
-      },
-      () => {
-        onUpdate(getInitialCriteriaPosterUrl());
-      }
-    );
-    return () => {
-      window.removeEventListener('acu_criteria_poster_changed', handleCustomUpdate);
-      unsubscribe();
-    };
-  } catch {
-    onUpdate(getInitialCriteriaPosterUrl());
-    return () => {
-      window.removeEventListener('acu_criteria_poster_changed', handleCustomUpdate);
-    };
+  onUpdate(getInitialCriteriaPosterUrl());
+
+  if (!hasFetchedCriteriaPosterThisSession && !isCriteriaCacheFresh()) {
+    fetchCriteriaPosterOnce(false)
+      .then((url) => {
+        if (isActive && url) onUpdate(url);
+      })
+      .catch(() => {});
   }
+
+  return () => {
+    isActive = false;
+    window.removeEventListener('acu_criteria_poster_changed', handleCustomUpdate);
+  };
 }
 
 export async function saveCriteriaPoster(
@@ -2653,6 +2919,7 @@ export async function saveCriteriaPoster(
     imageUrl,
     updatedBy: adminEmail,
     updatedAt: new Date().toISOString(),
+    cachedAt: Date.now(),
   };
 
   try {
@@ -2670,7 +2937,8 @@ export async function saveCriteriaPoster(
 
   try {
     const docRef = doc(db, 'system_settings', CRITERIA_POSTER_DOC_ID);
-    await setDoc(docRef, payload, { merge: true });
+    await setDoc(docRef, { imageUrl, updatedBy: adminEmail, updatedAt: payload.updatedAt }, { merge: true });
+    hasFetchedCriteriaPosterThisSession = true;
     return { success: true, message: 'บันทึกภาพกราฟิกเกณฑ์/ประเภทสื่อเรียบร้อยแล้ว' };
   } catch (err: any) {
     console.error('Failed to save criteria poster:', err);
@@ -2690,6 +2958,7 @@ export async function resetCriteriaPoster(
 
   try {
     localStorage.removeItem(CRITERIA_STORAGE_KEY);
+    hasFetchedCriteriaPosterThisSession = false;
   } catch {
     // ignore
   }

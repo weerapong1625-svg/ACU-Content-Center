@@ -18,6 +18,7 @@ import {
   Image as ImageIcon,
   Copy,
   Check,
+  RefreshCw,
 } from 'lucide-react';
 import {
   IDEA_RESOURCES,
@@ -33,6 +34,7 @@ import {
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import {
   subscribeSharedIdeas,
+  refreshSharedIdeas,
   saveSharedIdea,
   updateSharedIdea,
   deleteSharedIdea,
@@ -252,6 +254,7 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
 
   const showNotice = (type: 'success' | 'error', message: string) => {
     setActionNotice({ type, message });
@@ -260,13 +263,23 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     }, 3500);
   };
 
-  // Subscribe to real-time shared ideas
+  // Subscribe to smart-cached shared ideas
   useEffect(() => {
     const unsubscribe = subscribeSharedIdeas((ideas) => {
       setFirestoreIdeas(ideas);
     });
     return () => unsubscribe();
   }, []);
+
+  const handleRefreshIdeas = async () => {
+    setIsRefreshing(true);
+    try {
+      await refreshSharedIdeas(true);
+      showNotice('success', 'อัปเดตคลังไอเดียล่าสุดเรียบร้อยแล้ว');
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   // Dynamic Thai Date for Daily Update Indicator
   const todayThai = new Date().toLocaleDateString('th-TH', {
@@ -480,6 +493,17 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
           </div>
 
           <div className="flex items-center gap-2 self-end sm:self-auto">
+            <button
+              type="button"
+              onClick={handleRefreshIdeas}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลคลังไอเดียล่าสุด"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">รีเฟรช</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setIsAddingIdea(!isAddingIdea)}

@@ -3,15 +3,28 @@ import {
   doc,
   setDoc,
   getDoc,
-  onSnapshot,
+  getDocs,
   query,
-  where,
   limit,
-  updateDoc
 } from 'firebase/firestore';
-import { db } from '../firebase';
-import { ADMIN_TARGET_EMAIL, isValidActiveMediaRecord } from './submissionService';
-import { getCleanRealName, getDeletedUserEmails } from './userProfileService';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import {
+  ADMIN_TARGET_EMAIL,
+  isValidActiveMediaRecord,
+  extractMediaEmails,
+  subscribeSharedIdeas,
+  subscribeAllInnovations,
+  subscribeAllSubmissions,
+  subscribeTeacherMedia,
+  addSharedIdeaToLocalCache,
+  SharedIdeaItem,
+} from './submissionService';
+import {
+  getCleanRealName,
+  getDeletedUserEmails,
+  subscribeAllUserProfiles,
+  FullUserProfile,
+} from './userProfileService';
 
 export const TARGET_SHARE_COUNT = 20;
 export const PICKUP_LOCATION = 'ห้องพักครู Com ชั้น 3 (ม.วีระพงษ์)';
@@ -123,6 +136,151 @@ export interface TeacherPrivilegeAdminItem {
 }
 
 const CLAIMS_COLLECTION = 'reward_privilege_claims';
+const CLAIMS_STORAGE_KEY = 'acu_cached_reward_claims';
+
+let sessionClaimsListFetched = false;
+let inFlightClaimsListFetch: Promise<Record<string, RewardClaimRecord>> | null = null;
+const sessionSingleClaimFetched = new Set<string>();
+const inFlightSingleClaimFetches = new Map<string, Promise<RewardClaimRecord | null>>();
+
+function notifyRewardClaimsChanged(): void {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_reward_claims_changed'));
+    }
+  } catch {}
+}
+
+function getStoredRewardClaimsMap(): Record<string, RewardClaimRecord> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(CLAIMS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        const deletedUsers = getDeletedUserEmails();
+        const cleaned: Record<string, RewardClaimRecord> = {};
+        Object.keys(parsed).forEach((k) => {
+          const norm = k.trim().toLowerCase();
+          if (norm && !deletedUsers.has(norm) && parsed[k]) {
+            cleaned[norm] = parsed[k];
+          }
+        });
+        return cleaned;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+function saveStoredRewardClaimsMap(map: Record<string, RewardClaimRecord>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(CLAIMS_STORAGE_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+function upsertStoredRewardClaim(normEmail: string, claim: RewardClaimRecord | null): void {
+  const current = getStoredRewardClaimsMap();
+  if (claim) {
+    current[normEmail] = claim;
+  } else {
+    delete current[normEmail];
+  }
+  saveStoredRewardClaimsMap(current);
+  notifyRewardClaimsChanged();
+}
+
+async function fetchSingleClaimOnce(
+  normEmail: string,
+  forceRefresh = false
+): Promise<RewardClaimRecord | null> {
+  const cachedMap = getStoredRewardClaimsMap();
+  const cachedClaim = cachedMap[normEmail] || null;
+
+  if (!forceRefresh && sessionSingleClaimFetched.has(normEmail)) {
+    return cachedClaim;
+  }
+
+  const existingPromise = inFlightSingleClaimFetches.get(normEmail);
+  if (!forceRefresh && existingPromise) {
+    return existingPromise;
+  }
+
+  const run = (async () => {
+    try {
+      const docRef = doc(db, CLAIMS_COLLECTION, getClaimDocId(normEmail));
+      const snap = await getDoc(docRef);
+      sessionSingleClaimFetched.add(normEmail);
+      const claim = snap.exists() ? (snap.data() as RewardClaimRecord) : null;
+      const latestMap = getStoredRewardClaimsMap();
+      if (claim) {
+        latestMap[normEmail] = claim;
+      } else {
+        delete latestMap[normEmail];
+      }
+      saveStoredRewardClaimsMap(latestMap);
+      return claim;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      return cachedClaim;
+    } finally {
+      inFlightSingleClaimFetches.delete(normEmail);
+    }
+  })();
+
+  inFlightSingleClaimFetches.set(normEmail, run);
+  return run;
+}
+
+/**
+ * One-time getDocs fetch for reward_privilege_claims (deduplicated per session unless forceRefresh=true)
+ */
+export async function refreshRewardClaims(
+  forceRefresh = true
+): Promise<Record<string, RewardClaimRecord>> {
+  const localFallback = getStoredRewardClaimsMap();
+
+  if (!forceRefresh && sessionClaimsListFetched) {
+    return localFallback;
+  }
+
+  if (!forceRefresh && inFlightClaimsListFetch) {
+    return inFlightClaimsListFetch;
+  }
+
+  inFlightClaimsListFetch = (async () => {
+    try {
+      const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(500)));
+      const deletedUsers = getDeletedUserEmails();
+      const map: Record<string, RewardClaimRecord> = {};
+      snap.forEach((d) => {
+        const data = d.data() as RewardClaimRecord;
+        if (data?.userEmail) {
+          const norm = data.userEmail.trim().toLowerCase();
+          if (!deletedUsers.has(norm)) {
+            map[norm] = data;
+          }
+        }
+      });
+      sessionClaimsListFetched = true;
+      saveStoredRewardClaimsMap(map);
+      notifyRewardClaimsChanged();
+      return map;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      return localFallback;
+    } finally {
+      inFlightClaimsListFetch = null;
+    }
+  })();
+
+  return inFlightClaimsListFetch;
+}
 
 /**
  * Get safe document id for user email
@@ -132,7 +290,7 @@ export function getClaimDocId(email: string): string {
 }
 
 /**
- * Subscribe to a single user's privilege status in real time
+ * Subscribe to a single user's privilege status using shared smart-cached streams (zero onSnapshot listeners)
  */
 export function subscribeUserPrivilegeStatus(
   userEmail: string,
@@ -157,15 +315,17 @@ export function subscribeUserPrivilegeStatus(
   }
 
   const normEmail = userEmail.trim().toLowerCase();
+  let isActive = true;
 
   let ideasList: SharedPostItem[] = [];
   let innovationsList: SharedPostItem[] = [];
   let facilitiesList: SharedPostItem[] = [];
   let mediaList: SharedPostItem[] = [];
-  let claimData: RewardClaimRecord | null = null;
+  let claimData: RewardClaimRecord | null = getStoredRewardClaimsMap()[normEmail] || null;
   let teacherDisplayName = userEmail.split('@')[0];
 
   const computeAndEmit = () => {
+    if (!isActive) return;
     // Combine all shared posts
     const allPostsMap = new Map<string, SharedPostItem>();
     [...ideasList, ...innovationsList, ...facilitiesList, ...mediaList].forEach((p) => {
@@ -206,121 +366,108 @@ export function subscribeUserPrivilegeStatus(
     });
   };
 
-  // 1. Listen to shared ideas
-  const unsubIdeas = onSnapshot(
-    query(collection(db, 'shared_ideas'), where('creatorEmail', '==', normEmail), limit(200)),
-    (snap) => {
-      ideasList = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        ideasList.push({
-          id: d.id,
-          title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
-          source: 'idea',
-          sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
-          category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
-          url: data.url || '',
-          createdAt: data.createdAt || new Date().toISOString(),
-        });
-      });
-      computeAndEmit();
-    },
-    () => computeAndEmit()
-  );
+  // 1. Shared ideas (smart-cached stream, 0 extra reads)
+  const unsubIdeas = subscribeSharedIdeas((allIdeas) => {
+    ideasList = allIdeas
+      .filter((data) => (data.creatorEmail || '').trim().toLowerCase() === normEmail)
+      .map((data) => ({
+        id: data.id,
+        title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
+        source: 'idea' as const,
+        sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
+        category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
+        url: data.url || '',
+        createdAt: data.createdAt || new Date().toISOString(),
+      }));
+    computeAndEmit();
+  });
 
-  // 2. Listen to innovation submissions (5 items)
-  const unsubInnovations = onSnapshot(
-    query(collection(db, 'teacher_innovations_submissions'), where('userEmail', '==', normEmail), limit(200)),
-    (snap) => {
-      innovationsList = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
+  // 2. Innovation submissions (smart-cached stream, 0 extra reads)
+  const unsubInnovations = subscribeAllInnovations((allInnovations) => {
+    innovationsList = [];
+    allInnovations.forEach((data) => {
+      if (!isValidActiveMediaRecord(data)) return;
+      if (!extractMediaEmails(data).includes(normEmail)) return;
+      if (data.teacherName) teacherDisplayName = data.teacherName;
+      innovationsList.push({
+        id: data.id,
+        title: data.mediaTitle
+          ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}`
+          : 'สื่อนวัตกรรมการจัดการเรียนรู้',
+        source: 'innovation',
+        sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
+        category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
+        url: data.onlineUrl || '',
+        createdAt: data.submittedAt || new Date().toISOString(),
+      });
+    });
+    computeAndEmit();
+  });
+
+  // 3. Facility usage records (smart-cached stream, 0 extra reads)
+  const unsubFacilities = subscribeAllSubmissions((allFacilities) => {
+    facilitiesList = [];
+    allFacilities.forEach((data) => {
+      if (data.learningCenter && (data.userEmail || '').trim().toLowerCase() === normEmail) {
         if (data.teacherName) teacherDisplayName = data.teacherName;
-        innovationsList.push({
-          id: d.id,
-          title: data.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
-          source: 'innovation',
-          sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
-          category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
-          url: data.onlineUrl || '',
-          createdAt: data.submittedAt || new Date().toISOString(),
+        facilitiesList.push({
+          id: data.id,
+          title: `บันทึกการใช้ ${data.learningCenter}`,
+          source: 'facility',
+          sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
+          category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
+          createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
         });
-      });
-      computeAndEmit();
-    },
-    () => computeAndEmit()
-  );
-
-  // 3. Listen to facility usage records (33 learning centers)
-  const unsubFacilities = onSnapshot(
-    query(collection(db, 'system_test_submissions'), where('userEmail', '==', normEmail), limit(200)),
-    (snap) => {
-      facilitiesList = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (data.learningCenter) {
-          if (data.teacherName) teacherDisplayName = data.teacherName;
-          facilitiesList.push({
-            id: d.id,
-            title: `บันทึกการใช้ ${data.learningCenter}`,
-            source: 'facility',
-            sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
-            category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
-            createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
-          });
-        }
-      });
-      computeAndEmit();
-    },
-    () => computeAndEmit()
-  );
-
-  // 4. Listen to teacher media repository (self-produced media)
-  const unsubMedia = onSnapshot(
-    query(collection(db, 'teacher_media_repository'), where('submittedByEmail', '==', normEmail), limit(200)),
-    (snap) => {
-      mediaList = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (isValidActiveMediaRecord({ ...data, id: data.id || d.id })) {
-          mediaList.push({
-            id: d.id,
-            title: data.title,
-            source: 'media',
-            sourceLabel: 'คลังสื่อผลิตเอง',
-            category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
-            url: data.onlineUrl || '',
-            createdAt: data.createdAt || new Date().toISOString(),
-          });
-        }
-      });
-      computeAndEmit();
-    },
-    () => computeAndEmit()
-  );
-
-  // 5. Listen to reward claim doc
-  const docRef = doc(db, CLAIMS_COLLECTION, getClaimDocId(normEmail));
-  const unsubClaim = onSnapshot(
-    docRef,
-    (snap) => {
-      if (snap.exists()) {
-        claimData = snap.data() as RewardClaimRecord;
-      } else {
-        claimData = null;
       }
+    });
+    computeAndEmit();
+  });
+
+  // 4. Teacher media repository (smart-cached stream, 0 extra reads)
+  const unsubMedia = subscribeTeacherMedia((allMedia) => {
+    mediaList = [];
+    allMedia.forEach((data) => {
+      if (!isValidActiveMediaRecord(data)) return;
+      if (!extractMediaEmails(data).includes(normEmail)) return;
+      mediaList.push({
+        id: data.id,
+        title: data.title,
+        source: 'media',
+        sourceLabel: 'คลังสื่อผลิตเอง',
+        category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
+        url: data.onlineUrl || '',
+        createdAt: data.createdAt || new Date().toISOString(),
+      });
+    });
+    computeAndEmit();
+  });
+
+  // 5. Reward claim doc (one-time getDoc cached per session + local change events)
+  const handleClaimsChanged = () => {
+    claimData = getStoredRewardClaimsMap()[normEmail] || null;
+    computeAndEmit();
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_reward_claims_changed', handleClaimsChanged);
+  }
+
+  fetchSingleClaimOnce(normEmail, false)
+    .then((fetched) => {
+      if (!isActive) return;
+      claimData = fetched;
       computeAndEmit();
-    },
-    () => computeAndEmit()
-  );
+    })
+    .catch(() => {});
 
   return () => {
+    isActive = false;
     unsubIdeas();
     unsubInnovations();
     unsubFacilities();
     unsubMedia();
-    unsubClaim();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_reward_claims_changed', handleClaimsChanged);
+    }
   };
 }
 
@@ -361,6 +508,7 @@ export async function submitTeacherRewardClaim(data: {
     };
 
     await setDoc(docRef, payload, { merge: true });
+    upsertStoredRewardClaim(normEmail, payload);
     return { success: true };
   } catch (err: any) {
     console.error('Error submitting reward claim:', err);
@@ -385,7 +533,10 @@ export async function adminUpdateRewardClaim(data: {
     const docRef = doc(db, CLAIMS_COLLECTION, docId);
     const nowIso = new Date().toISOString();
 
+    const prevCached = getStoredRewardClaimsMap()[normEmail] || null;
     const updatePayload: Partial<RewardClaimRecord> = {
+      id: docId,
+      userEmail: normEmail,
       claimStatus: data.claimStatus,
       updatedAt: nowIso,
       pickupLocation: PICKUP_LOCATION,
@@ -411,6 +562,22 @@ export async function adminUpdateRewardClaim(data: {
     }
 
     await setDoc(docRef, updatePayload, { merge: true });
+    const mergedRecord: RewardClaimRecord = {
+      ...(prevCached || {
+        id: docId,
+        userEmail: normEmail,
+        teacherName: data.teacherName || normEmail,
+        totalShares: 0,
+        isEligible: data.claimStatus !== 'not_eligible',
+        claimStatus: data.claimStatus,
+        selectedReward: '',
+        pickupLocation: PICKUP_LOCATION,
+        administeredBy: ADMIN_CONTACT_NAME,
+        updatedAt: nowIso,
+      }),
+      ...updatePayload,
+    } as RewardClaimRecord;
+    upsertStoredRewardClaim(normEmail, mergedRecord);
     return { success: true };
   } catch (err: any) {
     console.error('Error updating reward claim by admin:', err);
@@ -434,7 +601,7 @@ export async function quickShareEducationalResource(data: {
     const nowIso = new Date().toISOString();
     const docRef = doc(db, 'shared_ideas', id);
 
-    const payload = {
+    const payload: SharedIdeaItem = {
       id,
       title: data.title.trim(),
       description: data.description.trim() || 'แชร์แหล่งการเรียนรู้เพื่อการพัฒนาคุณภาพการศึกษาและสิทธิพิเศษคลังสื่อ',
@@ -452,6 +619,7 @@ export async function quickShareEducationalResource(data: {
       },
     };
 
+    addSharedIdeaToLocalCache(payload);
     await setDoc(docRef, payload);
     return { success: true, id };
   } catch (err: any) {
@@ -462,18 +630,21 @@ export async function quickShareEducationalResource(data: {
 
 /**
  * Subscribe to ALL teachers' privilege and rewards status for the Admin Dashboard
+ * Reuses smart-cached streams (zero onSnapshot listeners)
  */
 export function subscribeAllTeachersPrivilegeStatus(
   onUpdate: (summaries: TeacherPrivilegeAdminItem[]) => void
 ): () => void {
+  let isActive = true;
   let allIdeas: { creatorEmail: string; post: SharedPostItem }[] = [];
   let allInnovations: { userEmail: string; teacherName?: string; gradeLevel?: string; post: SharedPostItem }[] = [];
   let allFacilities: { userEmail: string; teacherName?: string; subjectGroup?: string; post: SharedPostItem }[] = [];
   let allMedia: { submittedByEmail: string; post: SharedPostItem }[] = [];
-  let claimsMap: Record<string, RewardClaimRecord> = {};
-  let profilesMap: Record<string, any> = {};
+  let claimsMap: Record<string, RewardClaimRecord> = getStoredRewardClaimsMap();
+  let profilesMap: Record<string, FullUserProfile> = {};
 
   const computeAll = () => {
+    if (!isActive) return;
     // Gather all teacher emails
     const allEmails = new Set<string>();
     allIdeas.forEach((i) => i.creatorEmail && allEmails.add(i.creatorEmail));
@@ -562,164 +733,136 @@ export function subscribeAllTeachersPrivilegeStatus(
     onUpdate(resultList);
   };
 
-  // 1. Shared ideas
-  const unsubIdeas = onSnapshot(
-    query(collection(db, 'shared_ideas'), limit(500)),
-    (snap) => {
-      allIdeas = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (data.creatorEmail) {
-          allIdeas.push({
-            creatorEmail: data.creatorEmail.trim().toLowerCase(),
-            post: {
-              id: d.id,
-              title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
-              source: 'idea',
-              sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
-              category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
-              url: data.url || '',
-              createdAt: data.createdAt || new Date().toISOString(),
-            },
-          });
-        }
-      });
-      computeAll();
-    },
-    () => computeAll()
-  );
+  // 1. Shared ideas (reuses smart-cached stream)
+  const unsubIdeas = subscribeSharedIdeas((ideas) => {
+    allIdeas = [];
+    ideas.forEach((data) => {
+      if (data.creatorEmail) {
+        allIdeas.push({
+          creatorEmail: data.creatorEmail.trim().toLowerCase(),
+          post: {
+            id: data.id,
+            title: data.title || 'แชร์แหล่งการเรียนรู้/ไอเดีย',
+            source: 'idea',
+            sourceLabel: 'คลังไอเดีย/แหล่งเรียนรู้',
+            category: data.categoryLabel || data.category || 'แหล่งการเรียนรู้',
+            url: data.url || '',
+            createdAt: data.createdAt || new Date().toISOString(),
+          },
+        });
+      }
+    });
+    computeAll();
+  });
 
-  // 2. Innovations
-  const unsubInnov = onSnapshot(
-    query(collection(db, 'teacher_innovations_submissions'), limit(500)),
-    (snap) => {
-      allInnovations = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
-        const ownerEmail = (data.userEmail || data.email || data.submittedByEmail || '').trim().toLowerCase();
-        if (ownerEmail) {
-          allInnovations.push({
-            userEmail: ownerEmail,
-            teacherName: data.teacherName,
-            gradeLevel: data.gradeLevel,
-            post: {
-              id: d.id,
-              title: data.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
-              source: 'innovation',
-              sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
-              category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
-              url: data.onlineUrl || '',
-              createdAt: data.submittedAt || new Date().toISOString(),
-            },
-          });
-        }
-      });
-      computeAll();
-    },
-    () => computeAll()
-  );
+  // 2. Innovations (reuses smart-cached stream)
+  const unsubInnov = subscribeAllInnovations((innovations) => {
+    allInnovations = [];
+    innovations.forEach((data) => {
+      if (!isValidActiveMediaRecord(data)) return;
+      const ownerEmail = extractMediaEmails(data)[0] || '';
+      if (ownerEmail) {
+        allInnovations.push({
+          userEmail: ownerEmail,
+          teacherName: data.teacherName,
+          gradeLevel: data.gradeLevel,
+          post: {
+            id: data.id,
+            title: data.mediaTitle ? `สื่อนวัตกรรม ชิ้นที่ ${data.itemNumber || 1}: ${data.mediaTitle}` : 'สื่อนวัตกรรมการจัดการเรียนรู้',
+            source: 'innovation',
+            sourceLabel: 'สื่อนวัตกรรมการสอน 5 ชิ้น',
+            category: data.mediaType || data.gradeLevel || 'สื่อนวัตกรรม',
+            url: data.onlineUrl || '',
+            createdAt: data.submittedAt || new Date().toISOString(),
+          },
+        });
+      }
+    });
+    computeAll();
+  });
 
-  // 3. Facilities
-  const unsubFac = onSnapshot(
-    query(collection(db, 'system_test_submissions'), limit(500)),
-    (snap) => {
-      allFacilities = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (data.userEmail && data.learningCenter) {
-          allFacilities.push({
-            userEmail: data.userEmail.trim().toLowerCase(),
-            teacherName: data.teacherName,
-            subjectGroup: data.subjectGroup,
-            post: {
-              id: d.id,
-              title: `บันทึกการใช้ ${data.learningCenter}`,
-              source: 'facility',
-              sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
-              category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
-              createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
-            },
-          });
-        }
-      });
-      computeAll();
-    },
-    () => computeAll()
-  );
+  // 3. Facilities (reuses smart-cached stream)
+  const unsubFac = subscribeAllSubmissions((facilities) => {
+    allFacilities = [];
+    facilities.forEach((data) => {
+      if (data.userEmail && data.learningCenter) {
+        allFacilities.push({
+          userEmail: data.userEmail.trim().toLowerCase(),
+          teacherName: data.teacherName,
+          subjectGroup: data.subjectGroup,
+          post: {
+            id: data.id,
+            title: `บันทึกการใช้ ${data.learningCenter}`,
+            source: 'facility',
+            sourceLabel: 'แหล่งเรียนรู้ 33 แห่ง',
+            category: data.subjectGroup || 'แหล่งเรียนรู้ในโรงเรียน',
+            createdAt: data.createdAt || data.usageDateTime || new Date().toISOString(),
+          },
+        });
+      }
+    });
+    computeAll();
+  });
 
-  // 4. Teacher Media Repository
-  const unsubMedia = onSnapshot(
-    query(collection(db, 'teacher_media_repository'), limit(500)),
-    (snap) => {
-      allMedia = [];
-      snap.forEach((d) => {
-        const data = d.data();
-        if (!isValidActiveMediaRecord({ ...data, id: data.id || d.id })) return;
-        const ownerEmail = (data.submittedByEmail || data.email || data.userEmail || '').trim().toLowerCase();
-        if (ownerEmail) {
-          allMedia.push({
-            submittedByEmail: ownerEmail,
-            post: {
-              id: d.id,
-              title: data.title || 'คลังสื่อผลิตเอง',
-              source: 'media',
-              sourceLabel: 'คลังสื่อผลิตเอง',
-              category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
-              url: data.onlineUrl || '',
-              createdAt: data.createdAt || new Date().toISOString(),
-            },
-          });
-        }
-      });
-      computeAll();
-    },
-    () => computeAll()
-  );
+  // 4. Teacher Media Repository (reuses smart-cached stream)
+  const unsubMedia = subscribeTeacherMedia((works) => {
+    allMedia = [];
+    works.forEach((data) => {
+      if (!isValidActiveMediaRecord(data)) return;
+      const ownerEmail = extractMediaEmails(data)[0] || '';
+      if (ownerEmail) {
+        allMedia.push({
+          submittedByEmail: ownerEmail,
+          post: {
+            id: data.id,
+            title: data.title || 'คลังสื่อผลิตเอง',
+            source: 'media',
+            sourceLabel: 'คลังสื่อผลิตเอง',
+            category: data.subjectGroup || data.mediaType || 'คลังสื่อ',
+            url: data.onlineUrl || '',
+            createdAt: data.createdAt || new Date().toISOString(),
+          },
+        });
+      }
+    });
+    computeAll();
+  });
 
-  // 5. Reward claims
-  const unsubClaims = onSnapshot(
-    query(collection(db, CLAIMS_COLLECTION), limit(500)),
-    (snap) => {
-      claimsMap = {};
-      snap.forEach((d) => {
-        const data = d.data() as RewardClaimRecord;
-        if (data.userEmail) {
-          claimsMap[data.userEmail.trim().toLowerCase()] = data;
-        }
-      });
-      computeAll();
-    },
-    () => computeAll()
-  );
+  // 5. User profiles (reuses smart-cached stream)
+  const unsubProfiles = subscribeAllUserProfiles((map) => {
+    profilesMap = map;
+    computeAll();
+  });
 
-  // 6. User profiles for real names and roles
-  const unsubProfiles = onSnapshot(
-    query(collection(db, 'user_profiles'), limit(500)),
-    (snap) => {
-      const deletedUsers = getDeletedUserEmails();
-      profilesMap = {};
-      snap.forEach((d) => {
-        const data = d.data();
-        if (data.email) {
-          const norm = data.email.trim().toLowerCase();
-          if (!deletedUsers.has(norm)) {
-            profilesMap[norm] = data;
-          }
-        }
-      });
+  // 6. Reward claims (cached one-time getDocs per session + local change events)
+  const handleClaimsChanged = () => {
+    claimsMap = getStoredRewardClaimsMap();
+    computeAll();
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('acu_reward_claims_changed', handleClaimsChanged);
+    window.addEventListener('acu_user_deleted', handleClaimsChanged);
+  }
+
+  refreshRewardClaims(false)
+    .then((map) => {
+      if (!isActive) return;
+      claimsMap = map;
       computeAll();
-    },
-    () => computeAll()
-  );
+    })
+    .catch(() => {});
 
   return () => {
+    isActive = false;
     unsubIdeas();
     unsubInnov();
     unsubFac();
     unsubMedia();
-    unsubClaims();
     unsubProfiles();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_reward_claims_changed', handleClaimsChanged);
+      window.removeEventListener('acu_user_deleted', handleClaimsChanged);
+    }
   };
 }
 

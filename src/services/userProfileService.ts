@@ -5,7 +5,6 @@ import {
   updateDoc, 
   arrayUnion, 
   increment, 
-  onSnapshot, 
   collection, 
   getDocs, 
   deleteDoc, 
@@ -265,7 +264,9 @@ function setStoredAvatarUrl(email: string, avatarUrl: string): void {
   }
 }
 
-// Guard concurrent / redundant login syncs and cache single users/{uid} read per session
+// Guard concurrent / redundant login syncs and cache single users/{uid} + user_profiles/{safeDocId} reads
+const USERS_UID_CACHE_PREFIX = 'acu_users_uid_cache_';
+const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 const inFlightAvatarSyncs = new Map<string, Promise<FullUserProfile | null>>();
 const lastAvatarSyncTime = new Map<string, number>();
 const sessionUsersDocCache = new Map<string, {
@@ -274,6 +275,48 @@ const sessionUsersDocCache = new Map<string, {
   photoURL: string;
   hasDeadBlob: boolean;
 }>();
+const inFlightUsersDocFetch = new Map<string, Promise<{
+  uid: string;
+  data: Record<string, any> | null;
+  photoURL: string;
+  hasDeadBlob: boolean;
+}>>();
+const sessionProfileDocCache = new Map<string, Record<string, any> | null>();
+const inFlightProfileDocFetch = new Map<string, Promise<Record<string, any> | null>>();
+
+function getLocalUsersUidCache(uid: string): {
+  uid: string;
+  data: Record<string, any> | null;
+  photoURL: string;
+  hasDeadBlob: boolean;
+  cachedAt: number;
+} | null {
+  if (typeof window === 'undefined' || !uid) return null;
+  try {
+    const raw = localStorage.getItem(`${USERS_UID_CACHE_PREFIX}${uid}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.cachedAt === 'number' && Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS) {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+function setLocalUsersUidCache(
+  uid: string,
+  entry: {
+    uid: string;
+    data: Record<string, any> | null;
+    photoURL: string;
+    hasDeadBlob: boolean;
+  }
+): void {
+  if (typeof window === 'undefined' || !uid) return;
+  try {
+    localStorage.setItem(`${USERS_UID_CACHE_PREFIX}${uid}`, JSON.stringify({ ...entry, cachedAt: Date.now() }));
+  } catch {}
+}
 
 /**
  * Clear per-session avatar sync memoization (e.g., on logout or explicit login)
@@ -289,17 +332,19 @@ export function clearSessionAvatarSyncMemo(email?: string): void {
     }
     const uid = resolveUserUid(norm);
     if (uid) sessionUsersDocCache.delete(uid);
+    sessionProfileDocCache.delete(getSafeDocId(norm));
   } else {
     inFlightAvatarSyncs.clear();
     lastAvatarSyncTime.clear();
     sessionUsersDocCache.clear();
+    sessionProfileDocCache.clear();
   }
 }
 
 /**
  * Strictly read ONLY the current user's single document by UID (`doc(db, 'users', uid)`).
  * Wrapped in strict silent try/catch so permission-denied or quota errors NEVER block main data.
- * Caches result per session to prevent redundant reads.
+ * Deduplicated per page session (at most 1 read per session unless forced), with localStorage fallback if offline/quota-limited.
  */
 async function readSingleUserDocByUid(
   uid: string,
@@ -315,33 +360,88 @@ async function readSingleUserDocByUid(
     return { uid: '', data: null, photoURL: '', hasDeadBlob: false };
   }
 
-  if (!forceRefresh && sessionUsersDocCache.has(cleanUid)) {
-    return sessionUsersDocCache.get(cleanUid)!;
+  if (!forceRefresh) {
+    if (sessionUsersDocCache.has(cleanUid)) {
+      return sessionUsersDocCache.get(cleanUid)!;
+    }
+    if (inFlightUsersDocFetch.has(cleanUid)) {
+      return inFlightUsersDocFetch.get(cleanUid)!;
+    }
   }
 
-  try {
-    const snap = await getDoc(doc(db, 'users', cleanUid));
-    if (snap.exists()) {
-      const d = snap.data();
-      const rawPhoto = d.photoURL || d.avatarUrl || '';
-      const cleanPhoto = sanitizeAvatarUrl(rawPhoto);
-      const hasDeadBlob = isBlobUrl(d.photoURL) || isBlobUrl(d.avatarUrl);
-      const result = {
-        uid: cleanUid,
-        data: d,
-        photoURL: isUiAvatarPlaceholder(cleanPhoto) ? '' : cleanPhoto,
-        hasDeadBlob,
-      };
-      sessionUsersDocCache.set(cleanUid, result);
-      return result;
+  const fetchPromise = (async () => {
+    try {
+      const snap = await getDoc(doc(db, 'users', cleanUid));
+      if (snap.exists()) {
+        const d = snap.data();
+        const rawPhoto = d.photoURL || d.avatarUrl || '';
+        const cleanPhoto = sanitizeAvatarUrl(rawPhoto);
+        const hasDeadBlob = isBlobUrl(d.photoURL) || isBlobUrl(d.avatarUrl);
+        const result = {
+          uid: cleanUid,
+          data: d,
+          photoURL: isUiAvatarPlaceholder(cleanPhoto) ? '' : cleanPhoto,
+          hasDeadBlob,
+        };
+        sessionUsersDocCache.set(cleanUid, result);
+        setLocalUsersUidCache(cleanUid, result);
+        return result;
+      }
+      const emptyResult = { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
+      sessionUsersDocCache.set(cleanUid, emptyResult);
+      setLocalUsersUidCache(cleanUid, emptyResult);
+      return emptyResult;
+    } catch {
+      // Strictly isolated: silently fall back on permission-denied / quota / network errors
+      const localFallback = getLocalUsersUidCache(cleanUid);
+      if (localFallback) {
+        return {
+          uid: localFallback.uid,
+          data: localFallback.data,
+          photoURL: localFallback.photoURL || '',
+          hasDeadBlob: Boolean(localFallback.hasDeadBlob),
+        };
+      }
+      return { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
+    } finally {
+      inFlightUsersDocFetch.delete(cleanUid);
     }
-    const emptyResult = { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
-    sessionUsersDocCache.set(cleanUid, emptyResult);
-    return emptyResult;
-  } catch {
-    // Strictly isolated: silently fall back on permission-denied / quota / network errors
-    return { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
+  })();
+
+  inFlightUsersDocFetch.set(cleanUid, fetchPromise);
+  return fetchPromise;
+}
+
+/**
+ * Deduplicated single-document read on `user_profiles/{safeDocId}` (at most once per session unless forced)
+ */
+async function readSingleProfileDocOnce(
+  safeDocId: string,
+  forceRefresh = false
+): Promise<Record<string, any> | null> {
+  if (!safeDocId) return null;
+  if (!forceRefresh && sessionProfileDocCache.has(safeDocId)) {
+    return sessionProfileDocCache.get(safeDocId) ?? null;
   }
+  if (!forceRefresh && inFlightProfileDocFetch.has(safeDocId)) {
+    return inFlightProfileDocFetch.get(safeDocId)!;
+  }
+
+  const p = (async () => {
+    try {
+      const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
+      const data = profileSnap.exists() ? profileSnap.data() : null;
+      sessionProfileDocCache.set(safeDocId, data);
+      return data;
+    } catch {
+      return sessionProfileDocCache.get(safeDocId) ?? null;
+    } finally {
+      inFlightProfileDocFetch.delete(safeDocId);
+    }
+  })();
+
+  inFlightProfileDocFetch.set(safeDocId, p);
+  return p;
 }
 
 /**
@@ -355,15 +455,17 @@ async function writeSingleUserDocByUid(
   if (!cleanUid) return;
   try {
     await setDoc(doc(db, 'users', cleanUid), payload, { merge: true });
-    const existing = sessionUsersDocCache.get(cleanUid);
+    const existing = sessionUsersDocCache.get(cleanUid) || getLocalUsersUidCache(cleanUid);
     const nextData = { ...(existing?.data || {}), ...payload };
     const cleanPhoto = sanitizeAvatarUrl(nextData.photoURL || nextData.avatarUrl);
-    sessionUsersDocCache.set(cleanUid, {
+    const nextEntry = {
       uid: cleanUid,
       data: nextData,
       photoURL: isUiAvatarPlaceholder(cleanPhoto) ? '' : cleanPhoto,
       hasDeadBlob: false,
-    });
+    };
+    sessionUsersDocCache.set(cleanUid, nextEntry);
+    setLocalUsersUidCache(cleanUid, nextEntry);
   } catch {
     // Strictly isolated: permission-denied or quota errors on users/{uid} never break app or main data
   }
@@ -415,6 +517,9 @@ export async function saveUserPhotoToFirestore(
   };
 
   await writeSingleUserDocByUid(resolvedUid, photoPayload);
+
+  const prevProfCache = sessionProfileDocCache.get(safeDocId);
+  sessionProfileDocCache.set(safeDocId, { ...(prevProfCache || {}), ...photoPayload });
 
   try {
     await setDoc(doc(db, 'user_profiles', safeDocId), photoPayload, { merge: true });
@@ -473,30 +578,25 @@ export async function syncUserAvatarOnAuthOrLogin(
   if (!normEmail) return null;
 
   const resolvedUid = resolveUserUid(normEmail, authUser?.uid);
+  const safeDocId = getSafeDocId(normEmail);
   const syncKey = `${normEmail}::${resolvedUid}`;
   const existingInFlight = inFlightAvatarSyncs.get(syncKey);
   if (existingInFlight) return existingInFlight;
 
   const cachedNow = getCachedUserProfile(normEmail);
   const lastTime = lastAvatarSyncTime.get(syncKey) || 0;
-  if (!force && (Date.now() - lastTime < 60000 || (sessionUsersDocCache.has(resolvedUid) && cachedNow))) {
+  if (
+    !force &&
+    (Date.now() - lastTime < 60000 || (sessionUsersDocCache.has(resolvedUid) && sessionProfileDocCache.has(safeDocId) && cachedNow))
+  ) {
     return cachedNow;
   }
 
   const runSync = (async (): Promise<FullUserProfile | null> => {
     try {
-      const safeDocId = getSafeDocId(normEmail);
-
       // Isolated single-doc reads: permission-denied or quota errors on users/{uid} or user_profiles silently fall back
       const usersLookup = await readSingleUserDocByUid(resolvedUid, force);
-
-      let profileData: Record<string, any> | null = null;
-      try {
-        const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
-        profileData = profileSnap.exists() ? profileSnap.data() : null;
-      } catch {
-        profileData = null;
-      }
+      const profileData = await readSingleProfileDocOnce(safeDocId, force);
 
       const firestoreUsersPhoto = sanitizeAvatarUrl(
         usersLookup.data?.photoURL || usersLookup.data?.avatarUrl
@@ -720,8 +820,9 @@ function sanitizeInnovations(items: any): InnovationItem[] {
 }
 
 /**
- * Real-time subscription to user's `user_profiles` document + single-read session-cached `users/{uid}` photo.
- * Isolated with silent try/catch so profile/avatar errors NEVER block or break main app data.
+ * Smart-cached subscription to user's `user_profiles` document + localStorage-cached `users/{uid}` photo.
+ * Zero `onSnapshot` listeners: emits cached localStorage immediately, performs at most 1 deduplicated getDoc
+ * if not already cached in this session, and listens for local update events.
  */
 export function subscribeFullUserProfile(
   email: string,
@@ -731,9 +832,10 @@ export function subscribeFullUserProfile(
   if (!normEmail) return () => {};
 
   const resolvedUid = resolveUserUid(normEmail);
-  let profileDocData: Record<string, any> | null = null;
-  let usersDocData: Record<string, any> | null = sessionUsersDocCache.get(resolvedUid)?.data || null;
-  let hasResolvedOnce = false;
+  const safeDocId = getSafeDocId(normEmail);
+  let profileDocData: Record<string, any> | null = sessionProfileDocCache.get(safeDocId) ?? null;
+  let usersDocData: Record<string, any> | null =
+    sessionUsersDocCache.get(resolvedUid)?.data || getLocalUsersUidCache(resolvedUid)?.data || null;
   let isActive = true;
 
   const emitMerged = () => {
@@ -799,9 +901,9 @@ export function subscribeFullUserProfile(
     onUpdate(initialCached);
   }
 
-  // Fetch single users/{uid} document at most once per session (reuses localStorage + session cache afterward)
+  // Fetch single users/{uid} document at most once per session (deduplicated)
   if (!sessionUsersDocCache.has(resolvedUid)) {
-    readSingleUserDocByUid(resolvedUid)
+    readSingleUserDocByUid(resolvedUid, false)
       .then((res) => {
         if (!isActive) return;
         if (res.data) {
@@ -812,55 +914,46 @@ export function subscribeFullUserProfile(
       .catch(() => {});
   }
 
-  let unsubProfile = () => {};
-  try {
-    const safeDocId = getSafeDocId(normEmail);
-    const profileRef = doc(db, 'user_profiles', safeDocId);
-
-    unsubProfile = onSnapshot(
-      profileRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          profileDocData = snapshot.data();
-          hasResolvedOnce = true;
-          emitMerged();
-        } else if (!hasResolvedOnce) {
-          hasResolvedOnce = true;
-          emitMerged();
-        }
-      },
-      () => {
-        // Silent fallback on permission-denied / quota / offline
+  // Fetch user_profiles/{safeDocId} at most once per session (deduplicated)
+  if (!sessionProfileDocCache.has(safeDocId)) {
+    readSingleProfileDocOnce(safeDocId, false)
+      .then((data) => {
+        if (!isActive) return;
+        profileDocData = data;
         emitMerged();
-      }
-    );
-  } catch {
+      })
+      .catch(() => {
+        if (isActive) emitMerged();
+      });
+  } else if (!initialCached) {
     emitMerged();
   }
 
-  // Also refresh when another component updates avatar/profile locally
+  // Refresh when another component updates avatar/profile locally
   const handleLocalSync = (e: Event) => {
     const detail = (e as CustomEvent)?.detail;
     if (detail?.email && detail.email.toLowerCase().trim() === normEmail) {
       if (detail.photoURL || detail.avatarUrl) {
         usersDocData = { ...(usersDocData || {}), ...detail };
       }
+      profileDocData = { ...(profileDocData || {}), ...detail };
+      sessionProfileDocCache.set(safeDocId, profileDocData);
       emitMerged();
     }
   };
+  const handleGenericProfileUpdate = () => {
+    emitMerged();
+  };
   if (typeof window !== 'undefined') {
     window.addEventListener('acu_user_profile_updated', handleLocalSync);
+    window.addEventListener('acu_profile_updated', handleGenericProfileUpdate);
   }
 
   return () => {
     isActive = false;
-    try {
-      unsubProfile();
-    } catch {
-      // ignore
-    }
     if (typeof window !== 'undefined') {
       window.removeEventListener('acu_user_profile_updated', handleLocalSync);
+      window.removeEventListener('acu_profile_updated', handleGenericProfileUpdate);
     }
   };
 }
@@ -877,19 +970,11 @@ export async function fetchFullUserProfile(
   const cached = getCachedUserProfile(normEmail);
   const safeDocId = getSafeDocId(normEmail);
   const resolvedUid = resolveUserUid(normEmail);
-  const profileRef = doc(db, 'user_profiles', safeDocId);
   const cleanInitialAvatar = sanitizeAvatarUrl(initialAvatar);
 
-  // Isolated single-doc read on users/{uid} (uses session cache if already read on login)
-  const usersLookup = await readSingleUserDocByUid(resolvedUid);
-
-  let data: Record<string, any> | null = null;
-  try {
-    const snapshot = await getDoc(profileRef);
-    data = snapshot.exists() ? snapshot.data() : null;
-  } catch {
-    data = null;
-  }
+  // Isolated single-doc read on users/{uid} (uses localStorage + session cache if already fetched)
+  const usersLookup = await readSingleUserDocByUid(resolvedUid, false);
+  const data = await readSingleProfileDocOnce(safeDocId, false);
 
   if (data || usersLookup.data) {
     const authPhoto = getMatchingAuthPhotoUrl(normEmail);
@@ -1056,6 +1141,7 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
 
   try {
     const safeDocId = getSafeDocId(normEmail);
+    sessionProfileDocCache.set(safeDocId, payload);
     const profileRef = doc(db, 'user_profiles', safeDocId);
     await setDoc(profileRef, payload, { merge: true });
     return true;
@@ -1338,15 +1424,42 @@ export async function adjustUserSubmissionCount(
   }
 }
 
-// Shared multiplexed listener pool for `user_profiles` only (no collection-wide `users` query)
+// Smart-cached pool for `user_profiles` only (no collection-wide `users` query, no onSnapshot)
+const ALL_USER_PROFILES_CACHE_KEY = 'acu_cached_all_user_profiles_map';
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
-let sharedUserProfilesUnsub: (() => void) | null = null;
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
+let hasFetchedAllUserProfilesThisSession = false;
+let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
+let userProfilesWindowListenersAttached = false;
 
-function rebuildAndBroadcastMergedProfiles(): void {
+function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(ALL_USER_PROFILES_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed as Record<string, FullUserProfile>;
+      }
+    }
+  } catch {}
+  return {};
+}
+
+function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(ALL_USER_PROFILES_CACHE_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+function rebuildAndBroadcastMergedProfiles(): Record<string, FullUserProfile> {
   const deletedEmails = getDeletedUserEmails();
-  const map: Record<string, FullUserProfile> = { ...getAllLocalUserProfilesMap() };
+  const map: Record<string, FullUserProfile> = {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+  };
 
   Object.keys(latestProfileDocsByEmail).forEach((normEmail) => {
     if (!normEmail || deletedEmails.has(normEmail)) {
@@ -1385,7 +1498,11 @@ function rebuildAndBroadcastMergedProfiles(): void {
     };
   });
 
+  // Clean deleted users
+  deletedEmails.forEach((em) => delete map[em]);
+  saveStoredAllUserProfilesMap(map);
   broadcastUserProfiles(map);
+  return map;
 }
 
 function broadcastUserProfiles(map: Record<string, FullUserProfile>): void {
@@ -1399,62 +1516,95 @@ function broadcastUserProfiles(map: Record<string, FullUserProfile>): void {
   });
 }
 
-function ensureSharedUserProfilesSubscription(): void {
-  if (!sharedUserProfilesUnsub) {
-    try {
-      const colQuery = query(collection(db, 'user_profiles'), limit(500));
-      sharedUserProfilesUnsub = onSnapshot(
-        colQuery,
-        (snapshot) => {
-          const nextProfileDocs: Record<string, any> = {};
-          snapshot.forEach((docSnap) => {
-            const d = docSnap.data();
-            const rawEmail =
-              d.email ||
-              (docSnap.id.includes('%40') || docSnap.id.includes('@') ? decodeURIComponent(docSnap.id) : '');
-            if (rawEmail) {
-              nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
-            }
-          });
-          latestProfileDocsByEmail = nextProfileDocs;
-          rebuildAndBroadcastMergedProfiles();
-        },
-        () => {
-          // Silent fallback to local cache on permission-denied / quota / network error
-          broadcastUserProfiles(sharedUserProfilesMap || getAllLocalUserProfilesMap());
-        }
-      );
-    } catch {
-      broadcastUserProfiles(sharedUserProfilesMap || getAllLocalUserProfilesMap());
+function ensureUserProfilesWindowListeners(): void {
+  if (typeof window === 'undefined' || userProfilesWindowListenersAttached) return;
+  userProfilesWindowListenersAttached = true;
+
+  const handleLocalChange = (e: Event) => {
+    const detail = (e as CustomEvent)?.detail;
+    if (detail?.email) {
+      const norm = String(detail.email).toLowerCase().trim();
+      latestProfileDocsByEmail[norm] = { ...(latestProfileDocsByEmail[norm] || {}), ...detail };
     }
-  }
+    rebuildAndBroadcastMergedProfiles();
+  };
+  const handleUserDeleted = () => {
+    rebuildAndBroadcastMergedProfiles();
+  };
+
+  window.addEventListener('acu_user_profiles_changed', handleLocalChange);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
 }
 
 /**
- * Subscribe to all user profiles in Firestore (`user_profiles` only, no `users` collection query)
- * Multiplexed via shared limited snapshot listener to protect Firestore read quotas.
+ * One-time getDocs fetch for `user_profiles` (deduplicated per page load unless forceRefresh=true)
+ */
+export async function refreshAllUserProfiles(forceRefresh = true): Promise<Record<string, FullUserProfile>> {
+  const localFallback = sharedUserProfilesMap || {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+  };
+
+  if (!forceRefresh && hasFetchedAllUserProfilesThisSession && sharedUserProfilesMap) {
+    return sharedUserProfilesMap;
+  }
+
+  if (!forceRefresh && inFlightAllUserProfilesFetch) {
+    return inFlightAllUserProfilesFetch;
+  }
+
+  inFlightAllUserProfilesFetch = (async () => {
+    try {
+      const colQuery = query(collection(db, 'user_profiles'), limit(500));
+      const snapshot = await getDocs(colQuery);
+      const nextProfileDocs: Record<string, any> = {};
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const rawEmail =
+          d.email ||
+          (docSnap.id.includes('%40') || docSnap.id.includes('@') ? decodeURIComponent(docSnap.id) : '');
+        if (rawEmail) {
+          nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
+        }
+      });
+      latestProfileDocsByEmail = nextProfileDocs;
+      hasFetchedAllUserProfilesThisSession = true;
+      return rebuildAndBroadcastMergedProfiles();
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      broadcastUserProfiles(localFallback);
+      return localFallback;
+    } finally {
+      inFlightAllUserProfilesFetch = null;
+    }
+  })();
+
+  return inFlightAllUserProfilesFetch;
+}
+
+/**
+ * Smart-cached subscription to all user profiles (`user_profiles` only, no `users` collection query, no onSnapshot)
  */
 export function subscribeAllUserProfiles(
   callback: (profilesMap: Record<string, FullUserProfile>) => void
 ): () => void {
   userProfilesListeners.add(callback);
+  ensureUserProfilesWindowListeners();
 
-  // Emit cached/in-memory profiles immediately
-  const initial = sharedUserProfilesMap || getAllLocalUserProfilesMap();
+  const initial = sharedUserProfilesMap || {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+  };
   if (Object.keys(initial).length > 0) {
     callback(initial);
   }
 
-  ensureSharedUserProfilesSubscription();
+  refreshAllUserProfiles(false).catch(() => {});
 
   return () => {
     userProfilesListeners.delete(callback);
-    if (userProfilesListeners.size === 0) {
-      if (sharedUserProfilesUnsub) {
-        sharedUserProfilesUnsub();
-        sharedUserProfilesUnsub = null;
-      }
-    }
   };
 }
 

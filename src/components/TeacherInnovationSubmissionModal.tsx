@@ -18,7 +18,8 @@ import {
   Edit3,
   Trash2,
   AlertCircle,
-  Search
+  Search,
+  RefreshCw
 } from 'lucide-react';
 import { 
   GRADE_LEVELS, 
@@ -34,6 +35,8 @@ import {
   deleteTeacherMedia,
   subscribeAllInnovations,
   subscribeTeacherMedia,
+  refreshAllInnovations,
+  refreshTeacherMedia,
   exportInnovationsToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify,
@@ -88,6 +91,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [copyNotice, setCopyNotice] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -108,6 +112,17 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       unsubMedia();
     };
   }, [userEmail]);
+
+  const handleRefresh = async () => {
+    setIsRefreshing(true);
+    try {
+      await Promise.all([refreshAllInnovations(true), refreshTeacherMedia(true)]);
+      setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 2500);
+    } finally {
+      setIsRefreshing(false);
+    }
+  };
 
   const currentUserUid = React.useMemo(() => resolveUserUid(userEmail), [userEmail]);
 
@@ -408,13 +423,25 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={handleRefresh}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลการส่งสื่อล่าสุด"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">รีเฟรช</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-8 h-8 rounded-full bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white flex items-center justify-center transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
         {/* Tab Navigation */}

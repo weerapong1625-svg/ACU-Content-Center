@@ -19,25 +19,42 @@ export interface GoogleSheetsConfig {
 
 const SETTINGS_COLLECTION = 'system_settings';
 const SHEETS_CONFIG_DOC = 'google_sheets_config';
+const SHEETS_CONFIG_STORAGE_KEY = 'acu_google_sheets_config_cache';
+const SHEETS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const DEFAULT_NEW_SHEET_URL = 'https://docs.google.com/spreadsheets/create';
 
 /**
- * Fetch saved Google Sheets URL configuration from Firestore
+ * Fetch saved Google Sheets URL configuration from Firestore (cached 24h in localStorage)
  */
-export async function fetchGoogleSheetsConfig(): Promise<GoogleSheetsConfig> {
-  try {
-    const docRef = doc(db, SETTINGS_COLLECTION, SHEETS_CONFIG_DOC);
-    const snap = await getDoc(docRef);
-    if (snap.exists()) {
-      return snap.data() as GoogleSheetsConfig;
-    }
-  } catch (err) {
-    console.warn('fetchGoogleSheetsConfig error:', err);
-  }
-  return {
+export async function fetchGoogleSheetsConfig(force = false): Promise<GoogleSheetsConfig> {
+  const defaultConfig: GoogleSheetsConfig = {
     sheetUrl: DEFAULT_NEW_SHEET_URL,
     sheetName: 'ACU สรุปข้อมูลสื่อนวัตกรรมการเรียนรู้และแหล่งเรียนรู้',
   };
+
+  let cachedEntry: (GoogleSheetsConfig & { cachedAt?: number }) | null = null;
+  try {
+    const raw = localStorage.getItem(SHEETS_CONFIG_STORAGE_KEY);
+    if (raw) {
+      cachedEntry = JSON.parse(raw);
+      if (!force && cachedEntry && typeof cachedEntry.cachedAt === 'number' && Date.now() - cachedEntry.cachedAt < SHEETS_CACHE_TTL_MS) {
+        return cachedEntry;
+      }
+    }
+  } catch {}
+
+  try {
+    const docRef = doc(db, SETTINGS_COLLECTION, SHEETS_CONFIG_DOC);
+    const snap = await getDoc(docRef);
+    const result = snap.exists() ? (snap.data() as GoogleSheetsConfig) : defaultConfig;
+    try {
+      localStorage.setItem(SHEETS_CONFIG_STORAGE_KEY, JSON.stringify({ ...result, cachedAt: Date.now() }));
+    } catch {}
+    return result;
+  } catch (err) {
+    console.warn('fetchGoogleSheetsConfig error:', err);
+    return cachedEntry || defaultConfig;
+  }
 }
 
 /**
@@ -47,14 +64,18 @@ export async function saveGoogleSheetsConfig(
   sheetUrl: string,
   adminEmail: string
 ): Promise<{ success: boolean; message: string }> {
+  const payload: GoogleSheetsConfig = {
+    sheetUrl: sheetUrl.trim() || DEFAULT_NEW_SHEET_URL,
+    sheetName: 'ACU สรุปข้อมูลสื่อนวัตกรรมการเรียนรู้และแหล่งเรียนรู้',
+    lastExportAt: new Date().toISOString(),
+    updatedBy: adminEmail,
+  };
+  try {
+    localStorage.setItem(SHEETS_CONFIG_STORAGE_KEY, JSON.stringify({ ...payload, cachedAt: Date.now() }));
+  } catch {}
+
   try {
     const docRef = doc(db, SETTINGS_COLLECTION, SHEETS_CONFIG_DOC);
-    const payload: GoogleSheetsConfig = {
-      sheetUrl: sheetUrl.trim() || DEFAULT_NEW_SHEET_URL,
-      sheetName: 'ACU สรุปข้อมูลสื่อนวัตกรรมการเรียนรู้และแหล่งเรียนรู้',
-      lastExportAt: new Date().toISOString(),
-      updatedBy: adminEmail,
-    };
     await setDoc(docRef, payload, { merge: true });
     return { success: true, message: 'บันทึกลิงก์ Google Sheets สำเร็จ' };
   } catch (err: any) {

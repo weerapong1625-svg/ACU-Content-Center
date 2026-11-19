@@ -1,4 +1,4 @@
-import { doc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 
 export const SUPER_ADMIN_EMAIL = 'weerapong1625@acu.ac.th';
@@ -6,12 +6,17 @@ export const DEFAULT_LOGO_IMAGE = '/acu_active_logo.png';
 
 const LOGO_DOC_ID = 'school_logo';
 export const LOGO_STORAGE_KEY = 'acu_school_logo_config';
+const SETTINGS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 export interface SchoolLogoConfig {
   logoUrl: string;
   updatedBy?: string;
   updatedAt?: string;
+  cachedAt?: number;
 }
+
+let inFlightLogoFetch: Promise<string> | null = null;
+let sessionLogoFetched = false;
 
 /**
  * Check if the provided email is the designated Super Admin
@@ -21,26 +26,96 @@ export function isSuperAdmin(email?: string | null): boolean {
   return email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 }
 
-/**
- * Synchronously get initial logo URL from local cache or fallback
- */
-export function getInitialLogoUrl(): string {
+function readCachedLogoEntry(): SchoolLogoConfig | null {
   try {
     const raw = localStorage.getItem(LOGO_STORAGE_KEY);
     if (raw) {
-      const cached = JSON.parse(raw);
+      const cached = JSON.parse(raw) as SchoolLogoConfig;
       if (cached && typeof cached.logoUrl === 'string' && cached.logoUrl.trim()) {
-        return cached.logoUrl;
+        return cached;
       }
     }
   } catch (err) {
     console.warn('Could not read cached logo config:', err);
   }
+  return null;
+}
+
+function isLogoCacheFresh(cached: SchoolLogoConfig | null): boolean {
+  if (!cached || typeof cached.cachedAt !== 'number') return false;
+  return Date.now() - cached.cachedAt < SETTINGS_CACHE_TTL_MS;
+}
+
+/**
+ * Synchronously get initial logo URL from local cache or fallback
+ */
+export function getInitialLogoUrl(): string {
+  const cached = readCachedLogoEntry();
+  if (cached?.logoUrl) {
+    return cached.logoUrl;
+  }
   return DEFAULT_LOGO_IMAGE;
 }
 
 /**
- * Real-time subscription to school logo stored in Firestore
+ * Fetch school logo once from Firestore (respecting 24h localStorage cache unless force=true)
+ */
+export async function fetchSchoolLogoOnce(force = false): Promise<string> {
+  const cached = readCachedLogoEntry();
+  if (!force && (sessionLogoFetched || isLogoCacheFresh(cached))) {
+    return cached?.logoUrl || DEFAULT_LOGO_IMAGE;
+  }
+
+  if (!force && inFlightLogoFetch) {
+    return inFlightLogoFetch;
+  }
+
+  inFlightLogoFetch = (async () => {
+    try {
+      const logoRef = doc(db, 'system_settings', LOGO_DOC_ID);
+      const snapshot = await getDoc(logoRef);
+      sessionLogoFetched = true;
+
+      if (snapshot.exists()) {
+        const data = snapshot.data() as SchoolLogoConfig;
+        if (data?.logoUrl) {
+          const toCache: SchoolLogoConfig = { ...data, cachedAt: Date.now() };
+          try {
+            localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(toCache));
+          } catch {
+            // ignore
+          }
+          try {
+            window.dispatchEvent(new CustomEvent('acu_school_logo_changed', { detail: data.logoUrl }));
+          } catch {}
+          return data.logoUrl;
+        }
+      }
+
+      // Cache default state for 24h so missing doc doesn't cause repeated reads
+      const defaultEntry: SchoolLogoConfig = { logoUrl: DEFAULT_LOGO_IMAGE, cachedAt: Date.now() };
+      try {
+        localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(defaultEntry));
+      } catch {}
+      return DEFAULT_LOGO_IMAGE;
+    } catch (error) {
+      if (isQuotaExceededError(error)) {
+        notifyQuotaExceeded();
+        console.warn('[Firestore] Daily read quota exceeded for logo fetch; using cached/default logo.');
+      } else {
+        console.warn('School logo fetch fallback:', error);
+      }
+      return getInitialLogoUrl();
+    } finally {
+      inFlightLogoFetch = null;
+    }
+  })();
+
+  return inFlightLogoFetch;
+}
+
+/**
+ * Smart-cached subscription to school logo (one-time getDoc cached for 24h + instant local event sync)
  */
 export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => void {
   onUpdate(getInitialLogoUrl());
@@ -53,53 +128,21 @@ export function subscribeSchoolLogo(onUpdate: (logoUrl: string) => void): () => 
   };
   window.addEventListener('acu_school_logo_changed', handleCustomUpdate);
 
-  try {
-    const logoRef = doc(db, 'system_settings', LOGO_DOC_ID);
-    const unsubscribe = onSnapshot(
-      logoRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data() as SchoolLogoConfig;
-          if (data?.logoUrl) {
-            try {
-              localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(data));
-            } catch {
-              // ignore
-            }
-            onUpdate(data.logoUrl);
-            return;
-          }
-        }
-        // When deleted/missing on server, clear stale cache if needed and emit default
-        try {
-          localStorage.removeItem(LOGO_STORAGE_KEY);
-        } catch {}
-        onUpdate(DEFAULT_LOGO_IMAGE);
-      },
-      (error) => {
-        if (isQuotaExceededError(error)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Daily read quota exceeded for logo subscription; using cached/default logo.');
-        } else {
-          console.warn('Realtime logo subscription warning:', error);
-        }
-        onUpdate(getInitialLogoUrl());
+  let active = true;
+  fetchSchoolLogoOnce(false)
+    .then((url) => {
+      if (active && url) {
+        onUpdate(url);
       }
-    );
-    return () => {
-      window.removeEventListener('acu_school_logo_changed', handleCustomUpdate);
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-    }
-    console.warn('Could not initialize realtime logo listener:', err);
-    onUpdate(getInitialLogoUrl());
-    return () => {
-      window.removeEventListener('acu_school_logo_changed', handleCustomUpdate);
-    };
-  }
+    })
+    .catch(() => {
+      if (active) onUpdate(getInitialLogoUrl());
+    });
+
+  return () => {
+    active = false;
+    window.removeEventListener('acu_school_logo_changed', handleCustomUpdate);
+  };
 }
 
 /**
@@ -123,7 +166,8 @@ export async function saveSchoolLogo(
   };
 
   try {
-    localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify({ ...payload, cachedAt: Date.now() }));
+    sessionLogoFetched = true;
   } catch (err) {
     console.warn('LocalStorage save error:', err);
   }
@@ -164,7 +208,8 @@ export async function resetSchoolLogo(
   }
 
   try {
-    localStorage.removeItem(LOGO_STORAGE_KEY);
+    localStorage.setItem(LOGO_STORAGE_KEY, JSON.stringify({ logoUrl: DEFAULT_LOGO_IMAGE, cachedAt: Date.now() }));
+    sessionLogoFetched = true;
   } catch {
     // ignore
   }

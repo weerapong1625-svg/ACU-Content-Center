@@ -1,4 +1,4 @@
-import { doc, getDoc, setDoc, deleteDoc, onSnapshot } from 'firebase/firestore';
+import { doc, getDoc, setDoc, deleteDoc } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 
 export interface PopupBannerConfig {
@@ -9,6 +9,7 @@ export interface PopupBannerConfig {
   enabled?: boolean;
   updatedBy?: string;
   updatedAt?: string;
+  cachedAt?: number;
 }
 
 export const DEFAULT_BANNER_IMAGE = '/default_welcome_banner.jpg';
@@ -16,6 +17,10 @@ export const DEFAULT_BANNER_IMAGE_2 = '/798077767_1372050918343560_1643452051179
 
 const BANNER_DOC_ID = 'popup_banner';
 export const LOCAL_STORAGE_KEY = 'acu_popup_banner_config';
+const SETTINGS_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+let inFlightBannerFetch: Promise<PopupBannerConfig> | null = null;
+let sessionBannerFetched = false;
 
 function getCachedBannerConfig(): PopupBannerConfig | null {
   try {
@@ -27,6 +32,21 @@ function getCachedBannerConfig(): PopupBannerConfig | null {
     console.warn('Could not read cached banner config:', err);
   }
   return null;
+}
+
+function isBannerCacheFresh(cached: PopupBannerConfig | null): boolean {
+  if (!cached || typeof cached.cachedAt !== 'number') return false;
+  return Date.now() - cached.cachedAt < SETTINGS_CACHE_TTL_MS;
+}
+
+function getDefaultBannerConfig(): PopupBannerConfig {
+  return {
+    bannerImageUrl: DEFAULT_BANNER_IMAGE,
+    bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
+    title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
+    title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
+    enabled: true,
+  };
 }
 
 function getCachedOrDefaultBannerConfig(): PopupBannerConfig {
@@ -42,13 +62,7 @@ function getCachedOrDefaultBannerConfig(): PopupBannerConfig {
       updatedAt: cached.updatedAt,
     };
   }
-  return {
-    bannerImageUrl: DEFAULT_BANNER_IMAGE,
-    bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
-    title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
-    title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
-    enabled: true,
-  };
+  return getDefaultBannerConfig();
 }
 
 /**
@@ -82,7 +96,73 @@ export function hasCachedBannerConfig(): boolean {
 }
 
 /**
- * Real-time subscription to the announcement banner configuration in Firestore.
+ * Fetch the active popup banner configuration (one-time getDoc cached 24h in localStorage)
+ */
+export async function fetchPopupBannerConfig(force = false): Promise<PopupBannerConfig> {
+  const cached = getCachedBannerConfig();
+  if (!force && (sessionBannerFetched || isBannerCacheFresh(cached))) {
+    return getCachedOrDefaultBannerConfig();
+  }
+
+  if (!force && inFlightBannerFetch) {
+    return inFlightBannerFetch;
+  }
+
+  inFlightBannerFetch = (async () => {
+    try {
+      const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);
+      const snapshot = await getDoc(bannerRef);
+      sessionBannerFetched = true;
+
+      if (snapshot.exists()) {
+        const data = snapshot.data() as PopupBannerConfig;
+        if (data.bannerImageUrl) {
+          const fullConfig: PopupBannerConfig = {
+            bannerImageUrl: data.bannerImageUrl,
+            bannerImageUrl2: data.bannerImageUrl2 || cached?.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2,
+            title: data.title || 'ประกาศ/ภาพประชาสัมพันธ์ 1',
+            title2: data.title2 || 'ประกาศ/ภาพประชาสัมพันธ์ 2',
+            enabled: data.enabled !== false,
+            updatedBy: data.updatedBy,
+            updatedAt: data.updatedAt,
+          };
+          try {
+            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ ...fullConfig, cachedAt: Date.now() }));
+          } catch {
+            // ignore
+          }
+          try {
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('acu_popup_banner_changed', { detail: fullConfig }));
+            }
+          } catch {}
+          return fullConfig;
+        }
+      }
+
+      const defaultCfg = getDefaultBannerConfig();
+      try {
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ ...defaultCfg, cachedAt: Date.now() }));
+      } catch {}
+      return defaultCfg;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+        console.warn('[Firestore] Daily read quota exceeded while fetching banner config; using local/default fallback.');
+      } else {
+        console.warn('Notice fetching banner config from Firestore; using fallback:', err);
+      }
+      return getCachedOrDefaultBannerConfig();
+    } finally {
+      inFlightBannerFetch = null;
+    }
+  })();
+
+  return inFlightBannerFetch;
+}
+
+/**
+ * Smart-cached subscription to the announcement banner configuration in Firestore (24h TTL + local event sync)
  */
 export function subscribePopupBanner(onUpdate: (config: PopupBannerConfig) => void): () => void {
   onUpdate(getCachedOrDefaultBannerConfig());
@@ -97,105 +177,21 @@ export function subscribePopupBanner(onUpdate: (config: PopupBannerConfig) => vo
     window.addEventListener('acu_popup_banner_changed', handleCustomUpdate);
   }
 
-  try {
-    const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);
-    const unsubscribe = onSnapshot(
-      bannerRef,
-      (snapshot) => {
-        if (snapshot.exists()) {
-          const data = snapshot.data() as PopupBannerConfig;
-          if (data?.bannerImageUrl) {
-            const configWithDefaults: PopupBannerConfig = {
-              bannerImageUrl: data.bannerImageUrl,
-              bannerImageUrl2: data.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2,
-              title: data.title || 'ประชาสัมพันธ์ 1',
-              title2: data.title2 || 'ประชาสัมพันธ์ 2 (พระราชดำรัสฯ ด้าน AI)',
-              enabled: data.enabled !== false,
-              updatedBy: data.updatedBy,
-              updatedAt: data.updatedAt,
-            };
-            try {
-              localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(configWithDefaults));
-            } catch {
-              // ignore
-            }
-            onUpdate(configWithDefaults);
-            return;
-          }
-        }
-        onUpdate(getCachedOrDefaultBannerConfig());
-      },
-      (error) => {
-        if (isQuotaExceededError(error)) {
-          notifyQuotaExceeded();
-          console.warn('[Firestore] Daily read quota exceeded for banner subscription; using cached/default banner.');
-          onUpdate(getCachedOrDefaultBannerConfig());
-          return;
-        }
-        console.warn('Realtime banner subscription warning:', error);
-        onUpdate(getCachedOrDefaultBannerConfig());
-      }
-    );
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_popup_banner_changed', handleCustomUpdate);
-      }
-      unsubscribe();
-    };
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
+  let active = true;
+  fetchPopupBannerConfig(false)
+    .then((cfg) => {
+      if (active) onUpdate(cfg);
+    })
+    .catch(() => {
+      if (active) onUpdate(getCachedOrDefaultBannerConfig());
+    });
+
+  return () => {
+    active = false;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('acu_popup_banner_changed', handleCustomUpdate);
     }
-    console.warn('Could not initialize realtime banner listener:', err);
-    onUpdate(getCachedOrDefaultBannerConfig());
-    return () => {
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_popup_banner_changed', handleCustomUpdate);
-      }
-    };
-  }
-}
-
-/**
- * Fetch the active popup banner configuration
- */
-export async function fetchPopupBannerConfig(): Promise<PopupBannerConfig> {
-  const cached = getCachedBannerConfig();
-
-  try {
-    const bannerRef = doc(db, 'system_settings', BANNER_DOC_ID);
-    const snapshot = await getDoc(bannerRef);
-
-    if (snapshot.exists()) {
-      const data = snapshot.data() as PopupBannerConfig;
-      if (data.bannerImageUrl) {
-        const fullConfig: PopupBannerConfig = {
-          bannerImageUrl: data.bannerImageUrl,
-          bannerImageUrl2: data.bannerImageUrl2 || cached?.bannerImageUrl2 || DEFAULT_BANNER_IMAGE_2,
-          title: data.title || 'ประกาศ/ภาพประชาสัมพันธ์ 1',
-          title2: data.title2 || 'ประกาศ/ภาพประชาสัมพันธ์ 2',
-          enabled: data.enabled !== false,
-          updatedBy: data.updatedBy,
-          updatedAt: data.updatedAt,
-        };
-        try {
-          localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(fullConfig));
-        } catch {
-          // ignore
-        }
-        return fullConfig;
-      }
-    }
-  } catch (err) {
-    if (isQuotaExceededError(err)) {
-      notifyQuotaExceeded();
-      console.warn('[Firestore] Daily read quota exceeded while fetching banner config; using local/default fallback.');
-    } else {
-      console.warn('Notice fetching banner config from Firestore; using fallback:', err);
-    }
-  }
-
-  return getCachedOrDefaultBannerConfig();
+  };
 }
 
 /**
@@ -221,7 +217,8 @@ export async function savePopupBannerConfig(config: {
 
   // 1. Cache immediately to LocalStorage & notify components instantly
   try {
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(payload));
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ ...payload, cachedAt: Date.now() }));
+    sessionBannerFetched = true;
   } catch (err) {
     console.warn('LocalStorage save error:', err);
   }
@@ -251,18 +248,13 @@ export async function savePopupBannerConfig(config: {
  * Reset banner configuration back to default original images
  */
 export async function resetPopupBannerConfig(): Promise<boolean> {
+  const defaultCfg = getDefaultBannerConfig();
   try {
-    localStorage.removeItem(LOCAL_STORAGE_KEY);
+    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify({ ...defaultCfg, cachedAt: Date.now() }));
+    sessionBannerFetched = true;
   } catch {
     // ignore
   }
-  const defaultCfg: PopupBannerConfig = {
-    bannerImageUrl: DEFAULT_BANNER_IMAGE,
-    bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
-    title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
-    title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
-    enabled: true,
-  };
   try {
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_popup_banner_changed', { detail: defaultCfg }));
