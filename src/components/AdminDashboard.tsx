@@ -85,7 +85,9 @@ import {
   saveCertificateLogo, 
   resetCertificateLogo 
 } from '../services/certificateLogoService';
-import { 
+import { onAuthStateChanged } from 'firebase/auth';
+import { auth, isAuthReady, waitForAuthReady } from '../firebase';
+import {
   InnovationSubmission, 
   FacilitySubmission, 
   TeacherMediaWork,
@@ -95,6 +97,7 @@ import {
   refreshAllInnovations,
   refreshAllFacilities,
   refreshTeacherMedia,
+  refreshSharedIdeas,
   syncUserSubmissionCountIfOutOfSync,
   saveCriteriaPoster,
   subscribeCriteriaPoster,
@@ -128,7 +131,13 @@ import {
 } from '../services/googleSheetsService';
 import {
   LoginLogEntry,
+  SiteVisitSummary,
+  AdminStatsSummary,
+  getLocalAdminStatsSummary,
+  fetchAdminStatsSummaryOnce,
   subscribeAllLoginLogs,
+  subscribeSiteSummary,
+  fetchSiteSummaryOnce,
   fetchAdminLoginLogsOnce,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
@@ -170,11 +179,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Navigation tabs
   const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'certificates' | 'privileges' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
 
-  // Real-time Firestore data
+  // Auth & Admin role resolution gate (must BOTH resolve before triggering Firestore stats queries)
+  const [authReady, setAuthReady] = useState<boolean>(() => isAuthReady());
+  const isAdminResolved = authReady && isSuperAdmin;
+
+  // Real-time / smart-cached Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
   const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(null);
+  const [adminStatsSummary, setAdminStatsSummary] = useState<AdminStatsSummary | null>(() => getLocalAdminStatsSummary());
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
@@ -187,10 +202,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [managingPrivilegeTeacher, setManagingPrivilegeTeacher] = useState<TeacherPrivilegeAdminItem | null>(null);
 
   // Yearly Stats & Certificate Filter
-  const [selectedYear, setSelectedYear] = useState<string>('2026');
+  const [selectedYear, setSelectedYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
 
   // 1. Visitor logs filter by year and search
-  const [visitorYear, setVisitorYear] = useState<string>('2026');
+  const [visitorYear, setVisitorYear] = useState<string>(() => String(CURRENT_CALENDAR_YEAR));
   const [visitorSearchTerm, setVisitorSearchTerm] = useState('');
 
   // 2. Online Certificate Verification Filter & Target state
@@ -361,7 +376,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // 1. Subscribe to real-time collections
+  // 0. Wait for Firebase Auth (onAuthStateChanged) to settle before gating Admin fetches
+  useEffect(() => {
+    let active = true;
+    const unsubAuth = onAuthStateChanged(auth, () => {
+      if (active) setAuthReady(true);
+    });
+    waitForAuthReady().then(() => {
+      if (active) setAuthReady(true);
+    });
+    const handleAuthEvt = () => {
+      if (active) setAuthReady(true);
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('acu_auth_ready', handleAuthEvt);
+    }
+    return () => {
+      active = false;
+      unsubAuth();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_auth_ready', handleAuthEvt);
+      }
+    };
+  }, []);
+
+  // 1. Subscribe to in-memory/localStorage smart-cached streams immediately (0ms UI render, zero onSnapshot)
   useEffect(() => {
     setIsLoading(true);
     const unsubInnovations = subscribeAllInnovations((list) => {
@@ -393,6 +432,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setLoginLogs(logs);
     });
 
+    const unsubSiteSummary = subscribeSiteSummary((summary) => {
+      setSiteSummary(summary);
+    });
+
     const unsubProfiles = subscribeAllUserProfiles((profiles) => {
       setUserProfilesMap(profiles);
     });
@@ -409,10 +452,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setPrivilegeSummaries(list);
     });
 
-    // Fetch Google Sheets Config
-    fetchGoogleSheetsConfig().then((cfg) => {
-      if (cfg.sheetUrl) setGoogleSheetsUrl(cfg.sheetUrl);
-    });
+    const handleAdminStatsUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<AdminStatsSummary>)?.detail;
+      if (detail) {
+        setAdminStatsSummary(detail);
+        if (detail.siteSummary) {
+          setSiteSummary(detail.siteSummary);
+        }
+      }
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
+    }
 
     return () => {
       unsubInnovations();
@@ -422,43 +473,119 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubCertLogo();
       unsubPoster();
       unsubLogs();
+      unsubSiteSummary();
       unsubProfiles();
       unsubBanner();
       unsubPrivileges();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
+      }
     };
   }, []);
 
-  // Fetch latest 30 login logs ONLY when Admin explicitly opens the Visitors/Logs tab
+  // 2. Parallel Admin summary & collection fetch — strictly gated on (authReady && isSuperAdmin)
+  // Re-triggers automatically once isAdminResolved becomes true; uses Promise.allSettled so one failure never blocks others.
   useEffect(() => {
+    if (!isAdminResolved) return;
+    let active = true;
+
+    Promise.allSettled([
+      fetchAdminStatsSummaryOnce(false, userEmail),
+      fetchGoogleSheetsConfig(),
+      refreshAllInnovations(false),
+      refreshTeacherMedia(false),
+      refreshAllFacilities(false),
+      refreshAllUserProfiles(false),
+      refreshSharedIdeas(false),
+      refreshRewardClaims(false),
+    ]).then((results) => {
+      if (!active) return;
+      const statsRes = results[0];
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) {
+          setSiteSummary(statsRes.value.siteSummary);
+        }
+      }
+      const sheetsRes = results[1];
+      if (sheetsRes.status === 'fulfilled' && sheetsRes.value?.sheetUrl) {
+        setGoogleSheetsUrl(sheetsRes.value.sheetUrl);
+      }
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [isAdminResolved, userEmail]);
+
+  // 3. Fetch latest 50 login logs ONLY after (authReady && isSuperAdmin) when Visitors tab opens; refresh summary on Stats tab (3-min TTL)
+  useEffect(() => {
+    if (!isAdminResolved) return;
     if (activeTab === 'visitors') {
       setIsRefreshingLogs(true);
-      fetchAdminLoginLogsOnce(false, 30, userEmail)
+      Promise.allSettled([
+        fetchAdminStatsSummaryOnce(false, userEmail),
+        fetchAdminLoginLogsOnce(false, 50, userEmail),
+      ])
+        .then(([statsRes]) => {
+          if (statsRes.status === 'fulfilled' && statsRes.value) {
+            setAdminStatsSummary(statsRes.value);
+            if (statsRes.value.siteSummary) {
+              setSiteSummary(statsRes.value.siteSummary);
+            }
+          }
+        })
         .finally(() => setIsRefreshingLogs(false));
+    } else if (activeTab === 'stats') {
+      fetchAdminStatsSummaryOnce(false, userEmail)
+        .then((res) => {
+          if (res) {
+            setAdminStatsSummary(res);
+            if (res.siteSummary) setSiteSummary(res.siteSummary);
+          }
+        })
+        .catch(() => {});
     }
-  }, [activeTab, userEmail]);
+  }, [activeTab, isAdminResolved, userEmail]);
 
   const handleRefreshLoginLogs = async () => {
+    if (!isAdminResolved) return;
     setIsRefreshingLogs(true);
     try {
-      await fetchAdminLoginLogsOnce(true, 30, userEmail);
-      showToast('อัปเดตประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
+      const [statsRes] = await Promise.allSettled([
+        fetchAdminStatsSummaryOnce(true, userEmail),
+        fetchAdminLoginLogsOnce(true, 50, userEmail),
+      ]);
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
+      }
+      showToast('อัปเดตสถิติและประวัติการเข้าชม (50 รายการล่าสุด) สำเร็จ');
     } finally {
       setIsRefreshingLogs(false);
     }
   };
 
   const handleRefreshAllAdminData = async () => {
+    if (!isAdminResolved) return;
     setIsRefreshingAll(true);
     try {
-      await Promise.all([
+      const results = await Promise.allSettled([
+        fetchAdminStatsSummaryOnce(true, userEmail),
         refreshAllInnovations(true),
         refreshAllFacilities(true),
         refreshTeacherMedia(true),
         refreshAllUserProfiles(true),
+        refreshSharedIdeas(true),
         refreshRewardClaims(true),
-        activeTab === 'visitors' ? fetchAdminLoginLogsOnce(true, 30, userEmail) : Promise.resolve([]),
+        fetchAdminLoginLogsOnce(true, 50, userEmail),
       ]);
-      showToast('ซิงค์ข้อมูลล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
+      const statsRes = results[0];
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
+      }
+      showToast('รีเฟรชข้อมูลสถิติล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
     } finally {
       setIsRefreshingAll(false);
     }
@@ -867,8 +994,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
     });
+    const activeSummary = siteSummary || adminStatsSummary?.siteSummary;
+    if (activeSummary?.yearlyVisits) {
+      Object.entries(activeSummary.yearlyVisits).forEach(([yr, val]) => {
+        const num = Number(val || 0);
+        if (num > (counts[yr] || 0)) {
+          counts[yr] = num;
+        }
+      });
+    }
+    const serverTotal = adminStatsSummary?.totalLoginLogsCount || 0;
+    const curYearStr = String(CURRENT_CALENDAR_YEAR);
+    if (serverTotal > (counts[curYearStr] || 0) && Object.keys(counts).length <= 1) {
+      counts[curYearStr] = serverTotal;
+    }
     return counts;
-  }, [loginLogs]);
+  }, [loginLogs, siteSummary, adminStatsSummary]);
+
+  const totalServerVisitorsCount = Math.max(
+    loginLogs.length,
+    siteSummary?.totalVisits || 0,
+    adminStatsSummary?.totalLoginLogsCount || 0
+  );
+
+  const visitorTabKpis = useMemo(() => {
+    const filteredAdminCount = filteredLoginLogs.filter(
+      (l) => l.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()
+    ).length;
+    const filteredTeacherCount = filteredLoginLogs.filter(
+      (l) => l.email.trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()
+    ).length;
+    const uniqueVisibleUsers = new Set(filteredLoginLogs.map((l) => l.email.trim().toLowerCase())).size;
+
+    if (visitorYear === 'all' && !visitorSearchTerm.trim()) {
+      const totalVisits = totalServerVisitorsCount;
+      const adminVisits = Math.max(filteredAdminCount, adminStatsSummary?.adminLoginLogsCount || 0);
+      const teacherVisits = Math.max(
+        filteredTeacherCount,
+        Math.max(0, (adminStatsSummary?.totalLoginLogsCount || 0) - (adminStatsSummary?.adminLoginLogsCount || 0))
+      );
+      return {
+        totalVisits,
+        uniqueUsers: Math.max(uniqueVisibleUsers, Object.keys(userProfilesMap).length > 0 ? uniqueVisibleUsers : 0),
+        adminVisits,
+        teacherVisits,
+      };
+    }
+
+    const yearSummaryCount = visitorYear !== 'all' && !visitorSearchTerm.trim()
+      ? (visitorYearlyBreakdown[visitorYear] || 0)
+      : 0;
+
+    return {
+      totalVisits: Math.max(filteredLoginLogs.length, yearSummaryCount),
+      uniqueUsers: uniqueVisibleUsers,
+      adminVisits: filteredAdminCount,
+      teacherVisits: filteredTeacherCount,
+    };
+  }, [filteredLoginLogs, visitorYear, visitorSearchTerm, totalServerVisitorsCount, adminStatsSummary, visitorYearlyBreakdown, userProfilesMap]);
 
   // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี
   const certificateYearlyBreakdown = useMemo(() => {
@@ -901,16 +1084,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return result;
   }, [loginLogs, userProfilesMap]);
 
-  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
+  // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี (รวมและตัดซ้ำทั้ง innovations + teacherMedia)
   const innovationYearlyBreakdown = useMemo(() => {
     const counts: Record<string, number> = {};
+    const seenKeys = new Set<string>();
     innovations.forEach((item) => {
+      if (item.id) seenKeys.add(`innov_${item.id}`);
       const d = new Date(item.submittedAt);
-      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : '2026';
+      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : String(CURRENT_CALENDAR_YEAR);
+      counts[yr] = (counts[yr] || 0) + 1;
+    });
+    teacherMedia.forEach((m) => {
+      const stripped = m.id?.startsWith('work_') ? m.id.slice(5) : m.id;
+      if (stripped && seenKeys.has(`innov_${stripped}`)) return;
+      const d = new Date(m.createdAt);
+      const yr = !isNaN(d.getTime()) ? d.getFullYear().toString() : String(CURRENT_CALENDAR_YEAR);
       counts[yr] = (counts[yr] || 0) + 1;
     });
     return counts;
-  }, [innovations]);
+  }, [innovations, teacherMedia]);
 
   // 4. บันทึกแหล่งเรียนรู้: จำนวนการใช้แหล่งเรียนรู้แยกตามปี
   const facilityYearlyBreakdown = useMemo(() => {
@@ -1142,14 +1334,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Yearly Stats calculation
+  // Yearly Stats calculation (computed instantaneously in memory from loaded media, facilities, logs, & siteSummary)
   const yearlyStats = useMemo(() => {
     const targetYear = parseInt(selectedYear) || 2026;
+    const targetYearStr = String(targetYear);
 
-    const yearInnovations = innovations.filter(i => {
-      const d = new Date(i.submittedAt);
-      return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
+    // Deduplicate innovations + direct teacherMedia entries in memory so every submitted work is counted once
+    const mediaSeenKeys = new Set<string>();
+    const combinedMediaTimestamps: string[] = [];
+
+    innovations.forEach((i) => {
+      const key = i.id ? `innov_${i.id}` : '';
+      if (key) mediaSeenKeys.add(key);
+      if (i.submittedAt) combinedMediaTimestamps.push(i.submittedAt);
     });
+    teacherMedia.forEach((m) => {
+      const stripped = m.id?.startsWith('work_') ? m.id.slice(5) : m.id;
+      if (stripped && mediaSeenKeys.has(`innov_${stripped}`)) return;
+      const ts = m.createdAt || '';
+      if (ts) combinedMediaTimestamps.push(ts);
+    });
+
+    const yearMediaDates = combinedMediaTimestamps
+      .map((ts) => new Date(ts))
+      .filter((d) => !isNaN(d.getTime()) && d.getFullYear() === targetYear);
 
     const yearFacilities = facilities.filter(f => {
       const d = new Date(f.createdAt || f.usageDateTime);
@@ -1168,15 +1376,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
+    const summaryMonths = siteSummary?.monthlyVisits?.[targetYearStr] || {};
     const monthlyBreakdown = monthNames.map((name, idx) => {
-      const visits = yearLogs.filter(l => {
+      const logsVisits = yearLogs.filter(l => {
         const parts = getBangkokDateParts(l.loginTimestamp);
         return parts ? parts.monthIndex === idx : false;
       }).length;
-      const mediaCount = yearInnovations.filter(i => {
-        const d = new Date(i.submittedAt);
-        return !isNaN(d.getTime()) && d.getMonth() === idx;
-      }).length;
+      const summaryVisits = Number(summaryMonths[String(idx)] || 0);
+      const visits = Math.max(logsVisits, summaryVisits);
+
+      const mediaCount = yearMediaDates.filter(d => d.getMonth() === idx).length;
       const facCount = yearFacilities.filter(f => {
         const d = new Date(f.createdAt || f.usageDateTime);
         return !isNaN(d.getTime()) && d.getMonth() === idx;
@@ -1208,18 +1417,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     privilegeSummaries.forEach(p => {
       if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
     });
-    const totalAccountsCount = allSystemAccounts.size;
+    const totalAccountsCount = Math.max(
+      allSystemAccounts.size,
+      adminStatsSummary?.totalUserProfilesCount || 0
+    );
+
+    const monthlyVisitsSum = monthlyBreakdown.reduce((sum, m) => sum + m.visits, 0);
+    const activeSiteSummary = siteSummary || adminStatsSummary?.siteSummary;
+    const summaryYearTotal = Number(activeSiteSummary?.yearlyVisits?.[targetYearStr] || 0);
+    const serverTotalIfCurrentYear =
+      targetYear === CURRENT_CALENDAR_YEAR ? (adminStatsSummary?.totalLoginLogsCount || 0) : 0;
+    const totalVisits = Math.max(
+      yearLogs.length,
+      monthlyVisitsSum,
+      summaryYearTotal,
+      serverTotalIfCurrentYear
+    );
 
     return {
       targetYear,
-      totalVisits: yearLogs.length,
+      totalVisits,
       uniqueVisitors: uniqueVisitorEmails,
       totalAccounts: totalAccountsCount,
-      totalMedia: yearInnovations.length,
+      totalMedia: yearMediaDates.length,
       totalFacilities: yearFacilities.length,
       monthlyBreakdown,
     };
-  }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
+  }, [innovations, teacherMedia, facilities, loginLogs, siteSummary, adminStatsSummary, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
@@ -1610,12 +1834,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <button
               type="button"
               onClick={handleRefreshAllAdminData}
-              disabled={isRefreshingAll}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="ดึงข้อมูลล่าสุดจากฐานข้อมูล"
+              disabled={isRefreshingAll || !isAdminResolved}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="ดึงข้อมูลสถิติและรายการทั้งหมดล่าสุดจากฐานข้อมูล (ข้ามแคช 3 นาที)"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              <span>รีเฟรชข้อมูล</span>
+              <span>รีเฟรชข้อมูลสถิติ</span>
             </button>
 
             <button
@@ -1642,7 +1866,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <BarChart3 className="w-3.5 h-3.5" />
-            <span>สถิติและสรุปประจำปี</span>
+            <span>สถิติโดยรวม</span>
           </button>
 
           <button
@@ -1655,7 +1879,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Clock className="w-3.5 h-3.5" />
-            <span>สถิติผู้เข้าชม ({loginLogs.length})</span>
+            <span>สถิติผู้เข้าชม ({totalServerVisitorsCount})</span>
           </button>
 
           <button
@@ -1752,6 +1976,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
            ========================================================================= */}
         {activeTab === 'stats' && (
           <div className="space-y-6">
+
+            {/* Section Bar with On-Demand Refresh Stats Button */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
+              <div>
+                <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
+                  <BarChart3 className="w-4 h-4 text-blue-400" />
+                  <span>สถิติโดยรวมและสรุปข้อมูลประจำปี</span>
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  โหลดข้อมูลแบบขนานพร้อมแคช 3 นาที (อัปเดตล่าสุด:{' '}
+                  {adminStatsSummary?.fetchedAt
+                    ? new Date(adminStatsSummary.fetchedAt).toLocaleTimeString('th-TH', {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                      })
+                    : 'กำลังซิงค์...'}
+                  )
+                </p>
+              </div>
+              <button
+                type="button"
+                id="btn-refresh-admin-stats-overall"
+                onClick={handleRefreshAllAdminData}
+                disabled={isRefreshingAll || !isAdminResolved}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+                <span>{isRefreshingAll ? 'กำลังอัปเดตสถิติ...' : 'รีเฟรชข้อมูลสถิติ'}</span>
+              </button>
+            </div>
             
             {/* 4 Hero Metric Cards */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -2122,12 +2377,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 <button
                   type="button"
                   onClick={handleRefreshLoginLogs}
-                  disabled={isRefreshingLogs}
+                  disabled={isRefreshingLogs || !isAdminResolved}
                   className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                  title="ดึงประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
+                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 50 รายการจากฐานข้อมูล"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
-                  <span>รีเฟรช (30 ล่าสุด)</span>
+                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (50 ล่าสุด)'}</span>
                 </button>
 
                 <button
@@ -2177,7 +2432,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     : 'bg-slate-800 text-slate-400 hover:text-white'
                 }`}
               >
-                ทุกปี ({loginLogs.length})
+                ทุกปี ({totalServerVisitorsCount})
               </button>
               {ADVANCE_YEAR_OPTIONS.map((opt) => {
                 const count = visitorYearlyBreakdown[opt.value] || 0;
@@ -2210,22 +2465,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ยอดเข้าชมทั้งหมด</span>
-                <p className="text-xl font-bold text-blue-400 mt-0.5">{filteredLoginLogs.length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
-                <span className="text-[10px] text-slate-500">{visitorYear === 'all' ? 'ทุกปีสะสม' : `ปี พ.ศ. ${parseInt(visitorYear) + 543}`}</span>
+                <p className="text-xl font-bold text-blue-400 mt-0.5">{visitorTabKpis.totalVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">{visitorYear === 'all' ? 'ทุกปีสะสม (ยอดจริง)' : `ปี พ.ศ. ${parseInt(visitorYear) + 543}`}</span>
               </div>
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ใช้งานไม่ซ้ำ (Unique)</span>
-                <p className="text-xl font-bold text-teal-400 mt-0.5">{new Set(filteredLoginLogs.map(l => l.email.trim().toLowerCase())).size} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
-                <span className="text-[10px] text-slate-500">บัญชี Google SSO</span>
+                <p className="text-xl font-bold text-teal-400 mt-0.5">{visitorTabKpis.uniqueUsers} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
+                <span className="text-[10px] text-slate-500">จากรายการล่าสุด 50 รายการ</span>
               </div>
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ดูแลระบบ (Admin)</span>
-                <p className="text-xl font-bold text-indigo-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <p className="text-xl font-bold text-indigo-400 mt-0.5">{visitorTabKpis.adminVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
                 <span className="text-[10px] text-slate-500">Super Admin</span>
               </div>
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ครูและบุคลากร</span>
-                <p className="text-xl font-bold text-emerald-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <p className="text-xl font-bold text-emerald-400 mt-0.5">{visitorTabKpis.teacherVisits} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
                 <span className="text-[10px] text-slate-500">ผู้ใช้งานทั่วไป</span>
               </div>
             </div>
@@ -2251,7 +2506,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <tbody className="divide-y divide-slate-800">
                     {filteredLoginLogs.length === 0 ? (
                       <tr>
-                        <td colSpan={9} className="py-12 text-center text-slate-500">
+                        <td colSpan={10} className="py-12 text-center text-slate-500">
                           {visitorSearchTerm ? 'ไม่พบข้อมูลที่ตรงกับคำค้นหา' : 'ยังไม่มีประวัติการเข้าชมระบบที่บันทึกไว้'}
                         </td>
                       </tr>

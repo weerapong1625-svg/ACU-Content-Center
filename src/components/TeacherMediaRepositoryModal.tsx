@@ -30,6 +30,7 @@ import {
   updateTeacherMedia,
   deleteTeacherMedia,
   addTeacherMediaDirectly,
+  incrementTeacherMediaViews,
   canUserModify,
   SUBJECT_GROUPS 
 } from '../services/submissionService';
@@ -175,6 +176,18 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     } finally {
       setIsRefreshing(false);
     }
+  };
+
+  const handleViewMedia = (item: TeacherMediaWork, openDetailModal = false) => {
+    const nextViews = (item.views || 0) + 1;
+    const updatedItem: TeacherMediaWork = { ...item, views: nextViews };
+    setRawMediaList((prev) => prev.map((m) => (m.id === item.id ? updatedItem : m)));
+    if (openDetailModal) {
+      setActiveViewItem(updatedItem);
+    } else if (activeViewItem && activeViewItem.id === item.id) {
+      setActiveViewItem(updatedItem);
+    }
+    incrementTeacherMediaViews(item.id).catch(() => {});
   };
 
   // Compute sorted/shuffled list in memory in 0ms without re-subscribing to Firestore
@@ -591,7 +604,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                         />
                         <button
                           type="button"
-                          onClick={() => setActiveViewItem(item)}
+                          onClick={() => handleViewMedia(item, true)}
                           className="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 flex items-center justify-center text-white transition-opacity cursor-pointer"
                           title="ดูภาพขยาย"
                         >
@@ -723,11 +736,20 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                         </>
                       )}
 
+                      <span
+                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-slate-900/80 border border-slate-700/70 text-[11px] text-sky-300 font-semibold"
+                        title="ยอดการเข้าชมสื่อนี้"
+                      >
+                        <Eye className="w-3 h-3 text-sky-400" />
+                        <span>{item.views || 0}</span>
+                      </span>
+
                       {item.onlineUrl ? (
                         <a
                           href={item.onlineUrl}
                           target="_blank"
                           rel="noopener noreferrer"
+                          onClick={() => handleViewMedia(item, false)}
                           className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -736,7 +758,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setActiveViewItem(item)}
+                          onClick={() => handleViewMedia(item, true)}
                           className="px-3 py-1.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-sm cursor-pointer"
                         >
                           <Eye className="w-3.5 h-3.5" />
@@ -907,9 +929,15 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                     <span>{activeViewItem.description}</span>
                   </div>
                 )}
-                <div>
-                  <strong className="text-purple-300">คะแนนเฉลี่ย: </strong>
-                  <span>⭐ {activeViewItem.ratingAvg} / 5 ({activeViewItem.ratingCount} รีวิว)</span>
+                <div className="flex items-center gap-4 flex-wrap">
+                  <div>
+                    <strong className="text-purple-300">คะแนนเฉลี่ย: </strong>
+                    <span>⭐ {activeViewItem.ratingAvg} / 5 ({activeViewItem.ratingCount} รีวิว)</span>
+                  </div>
+                  <div>
+                    <strong className="text-sky-300">ยอดเข้าชม: </strong>
+                    <span>👁️ {activeViewItem.views || 0} ครั้ง</span>
+                  </div>
                 </div>
               </div>
             </div>
@@ -956,6 +984,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                     href={activeViewItem.onlineUrl}
                     target="_blank"
                     rel="noopener noreferrer"
+                    onClick={() => handleViewMedia(activeViewItem, false)}
                     className="px-4 py-2 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-2"
                   >
                     <ExternalLink className="w-4 h-4" />

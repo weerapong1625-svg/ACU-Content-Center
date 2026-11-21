@@ -1,5 +1,5 @@
-import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch } from 'firebase/firestore';
-import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch, increment, getCountFromServer } from 'firebase/firestore';
+import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 import { sanitizeAvatarUrl } from '../utils/avatarUtils';
 
@@ -31,6 +31,28 @@ export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
+export const SITE_SUMMARY_CACHE_KEY = 'acu_site_summary_cache';
+export const ADMIN_OVERALL_STATS_CACHE_KEY = 'acu_admin_overall_stats_cache';
+export const VISITOR_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for visitor & summary counts
+export const ADMIN_STATS_CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes TTL for Admin statistics cache
+
+export interface SiteVisitSummary {
+  totalVisits: number;
+  yearlyVisits: Record<string, number>;
+  monthlyVisits: Record<string, Record<string, number>>;
+  dailyVisits: Record<string, number>;
+  updatedAt?: string;
+  resetAt?: string;
+  cachedAt?: number;
+}
+
+export interface AdminStatsSummary {
+  totalLoginLogsCount: number;
+  adminLoginLogsCount: number;
+  totalUserProfilesCount: number;
+  siteSummary: SiteVisitSummary | null;
+  fetchedAt: number;
+}
 
 // In-memory debounce map to prevent rapid duplicate logs for the same user on this device
 let lastLogTime = 0;
@@ -40,9 +62,18 @@ let lastLogEmail = '';
 const logListeners = new Set<(logs: LoginLogEntry[]) => void>();
 let sharedLatestLogs: LoginLogEntry[] | null = null;
 let hasFetchedLoginLogsFromServer = false;
+let lastLoginLogsFetchedAt = 0;
 let inFlightLoginLogsFetch: Promise<LoginLogEntry[]> | null = null;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
+
+// Shared lightweight summary counter cache (system_settings/site_summary -> 1 getDoc read per 2 min)
+const siteSummaryListeners = new Set<(summary: SiteVisitSummary | null) => void>();
+let sharedSiteSummary: SiteVisitSummary | null = null;
+let inFlightSiteSummaryFetch: Promise<SiteVisitSummary | null> | null = null;
+let siteSummaryWindowListenerAttached = false;
+let sharedAdminStatsSummary: AdminStatsSummary | null = null;
+let inFlightAdminStatsFetch: Promise<AdminStatsSummary | null> | null = null;
 
 const FAKE_SAMPLE_EMAILS = new Set([
   'kanda@acu.ac.th',
@@ -237,6 +268,287 @@ function broadcastLogsToListeners(logs: LoginLogEntry[]): void {
   });
 }
 
+export function getLocalSiteSummary(): SiteVisitSummary | null {
+  if (sharedSiteSummary) return sharedSiteSummary;
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(SITE_SUMMARY_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as SiteVisitSummary;
+      if (parsed && typeof parsed.totalVisits === 'number') {
+        sharedSiteSummary = parsed;
+        return parsed;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function saveLocalSiteSummary(summary: SiteVisitSummary, allowZeroReset = false): void {
+  const existing = getLocalSiteSummary();
+  if (!allowZeroReset && summary.totalVisits === 0 && !summary.resetAt && existing && existing.totalVisits > 0) {
+    return;
+  }
+  const stamped: SiteVisitSummary = {
+    ...summary,
+    cachedAt: summary.cachedAt ?? Date.now(),
+  };
+  sharedSiteSummary = stamped;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(SITE_SUMMARY_CACHE_KEY, JSON.stringify(stamped));
+      window.dispatchEvent(new CustomEvent('acu_site_summary_updated', { detail: stamped }));
+    } catch {}
+  }
+  siteSummaryListeners.forEach((cb) => {
+    try {
+      cb(stamped);
+    } catch {}
+  });
+}
+
+function isSiteSummaryFresh(summary: SiteVisitSummary | null): boolean {
+  if (!summary || typeof summary.cachedAt !== 'number') return false;
+  return Date.now() - summary.cachedAt < VISITOR_CACHE_TTL_MS;
+}
+
+/**
+ * Fetch lightweight summary counter (`system_settings/site_summary`) via a single getDoc read.
+ * Cached in localStorage for 2 minutes; NEVER overwrites positive local counts with 0 on failure/empty.
+ */
+export async function fetchSiteSummaryOnce(forceRefresh = false): Promise<SiteVisitSummary | null> {
+  const cached = getLocalSiteSummary();
+  if (!forceRefresh && isSiteSummaryFresh(cached)) {
+    return cached;
+  }
+  if (!forceRefresh && inFlightSiteSummaryFetch) {
+    return inFlightSiteSummaryFetch;
+  }
+
+  inFlightSiteSummaryFetch = (async () => {
+    try {
+      await waitForAuthReady();
+      const ref = doc(db, 'system_settings', 'site_summary');
+      const snap = await getDoc(ref);
+      if (snap.exists()) {
+        const d = snap.data() as Partial<SiteVisitSummary>;
+        const fetched: SiteVisitSummary = {
+          totalVisits: typeof d.totalVisits === 'number' ? d.totalVisits : 0,
+          yearlyVisits: d.yearlyVisits && typeof d.yearlyVisits === 'object' ? d.yearlyVisits : {},
+          monthlyVisits: d.monthlyVisits && typeof d.monthlyVisits === 'object' ? d.monthlyVisits : {},
+          dailyVisits: d.dailyVisits && typeof d.dailyVisits === 'object' ? d.dailyVisits : {},
+          updatedAt: d.updatedAt || new Date().toISOString(),
+          resetAt: d.resetAt,
+          cachedAt: Date.now(),
+        };
+        if (fetched.totalVisits > 0 || Boolean(fetched.resetAt) || !cached || cached.totalVisits === 0) {
+          saveLocalSiteSummary(fetched, Boolean(fetched.resetAt));
+          return fetched;
+        }
+      }
+      return cached;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      return cached;
+    } finally {
+      inFlightSiteSummaryFetch = null;
+    }
+  })();
+
+  return inFlightSiteSummaryFetch;
+}
+
+export function subscribeSiteSummary(
+  callback: (summary: SiteVisitSummary | null) => void
+): () => void {
+  siteSummaryListeners.add(callback);
+
+  if (typeof window !== 'undefined' && !siteSummaryWindowListenerAttached) {
+    siteSummaryWindowListenerAttached = true;
+    window.addEventListener('acu_site_summary_updated', (e: Event) => {
+      const detail = (e as CustomEvent<SiteVisitSummary>)?.detail;
+      if (detail) {
+        sharedSiteSummary = detail;
+        siteSummaryListeners.forEach((cb) => {
+          try {
+            cb(detail);
+          } catch {}
+        });
+      }
+    });
+  }
+
+  const initial = getLocalSiteSummary();
+  if (initial) {
+    callback(initial);
+  }
+
+  if (!isSiteSummaryFresh(initial)) {
+    fetchSiteSummaryOnce(false)
+      .then((res) => {
+        if (res) callback(res);
+      })
+      .catch(() => {});
+  }
+
+  return () => {
+    siteSummaryListeners.delete(callback);
+  };
+}
+
+export function getLocalAdminStatsSummary(): AdminStatsSummary | null {
+  if (sharedAdminStatsSummary) return sharedAdminStatsSummary;
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(ADMIN_OVERALL_STATS_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as AdminStatsSummary;
+      if (parsed && typeof parsed.fetchedAt === 'number') {
+        sharedAdminStatsSummary = parsed;
+        return parsed;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function saveLocalAdminStatsSummary(summary: AdminStatsSummary, allowZeroReset = false): void {
+  const existing = getLocalAdminStatsSummary();
+  const next: AdminStatsSummary = allowZeroReset
+    ? summary
+    : {
+        totalLoginLogsCount:
+          summary.totalLoginLogsCount > 0
+            ? summary.totalLoginLogsCount
+            : existing?.totalLoginLogsCount || 0,
+        adminLoginLogsCount:
+          summary.adminLoginLogsCount > 0
+            ? summary.adminLoginLogsCount
+            : existing?.adminLoginLogsCount || 0,
+        totalUserProfilesCount:
+          summary.totalUserProfilesCount > 0
+            ? summary.totalUserProfilesCount
+            : existing?.totalUserProfilesCount || 0,
+        siteSummary: summary.siteSummary || existing?.siteSummary || null,
+        fetchedAt: summary.fetchedAt || Date.now(),
+      };
+
+  // Never overwrite non-zero cached summary with all-zero failure output
+  if (
+    !allowZeroReset &&
+    next.totalLoginLogsCount === 0 &&
+    next.totalUserProfilesCount === 0 &&
+    existing &&
+    (existing.totalLoginLogsCount > 0 || existing.totalUserProfilesCount > 0)
+  ) {
+    return;
+  }
+
+  sharedAdminStatsSummary = next;
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(ADMIN_OVERALL_STATS_CACHE_KEY, JSON.stringify(next));
+      window.dispatchEvent(new CustomEvent('acu_admin_stats_updated', { detail: next }));
+    } catch {}
+  }
+}
+
+/**
+ * Fetch Admin aggregate counts (`getCountFromServer` on `login_logs` & `user_profiles` + `site_summary`)
+ * in parallel using Promise.allSettled with a 3-minute localStorage TTL.
+ * Waits for Firebase Auth + verifies Admin role before querying; never writes empty zeros to cache.
+ */
+export async function fetchAdminStatsSummaryOnce(
+  forceRefresh = false,
+  callerEmail?: string
+): Promise<AdminStatsSummary | null> {
+  const cached = getLocalAdminStatsSummary();
+  if (!isAdminLogViewer(callerEmail)) {
+    return cached;
+  }
+
+  const isFresh =
+    cached !== null &&
+    typeof cached.fetchedAt === 'number' &&
+    Date.now() - cached.fetchedAt < ADMIN_STATS_CACHE_TTL_MS;
+
+  if (!forceRefresh && isFresh) {
+    return cached;
+  }
+
+  if (!forceRefresh && inFlightAdminStatsFetch) {
+    return inFlightAdminStatsFetch;
+  }
+
+  inFlightAdminStatsFetch = (async () => {
+    try {
+      await waitForAuthReady();
+      if (!isAdminLogViewer(callerEmail)) {
+        return cached;
+      }
+
+      const logsCol = collection(db, 'login_logs');
+      const profilesCol = collection(db, 'user_profiles');
+      const adminEmail = 'weerapong1625@acu.ac.th';
+
+      const [totalLogsRes, adminLogsRes, totalProfilesRes, siteSummaryRes] = await Promise.allSettled([
+        getCountFromServer(logsCol),
+        getCountFromServer(query(logsCol, where('email', '==', adminEmail))),
+        getCountFromServer(profilesCol),
+        fetchSiteSummaryOnce(forceRefresh),
+      ]);
+
+      const totalLogsVal =
+        totalLogsRes.status === 'fulfilled'
+          ? totalLogsRes.value.data().count
+          : cached?.totalLoginLogsCount || 0;
+      const adminLogsVal =
+        adminLogsRes.status === 'fulfilled'
+          ? adminLogsRes.value.data().count
+          : cached?.adminLoginLogsCount || 0;
+      const totalProfilesVal =
+        totalProfilesRes.status === 'fulfilled'
+          ? totalProfilesRes.value.data().count
+          : cached?.totalUserProfilesCount || 0;
+      const siteSummaryVal =
+        siteSummaryRes.status === 'fulfilled' && siteSummaryRes.value
+          ? siteSummaryRes.value
+          : cached?.siteSummary || getLocalSiteSummary();
+
+      const hasAnySuccess =
+        totalLogsRes.status === 'fulfilled' ||
+        totalProfilesRes.status === 'fulfilled' ||
+        (siteSummaryRes.status === 'fulfilled' && Boolean(siteSummaryRes.value));
+
+      if (!hasAnySuccess && cached) {
+        return cached;
+      }
+
+      const nextSummary: AdminStatsSummary = {
+        totalLoginLogsCount: totalLogsVal,
+        adminLoginLogsCount: adminLogsVal,
+        totalUserProfilesCount: totalProfilesVal,
+        siteSummary: siteSummaryVal,
+        fetchedAt: Date.now(),
+      };
+
+      saveLocalAdminStatsSummary(nextSummary, false);
+      return getLocalAdminStatsSummary() || nextSummary;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      return cached;
+    } finally {
+      inFlightAdminStatsFetch = null;
+    }
+  })();
+
+  return inFlightAdminStatsFetch;
+}
+
 /**
  * Synchronously read authentic login logs from localStorage (strictly genuine logs only)
  */
@@ -409,7 +721,68 @@ export async function logUserLogin(data: {
     console.warn('Could not save local log:', localErr);
   }
 
-  // 2. Persist to Firestore using deterministic doc ID (idempotent across retries)
+  const bkkParts = getBangkokDateParts(nowDate) || {
+    year: nowDate.getFullYear(),
+    monthIndex: nowDate.getMonth(),
+    day: nowDate.getDate(),
+    dateKey: nowIso.split('T')[0],
+  };
+  const yearKey = String(bkkParts.year);
+  const monthKey = String(bkkParts.monthIndex);
+  const dateKey = bkkParts.dateKey;
+
+  // Immediately update local site summary cache & broadcast so active React state reflects +1 right away
+  try {
+    const prevSum = getLocalSiteSummary() || {
+      totalVisits: 0,
+      yearlyVisits: {},
+      monthlyVisits: {},
+      dailyVisits: {},
+    };
+    const nextYearCount = (prevSum.yearlyVisits?.[yearKey] || 0) + 1;
+    const prevYearMonths = prevSum.monthlyVisits?.[yearKey] || {};
+    const nextMonthCount = (prevYearMonths[monthKey] || 0) + 1;
+    const nextDailyCount = (prevSum.dailyVisits?.[dateKey] || 0) + 1;
+    saveLocalSiteSummary({
+      ...prevSum,
+      totalVisits: (prevSum.totalVisits || 0) + 1,
+      yearlyVisits: { ...(prevSum.yearlyVisits || {}), [yearKey]: nextYearCount },
+      monthlyVisits: {
+        ...(prevSum.monthlyVisits || {}),
+        [yearKey]: { ...prevYearMonths, [monthKey]: nextMonthCount },
+      },
+      dailyVisits: { ...(prevSum.dailyVisits || {}), [dateKey]: nextDailyCount },
+      updatedAt: nowIso,
+      cachedAt: Date.now(),
+    });
+  } catch {}
+
+  // Immediately update local user profile visit stats cache & notify mounted profile UI
+  try {
+    if (typeof window !== 'undefined') {
+      const profKey = `acu_user_full_profile_${normEmail}`;
+      const rawProf = localStorage.getItem(profKey);
+      if (rawProf) {
+        const parsed = JSON.parse(rawProf);
+        if (parsed && parsed.stats) {
+          const nextTotal = (parsed.stats.totalViews || 0) + 1;
+          const prevYearly = parsed.stats.yearlyStats || {};
+          const nextYearlyVal = (prevYearly[yearKey] || 0) + 1;
+          parsed.stats = {
+            ...parsed.stats,
+            totalViews: nextTotal,
+            yearlyStats: { ...prevYearly, [yearKey]: nextYearlyVal },
+          };
+          parsed.updatedAt = nowIso;
+          localStorage.setItem(profKey, JSON.stringify(parsed));
+          window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: parsed }));
+          window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: parsed }));
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Persist log + atomic increment(1) summary counters in Firestore
   try {
     const docRef = doc(db, 'login_logs', logId);
     await setDoc(docRef, {
@@ -417,6 +790,35 @@ export async function logUserLogin(data: {
       createdAt: serverTimestamp(),
     });
     removePendingLoginLogByIds(new Set([logId]));
+
+    // Atomic increment(1) on lightweight site summary counter (system_settings/site_summary)
+    setDoc(
+      doc(db, 'system_settings', 'site_summary'),
+      {
+        totalVisits: increment(1),
+        yearlyVisits: { [yearKey]: increment(1) },
+        monthlyVisits: { [yearKey]: { [monthKey]: increment(1) } },
+        dailyVisits: { [dateKey]: increment(1) },
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    ).catch(() => {});
+
+    // Atomic increment(1) on user's own profile visit counters
+    const safeDocId = encodeURIComponent(normEmail);
+    setDoc(
+      doc(db, 'user_profiles', safeDocId),
+      {
+        email: normEmail,
+        stats: {
+          totalViews: increment(1),
+          yearlyStats: { [yearKey]: increment(1) },
+        },
+        updatedAt: nowIso,
+      },
+      { merge: true }
+    ).catch(() => {});
+
     return logId;
   } catch (err) {
     console.warn('Login log Firestore write queued in outbox for retry:', err);
@@ -659,8 +1061,29 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
     lastLogTime = 0;
     savePendingLoginLogs([]);
 
-    // 1. Clear local storage immediately (0ms)
+    // 1. Clear local storage & site summary cache immediately (0ms)
     saveLocalLoginLogs([], true);
+    const resetAtIso = new Date().toISOString();
+    const emptySiteSum: SiteVisitSummary = {
+      totalVisits: 0,
+      yearlyVisits: {},
+      monthlyVisits: {},
+      dailyVisits: {},
+      updatedAt: resetAtIso,
+      resetAt: resetAtIso,
+      cachedAt: Date.now(),
+    };
+    saveLocalSiteSummary(emptySiteSum, true);
+    saveLocalAdminStatsSummary(
+      {
+        totalLoginLogsCount: 0,
+        adminLoginLogsCount: 0,
+        totalUserProfilesCount: sharedAdminStatsSummary?.totalUserProfilesCount || 0,
+        siteSummary: emptySiteSum,
+        fetchedAt: Date.now(),
+      },
+      true
+    );
 
     // 2. Clear all sessionStorage visit flags
     if (typeof window !== 'undefined') {
@@ -678,8 +1101,18 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
       }
     }
 
-    // 3. Reset all user profile visit stats (never touches innovations/media)
+    // 3. Reset all user profile visit stats & site summary doc (never touches innovations/media)
     await resetUserProfileVisitStats('all');
+    try {
+      await setDoc(doc(db, 'system_settings', 'site_summary'), {
+        totalVisits: 0,
+        yearlyVisits: {},
+        monthlyVisits: {},
+        dailyVisits: {},
+        updatedAt: resetAtIso,
+        resetAt: resetAtIso,
+      });
+    } catch {}
 
     // 4. Attempt to clear Firestore
     try {
@@ -830,23 +1263,28 @@ function isAdminLogViewer(callerEmail?: string): boolean {
 }
 
 /**
- * One-time getDocs fetch of latest login logs (limit 30) — invoked ONLY when Admin opens the Login Logs tab
- * or explicitly refreshes, and cached in memory + localStorage to protect Firestore daily read quotas.
+ * One-time getDocs fetch of latest login logs (limit 50) — invoked ONLY when Admin opens the Login Logs tab
+ * or explicitly refreshes, and cached in memory + localStorage (3-minute TTL) to protect Firestore daily read quotas.
  * Regular users (Teachers/Students) NEVER read the login_logs collection.
  */
 export async function fetchAdminLoginLogsOnce(
   forceRefresh = false,
-  maxCount = 30,
+  maxCount = 50,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeLimit = Math.min(Math.max(1, maxCount), 30);
+  const safeLimit = Math.min(Math.max(1, maxCount), 50);
   const localFallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
 
   if (!isAdminLogViewer(callerEmail)) {
     return localFallback;
   }
 
-  if (!forceRefresh && hasFetchedLoginLogsFromServer && sharedLatestLogs) {
+  const storedFetchedAt =
+    lastLoginLogsFetchedAt ||
+    (typeof window !== 'undefined' ? Number(localStorage.getItem(LOGIN_LOGS_FETCHED_AT_KEY) || 0) : 0);
+  const isLogsCacheFresh = storedFetchedAt > 0 && Date.now() - storedFetchedAt < ADMIN_STATS_CACHE_TTL_MS;
+
+  if (!forceRefresh && hasFetchedLoginLogsFromServer && isLogsCacheFresh && sharedLatestLogs) {
     return sharedLatestLogs;
   }
 
@@ -856,6 +1294,10 @@ export async function fetchAdminLoginLogsOnce(
 
   inFlightLoginLogsFetch = (async () => {
     try {
+      await waitForAuthReady();
+      if (!isAdminLogViewer(callerEmail)) {
+        return localFallback;
+      }
       await flushPendingLoginLogs();
 
       const logsRef = collection(db, 'login_logs');
@@ -863,11 +1305,13 @@ export async function fetchAdminLoginLogsOnce(
       try {
         snapshot = await getDocs(query(logsRef, orderBy('loginTimestamp', 'desc'), limit(safeLimit)));
       } catch {
-        try {
-          snapshot = await getDocs(query(logsRef, orderBy('createdAt', 'desc'), limit(safeLimit)));
-        } catch {
-          snapshot = await getDocs(query(logsRef, limit(safeLimit)));
-        }
+        // Fallback single query without composite/field index; sorted descending in memory below
+        snapshot = await getDocs(query(logsRef, limit(safeLimit)));
+      }
+
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
+        broadcastLogsToListeners(localFallback);
+        return localFallback;
       }
 
       const fsLogs: LoginLogEntry[] = [];
@@ -879,17 +1323,24 @@ export async function fetchAdminLoginLogsOnce(
         fsLogs.push(mapped);
       });
 
+      fsLogs.sort((a, b) => getValidTimestampMs(b.loginTimestamp) - getValidTimestampMs(a.loginTimestamp));
+
       hasFetchedLoginLogsFromServer = true;
+      lastLoginLogsFetchedAt = Date.now();
       removePendingLoginLogByIds(confirmedIds);
 
       const remainingPending = getPendingLoginLogs();
       const merged = mergeLogs(fsLogs, remainingPending);
-      try {
-        localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(Date.now()));
-      } catch {}
-      saveLocalLoginLogs(merged, false);
-      broadcastLogsToListeners(merged);
-      return merged;
+      if (merged.length > 0 || (localFallback.length === 0 && !snapshot.metadata?.fromCache)) {
+        try {
+          localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(lastLoginLogsFetchedAt));
+        } catch {}
+        saveLocalLoginLogs(merged, false);
+        broadcastLogsToListeners(merged);
+        return merged;
+      }
+      broadcastLogsToListeners(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -923,13 +1374,13 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
 }
 
 /**
- * Flush pending login logs and optionally fetch latest 30 logs when explicitly forced by Admin
+ * Flush pending login logs and optionally fetch latest 50 logs when explicitly forced by Admin
  */
 export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   try {
     await flushPendingLoginLogs();
     if (force) {
-      return await fetchAdminLoginLogsOnce(true, 30);
+      return await fetchAdminLoginLogsOnce(true, 50);
     }
   } catch {
     // non-fatal fallback to local cache

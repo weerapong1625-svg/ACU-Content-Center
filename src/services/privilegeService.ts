@@ -7,7 +7,7 @@ import {
   query,
   limit,
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { db, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import {
   ADMIN_TARGET_EMAIL,
   isValidActiveMediaRecord,
@@ -253,7 +253,11 @@ export async function refreshRewardClaims(
 
   inFlightClaimsListFetch = (async () => {
     try {
+      await waitForAuthReady();
       const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(500)));
+      if (snap.empty && (snap.metadata?.fromCache || !isAuthReady()) && Object.keys(localFallback).length > 0) {
+        return localFallback;
+      }
       const deletedUsers = getDeletedUserEmails();
       const map: Record<string, RewardClaimRecord> = {};
       snap.forEach((d) => {
@@ -266,9 +270,12 @@ export async function refreshRewardClaims(
         }
       });
       sessionClaimsListFetched = true;
-      saveStoredRewardClaimsMap(map);
-      notifyRewardClaimsChanged();
-      return map;
+      if (Object.keys(map).length > 0 || Object.keys(localFallback).length === 0) {
+        saveStoredRewardClaimsMap(map);
+        notifyRewardClaimsChanged();
+        return map;
+      }
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();

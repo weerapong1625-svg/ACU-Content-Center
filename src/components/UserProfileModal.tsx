@@ -65,6 +65,9 @@ import {
 } from '../services/submissionService';
 import { 
   subscribeAllLoginLogs, 
+  subscribeSiteSummary,
+  fetchSiteSummaryOnce,
+  SiteVisitSummary,
   LoginLogEntry, 
   resetAllLoginLogs,
   resetAdminLoginLogs,
@@ -157,6 +160,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   // Real-time verified login logs & Year selector (aligned to Asia/Bangkok)
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(null);
   const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
   const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>([]);
@@ -166,14 +170,38 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to real-time login logs
+  // Subscribe to cached login logs + lightweight site_summary (2-min TTL, single getDoc read)
   useEffect(() => {
     if (!isOpen) return;
     const unsub = subscribeAllLoginLogs((logs) => {
       setLoginLogs(logs);
     });
-    return () => unsub();
+    const unsubSummary = subscribeSiteSummary((summary) => {
+      setSiteSummary(summary);
+    });
+    fetchSiteSummaryOnce(false).catch(() => {});
+
+    const handleAuthReady = () => {
+      fetchSiteSummaryOnce(false).catch(() => {});
+    };
+    if (typeof window !== 'undefined') {
+      window.addEventListener('acu_auth_ready', handleAuthReady);
+    }
+
+    return () => {
+      unsub();
+      unsubSummary();
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_auth_ready', handleAuthReady);
+      }
+    };
   }, [isOpen]);
+
+  // Background refresh visitor summary whenever switching to stats tab (2-min TTL = 0 reads if fresh)
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'stats') return;
+    fetchSiteSummaryOnce(false).catch(() => {});
+  }, [isOpen, activeTab]);
 
   // Subscribe to real-time teacher media repository for kudos/likes counting
   useEffect(() => {
@@ -498,15 +526,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
+    const yearKeyStr = String(yearNum);
+    const profileYearlyViews =
+      typeof profile?.stats?.yearlyStats?.[yearKeyStr] === 'number'
+        ? profile.stats.yearlyStats[yearKeyStr]
+        : (isCurrentYear ? profileViews : 0);
     // Fallback for accounts with recorded profile views when login_logs entry is absent
-    const useProfileViewsFallback = myYearLogs.length === 0 && isCurrentYear && profileViews > 0;
+    const useProfileViewsFallback = myYearLogs.length === 0 && profileYearlyViews > 0;
 
-    // Monthly breakdown for selected year (1-12)
+    // Monthly breakdown for selected year (1-12), merging uncapped site_summary counts when available
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
+    const summaryYearMonths = siteSummary?.monthlyVisits?.[yearKeyStr] || {};
     const monthlyData = monthNames.map((name, idx) => {
       let myCount = myYearLogs.filter((l) => {
         const parts = getBangkokDateParts(l.loginTimestamp);
@@ -518,8 +552,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       }).length;
 
       if (useProfileViewsFallback && idx === currentMonthIdx) {
-        myCount += profileViews;
-        allCount += profileViews;
+        myCount += profileYearlyViews;
+        allCount += profileYearlyViews;
+      }
+
+      const summaryMonthVal = Number(summaryYearMonths[String(idx)] || 0);
+      if (summaryMonthVal > allCount) {
+        allCount = summaryMonthVal;
       }
 
       return {
@@ -530,8 +569,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       };
     });
 
-    const myYearVisits = monthlyData.reduce((sum, m) => sum + m.myCount, 0);
-    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+    const myYearVisits = Math.max(
+      monthlyData.reduce((sum, m) => sum + m.myCount, 0),
+      profileYearlyViews
+    );
+    const monthlySumAll = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+    const summaryYearTotal = Number(siteSummary?.yearlyVisits?.[yearKeyStr] || 0);
+    const allYearVisits = Math.max(monthlySumAll, summaryYearTotal);
 
     const myTodayVisits = isCurrentYear
       ? myYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
@@ -540,9 +584,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       ? (monthlyData[currentMonthIdx]?.myCount || 0)
       : 0;
 
-    const allTodayVisits = isCurrentYear
+    const allTodayFromLogs = isCurrentYear
       ? allYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
       : 0;
+    const allTodayFromSummary = isCurrentYear
+      ? Number(siteSummary?.dailyVisits?.[nowParts.dateKey] || 0)
+      : 0;
+    const allTodayVisits = Math.max(allTodayFromLogs, allTodayFromSummary);
     const allMonthVisits = isCurrentYear
       ? (monthlyData[currentMonthIdx]?.allCount || 0)
       : 0;
@@ -564,18 +612,18 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       myTodayVisits,
       myMonthVisits,
       myYearVisits,
-      myTotalVisits: Math.max(myLogs.length, myYearVisits),
+      myTotalVisits: Math.max(myLogs.length, myYearVisits, profileViews),
       allTodayVisits,
       allMonthVisits,
       allYearVisits,
       uniqueVerifiedUsersYear,
-      allTotalVisits: Math.max(loginLogs.length, allYearVisits),
+      allTotalVisits: Math.max(loginLogs.length, allYearVisits, siteSummary?.totalVisits || 0),
       uniqueAllUsers,
       monthlyData,
       myRecentLogs: myLogs.slice(0, 8),
       systemRecentLogs: loginLogs.slice(0, 8),
     };
-  }, [loginLogs, userEmail, selectedYear, profile?.stats?.totalViews]);
+  }, [loginLogs, siteSummary, userEmail, selectedYear, profile?.stats?.totalViews, profile?.stats?.yearlyStats]);
 
   if (!isOpen) return null;
 

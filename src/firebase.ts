@@ -1,6 +1,6 @@
 import { initializeApp, getApps, getApp } from 'firebase/app';
 import { initializeFirestore, getFirestore } from 'firebase/firestore';
-import { getAuth, GoogleAuthProvider } from 'firebase/auth';
+import { getAuth, GoogleAuthProvider, onAuthStateChanged } from 'firebase/auth';
 import firebaseConfig from '../firebase-applet-config.json';
 
 // Initialize Firebase App
@@ -25,6 +25,47 @@ try {
 
 export const db = firestoreInstance;
 export const auth = getAuth(app);
+
+let authInitialized = false;
+let resolveAuthReadyFn: () => void = () => {};
+const authReadyPromise = new Promise<void>((resolve) => {
+  resolveAuthReadyFn = resolve;
+});
+
+const markAuthReady = (emitEvent = true) => {
+  if (!authInitialized) {
+    authInitialized = true;
+    resolveAuthReadyFn();
+    if (emitEvent && typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('acu_auth_ready'));
+    }
+  }
+};
+
+if (typeof window !== 'undefined') {
+  try {
+    const unsubAuth = onAuthStateChanged(auth, () => {
+      markAuthReady(true);
+      unsubAuth();
+    });
+    setTimeout(() => {
+      markAuthReady(true);
+    }, 1500);
+  } catch {
+    markAuthReady(false);
+  }
+} else {
+  markAuthReady(false);
+}
+
+export function isAuthReady(): boolean {
+  return authInitialized;
+}
+
+export async function waitForAuthReady(): Promise<void> {
+  if (authInitialized) return;
+  await authReadyPromise;
+}
 
 export const googleAuthProvider = new GoogleAuthProvider();
 googleAuthProvider.addScope('email');

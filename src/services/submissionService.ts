@@ -12,7 +12,7 @@ import {
   updateDoc, 
   increment 
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { db, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import {
   adjustUserSubmissionCount,
   DEFAULT_INNOVATION_ITEMS,
@@ -1288,8 +1288,13 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
 
   inFlightInnovationsFetch = (async () => {
     try {
+      await waitForAuthReady();
       const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
+        broadcastAllInnovations(localFallback);
+        return localFallback;
+      }
       const liveList: InnovationSubmission[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as InnovationSubmission;
@@ -1303,9 +1308,13 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
         (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
       );
       hasFetchedInnovationsThisSession = true;
-      saveStoredInnovations(liveList);
-      broadcastAllInnovations(liveList);
-      return liveList;
+      if (liveList.length > 0 || localFallback.length === 0) {
+        saveStoredInnovations(liveList);
+        broadcastAllInnovations(liveList);
+        return liveList;
+      }
+      broadcastAllInnovations(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -1653,8 +1662,13 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
 
   inFlightFacilitiesFetch = (async () => {
     try {
+      await waitForAuthReady();
       const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
+        broadcastAllFacilities(localFallback);
+        return localFallback;
+      }
       const deletedUsers = getDeletedUserEmails();
       const list: FacilitySubmission[] = [];
       snapshot.forEach((docSnap) => {
@@ -1665,9 +1679,13 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
       });
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedFacilitiesThisSession = true;
-      saveStoredFacilities(list);
-      broadcastAllFacilities(list);
-      return list;
+      if (list.length > 0 || localFallback.length === 0) {
+        saveStoredFacilities(list);
+        broadcastAllFacilities(list);
+        return list;
+      }
+      broadcastAllFacilities(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -1781,9 +1799,11 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
+const TEACHER_MEDIA_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for fresh view counts
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
 let hasFetchedTeacherMediaThisSession = false;
+let lastTeacherMediaFetchedAt = 0;
 let inFlightTeacherMediaFetch: Promise<TeacherMediaWork[]> | null = null;
 let teacherMediaWindowListenerAttached = false;
 
@@ -1822,12 +1842,16 @@ function ensureTeacherMediaWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for teacher_media_repository (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for teacher_media_repository (2-minute TTL unless forceRefresh=true)
  */
 export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
   const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
+  const isMediaFresh =
+    hasFetchedTeacherMediaThisSession &&
+    lastTeacherMediaFetchedAt > 0 &&
+    Date.now() - lastTeacherMediaFetchedAt < TEACHER_MEDIA_CACHE_TTL_MS;
 
-  if (!forceRefresh && hasFetchedTeacherMediaThisSession && sharedLatestTeacherMedia) {
+  if (!forceRefresh && isMediaFresh && sharedLatestTeacherMedia) {
     return sharedLatestTeacherMedia;
   }
 
@@ -1837,8 +1861,13 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
 
   inFlightTeacherMediaFetch = (async () => {
     try {
+      await waitForAuthReady();
       const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
+        broadcastTeacherMedia(localFallback);
+        return localFallback;
+      }
       const liveList: TeacherMediaWork[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as TeacherMediaWork;
@@ -1852,9 +1881,14 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
 
       realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedTeacherMediaThisSession = true;
-      saveStoredTeacherMedia(realWorks);
-      broadcastTeacherMedia(realWorks);
-      return realWorks;
+      lastTeacherMediaFetchedAt = Date.now();
+      if (realWorks.length > 0 || localFallback.length === 0) {
+        saveStoredTeacherMedia(realWorks);
+        broadcastTeacherMedia(realWorks);
+        return realWorks;
+      }
+      broadcastTeacherMedia(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -2401,8 +2435,13 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
 
   inFlightSharedIdeasFetch = (async () => {
     try {
+      await waitForAuthReady();
       const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > DEFAULT_SEED_IDEAS.length) {
+        broadcastSharedIdeas(localFallback);
+        return localFallback;
+      }
       const liveList: SharedIdeaItem[] = [];
       snapshot.forEach((docSnap) => {
         liveList.push(sanitizeSharedIdeaRecord({ ...(docSnap.data() as SharedIdeaItem), id: docSnap.id }));
@@ -2420,9 +2459,13 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
       const finalIdeas = Array.from(mergedMap.values());
       finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedSharedIdeasThisSession = true;
-      saveStoredSharedIdeas(finalIdeas);
-      broadcastSharedIdeas(finalIdeas);
-      return finalIdeas;
+      if (liveList.length > 0 || localFallback.length <= DEFAULT_SEED_IDEAS.length) {
+        saveStoredSharedIdeas(finalIdeas);
+        broadcastSharedIdeas(finalIdeas);
+        return finalIdeas;
+      }
+      broadcastSharedIdeas(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -2644,6 +2687,39 @@ export async function updateSharedIdea(
     console.error('Error updating shared idea:', err);
     return { success: false, error: err.message || 'แก้ไขข้อมูลไม่สำเร็จ' };
   }
+}
+
+/**
+ * Increment view count for a teacher's media item immediately in local cache + Firestore increment(1)
+ */
+export async function incrementTeacherMediaViews(mediaId: string): Promise<number> {
+  if (!mediaId) return 0;
+  let updatedViews = 1;
+
+  // 1. Update local cache & active subscribers immediately (0ms UI reflection without reload)
+  try {
+    const baseList = sharedLatestTeacherMedia || getStoredTeacherMedia();
+    const nextList = baseList.map((m) => {
+      if (m.id === mediaId) {
+        updatedViews = (m.views || 0) + 1;
+        return { ...m, views: updatedViews };
+      }
+      return m;
+    });
+    saveStoredTeacherMedia(nextList);
+    broadcastTeacherMedia(nextList);
+  } catch {}
+
+  // 2. Atomically increment in Firestore
+  try {
+    const docRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaId);
+    await setDoc(docRef, { views: increment(1) }, { merge: true });
+  } catch (err) {
+    if (isQuotaExceededError(err)) {
+      notifyQuotaExceeded();
+    }
+  }
+  return updatedViews;
 }
 
 /**

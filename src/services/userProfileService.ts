@@ -13,7 +13,7 @@ import {
   limit
 } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
-import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
 import {
   isBlobUrl,
@@ -371,6 +371,7 @@ async function readSingleUserDocByUid(
 
   const fetchPromise = (async () => {
     try {
+      await waitForAuthReady();
       const snap = await getDoc(doc(db, 'users', cleanUid));
       if (snap.exists()) {
         const d = snap.data();
@@ -429,6 +430,7 @@ async function readSingleProfileDocOnce(
 
   const p = (async () => {
     try {
+      await waitForAuthReady();
       const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
       const data = profileSnap.exists() ? profileSnap.data() : null;
       sessionProfileDocCache.set(safeDocId, data);
@@ -770,6 +772,9 @@ export async function syncUserAvatarOnAuthOrLogin(
             typeof profileData?.stats?.submissionCount === 'number'
               ? profileData.stats.submissionCount
               : cachedProfile?.stats?.submissionCount ?? 0,
+          dailyStats: profileData?.stats?.dailyStats || cachedProfile?.stats?.dailyStats,
+          monthlyStats: profileData?.stats?.monthlyStats || cachedProfile?.stats?.monthlyStats,
+          yearlyStats: profileData?.stats?.yearlyStats || cachedProfile?.stats?.yearlyStats,
         },
         praises: Array.isArray(profileData?.praises)
           ? profileData.praises
@@ -883,6 +888,9 @@ export function subscribeFullUserProfile(
         averageRating: typeof profileDocData?.stats?.averageRating === 'number' ? profileDocData.stats.averageRating : (cached?.stats?.averageRating ?? 0),
         totalRatings: typeof profileDocData?.stats?.totalRatings === 'number' ? profileDocData.stats.totalRatings : (cached?.stats?.totalRatings ?? 0),
         submissionCount: typeof profileDocData?.stats?.submissionCount === 'number' ? profileDocData.stats.submissionCount : (cached?.stats?.submissionCount ?? 0),
+        dailyStats: profileDocData?.stats?.dailyStats || cached?.stats?.dailyStats,
+        monthlyStats: profileDocData?.stats?.monthlyStats || cached?.stats?.monthlyStats,
+        yearlyStats: profileDocData?.stats?.yearlyStats || cached?.stats?.yearlyStats,
       },
       praises: Array.isArray(profileDocData?.praises) ? profileDocData.praises : (cached?.praises || DEFAULT_INITIAL_PRAISES),
       updatedAt: profileDocData?.updatedAt || usersDocData?.updatedAt || cached?.updatedAt || new Date().toISOString(),
@@ -1005,6 +1013,9 @@ export async function fetchFullUserProfile(
         averageRating: typeof data?.stats?.averageRating === 'number' ? data.stats.averageRating : (cached?.stats?.averageRating ?? 0),
         totalRatings: typeof data?.stats?.totalRatings === 'number' ? data.stats.totalRatings : (cached?.stats?.totalRatings ?? 0),
         submissionCount: typeof data?.stats?.submissionCount === 'number' ? data.stats.submissionCount : (cached?.stats?.submissionCount ?? 0),
+        dailyStats: data?.stats?.dailyStats || cached?.stats?.dailyStats,
+        monthlyStats: data?.stats?.monthlyStats || cached?.stats?.monthlyStats,
+        yearlyStats: data?.stats?.yearlyStats || cached?.stats?.yearlyStats,
       },
       praises: Array.isArray(data?.praises) && data.praises.length > 0 
         ? data.praises 
@@ -1492,6 +1503,9 @@ function rebuildAndBroadcastMergedProfiles(): Record<string, FullUserProfile> {
         averageRating: typeof d.stats?.averageRating === 'number' ? d.stats.averageRating : 0,
         totalRatings: typeof d.stats?.totalRatings === 'number' ? d.stats.totalRatings : 0,
         submissionCount: typeof d.stats?.submissionCount === 'number' ? d.stats.submissionCount : 0,
+        dailyStats: d.stats?.dailyStats,
+        monthlyStats: d.stats?.monthlyStats,
+        yearlyStats: d.stats?.yearlyStats,
       },
       praises: Array.isArray(d.praises) ? d.praises : [],
       updatedAt: d.updatedAt,
@@ -1555,8 +1569,17 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
 
   inFlightAllUserProfilesFetch = (async () => {
     try {
+      await waitForAuthReady();
       const colQuery = query(collection(db, 'user_profiles'), limit(500));
       const snapshot = await getDocs(colQuery);
+      if (
+        snapshot.empty &&
+        (snapshot.metadata?.fromCache || !isAuthReady()) &&
+        Object.keys(localFallback).length > 0
+      ) {
+        broadcastUserProfiles(localFallback);
+        return localFallback;
+      }
       const nextProfileDocs: Record<string, any> = {};
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
@@ -1567,9 +1590,13 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
           nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
         }
       });
-      latestProfileDocsByEmail = nextProfileDocs;
-      hasFetchedAllUserProfilesThisSession = true;
-      return rebuildAndBroadcastMergedProfiles();
+      if (Object.keys(nextProfileDocs).length > 0 || Object.keys(localFallback).length === 0) {
+        latestProfileDocsByEmail = nextProfileDocs;
+        hasFetchedAllUserProfilesThisSession = true;
+        return rebuildAndBroadcastMergedProfiles();
+      }
+      broadcastUserProfiles(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();

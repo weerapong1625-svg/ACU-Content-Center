@@ -73,9 +73,15 @@ export default function App() {
     }
   });
 
+  const [isAuthResolved, setIsAuthResolved] = useState<boolean>(false);
+
   // Sync profile picture on Firebase Auth state changes (`onAuthStateChanged`) without overwriting custom Firestore photoURL
   React.useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
+      setIsAuthResolved(true);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('acu_auth_ready'));
+      }
       if (firebaseUser?.email) {
         const normEmail = firebaseUser.email.toLowerCase().trim();
         syncUserAvatarOnAuthOrLogin(normEmail, {
@@ -86,15 +92,19 @@ export default function App() {
         }).catch(() => {});
       }
     });
-    return () => unsubscribe();
+    const timer = setTimeout(() => setIsAuthResolved(true), 1500);
+    return () => {
+      clearTimeout(timer);
+      unsubscribe();
+    };
   }, []);
 
-  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated if needed
+  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated once auth resolves
   React.useEffect(() => {
-    if (!loggedInUser) return;
+    if (!loggedInUser || !isAuthResolved) return;
     syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser, false).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
-  }, [loggedInUser]);
+  }, [loggedInUser, isAuthResolved]);
 
   // Unified single-point visit recorder to guarantee consistent logging across devices
   const recordLoginVisit = useCallback((email: string, method: string, isExplicitLogin = false) => {
