@@ -7,7 +7,7 @@ import {
   query,
   limit,
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
+import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import {
   ADMIN_TARGET_EMAIL,
   isValidActiveMediaRecord,
@@ -157,7 +157,7 @@ function getStoredRewardClaimsMap(): Record<string, RewardClaimRecord> {
     const raw = localStorage.getItem(CLAIMS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      if (parsed && typeof parsed === 'object') {
         const deletedUsers = getDeletedUserEmails();
         const cleaned: Record<string, RewardClaimRecord> = {};
         Object.keys(parsed).forEach((k) => {
@@ -166,39 +166,18 @@ function getStoredRewardClaimsMap(): Record<string, RewardClaimRecord> {
             cleaned[norm] = parsed[k];
           }
         });
-        if (Object.keys(cleaned).length === 0) {
-          try {
-            localStorage.removeItem(CLAIMS_STORAGE_KEY);
-          } catch {}
-        }
         return cleaned;
       }
-      try {
-        localStorage.removeItem(CLAIMS_STORAGE_KEY);
-      } catch {}
     }
-  } catch (err) {
-    console.warn('Failed to read reward claims cache (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(CLAIMS_STORAGE_KEY);
-    } catch {}
-  }
+  } catch {}
   return {};
 }
 
 function saveStoredRewardClaimsMap(map: Record<string, RewardClaimRecord>): void {
   if (typeof window === 'undefined') return;
   try {
-    if (Object.keys(map).length === 0) {
-      try {
-        localStorage.removeItem(CLAIMS_STORAGE_KEY);
-      } catch {}
-      return;
-    }
     localStorage.setItem(CLAIMS_STORAGE_KEY, JSON.stringify(map));
-  } catch (err) {
-    console.warn('Failed to save reward claims cache (quota safe fallback):', err);
-  }
+  } catch {}
 }
 
 function upsertStoredRewardClaim(normEmail: string, claim: RewardClaimRecord | null): void {
@@ -256,8 +235,6 @@ async function fetchSingleClaimOnce(
   return run;
 }
 
-let lastEmptyClaimsServerCheckAt = 0;
-
 /**
  * One-time getDocs fetch for reward_privilege_claims (deduplicated per session unless forceRefresh=true)
  */
@@ -266,15 +243,7 @@ export async function refreshRewardClaims(
 ): Promise<Record<string, RewardClaimRecord>> {
   const localFallback = getStoredRewardClaimsMap();
 
-  if (!forceRefresh && sessionClaimsListFetched && Object.keys(localFallback).length > 0) {
-    return localFallback;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptyClaimsServerCheckAt > 0 &&
-    Date.now() - lastEmptyClaimsServerCheckAt < 30000
-  ) {
+  if (!forceRefresh && sessionClaimsListFetched) {
     return localFallback;
   }
 
@@ -284,11 +253,7 @@ export async function refreshRewardClaims(
 
   inFlightClaimsListFetch = (async () => {
     try {
-      await waitForAuthReady();
       const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(500)));
-      if (snap.empty && (snap.metadata?.fromCache || !isAuthReady()) && Object.keys(localFallback).length > 0) {
-        return localFallback;
-      }
       const deletedUsers = getDeletedUserEmails();
       const map: Record<string, RewardClaimRecord> = {};
       snap.forEach((d) => {
@@ -300,23 +265,13 @@ export async function refreshRewardClaims(
           }
         }
       });
-      if (Object.keys(map).length > 0) {
-        sessionClaimsListFetched = true;
-        lastEmptyClaimsServerCheckAt = 0;
-        saveStoredRewardClaimsMap(map);
-        notifyRewardClaimsChanged();
-        return map;
-      }
-
-      if (!snap.metadata?.fromCache) {
-        lastEmptyClaimsServerCheckAt = Date.now();
-      }
-      return localFallback;
+      sessionClaimsListFetched = true;
+      saveStoredRewardClaimsMap(map);
+      notifyRewardClaimsChanged();
+      return map;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
-      } else {
-        console.warn('refreshRewardClaims error (using fallback cache):', err);
       }
       return localFallback;
     } finally {

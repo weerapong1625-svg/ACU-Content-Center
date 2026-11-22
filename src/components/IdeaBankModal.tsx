@@ -35,7 +35,6 @@ import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import {
   subscribeSharedIdeas,
   refreshSharedIdeas,
-  getManualRefreshCooldownSeconds,
   saveSharedIdea,
   updateSharedIdea,
   deleteSharedIdea,
@@ -256,9 +255,6 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
-  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
-    getManualRefreshCooldownSeconds('sharedIdeas')
-  );
 
   const showNotice = (type: 'success' | 'error', message: string) => {
     setActionNotice({ type, message });
@@ -275,25 +271,10 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     return () => unsubscribe();
   }, []);
 
-  useEffect(() => {
-    if (refreshCooldownSec <= 0) return;
-    const timer = setInterval(() => {
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('sharedIdeas'));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [refreshCooldownSec]);
-
   const handleRefreshIdeas = async () => {
-    const remaining = getManualRefreshCooldownSeconds('sharedIdeas');
-    if (remaining > 0) {
-      setRefreshCooldownSec(remaining);
-      showNotice('success', `กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
-      return;
-    }
     setIsRefreshing(true);
     try {
       await refreshSharedIdeas(true);
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('sharedIdeas') || 60);
       showNotice('success', 'อัปเดตคลังไอเดียล่าสุดเรียบร้อยแล้ว');
     } finally {
       setIsRefreshing(false);
@@ -515,14 +496,12 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
             <button
               type="button"
               onClick={handleRefreshIdeas}
-              disabled={isRefreshing || refreshCooldownSec > 0}
+              disabled={isRefreshing}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title={refreshCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshCooldownSec} วินาที` : 'รีเฟรชข้อมูลคลังไอเดียล่าสุด'}
+              title="รีเฟรชข้อมูลคลังไอเดียล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">
-                {refreshCooldownSec > 0 ? `รีเฟรช (${refreshCooldownSec}s)` : 'รีเฟรช'}
-              </span>
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
 
             <button

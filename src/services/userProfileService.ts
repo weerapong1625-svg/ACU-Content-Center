@@ -190,29 +190,21 @@ export function resolveUserUid(email: string, explicitUid?: string): string {
  * Synchronously read cached full user profile from localStorage (sanitizing dead blob: URLs)
  */
 export function getCachedUserProfile(email: string): FullUserProfile | null {
-  if (typeof window === 'undefined' || !email) return null;
-  const storageKey = `${LOCAL_STORAGE_PREFIX}${email.toLowerCase().trim()}`;
   try {
-    const raw = localStorage.getItem(storageKey);
+    const raw = localStorage.getItem(`${LOCAL_STORAGE_PREFIX}${email.toLowerCase().trim()}`);
     if (raw) {
       const parsed = JSON.parse(raw) as FullUserProfile;
-      if (parsed && typeof parsed === 'object' && parsed.email) {
+      if (parsed) {
         const cleanAvatar = sanitizeAvatarUrl(parsed.photoURL || parsed.avatarUrl);
         parsed.avatarUrl = cleanAvatar;
         if (parsed.photoURL && isBlobUrl(parsed.photoURL)) {
           parsed.photoURL = cleanAvatar;
         }
-        return parsed;
       }
-      try {
-        localStorage.removeItem(storageKey);
-      } catch {}
+      return parsed;
     }
   } catch (err) {
-    console.warn('Could not read cached profile (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(storageKey);
-    } catch {}
+    console.warn('Could not read cached profile:', err);
   }
   return null;
 }
@@ -221,7 +213,6 @@ export function getCachedUserProfile(email: string): FullUserProfile | null {
  * Save profile to localStorage cache (strictly never persisting blob: URLs)
  */
 export function setCachedUserProfile(profile: FullUserProfile): void {
-  if (typeof window === 'undefined' || !profile?.email) return;
   try {
     const cleanAvatar = sanitizeAvatarUrl(profile.photoURL || profile.avatarUrl);
     const cleanedProfile: FullUserProfile = {
@@ -234,7 +225,7 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
       JSON.stringify(cleanedProfile)
     );
   } catch (err) {
-    console.warn('Could not save profile to localStorage (quota safe fallback):', err);
+    console.warn('Could not save to localStorage:', err);
   }
 }
 
@@ -301,28 +292,14 @@ function getLocalUsersUidCache(uid: string): {
   cachedAt: number;
 } | null {
   if (typeof window === 'undefined' || !uid) return null;
-  const cacheKey = `${USERS_UID_CACHE_PREFIX}${uid}`;
   try {
-    const raw = localStorage.getItem(cacheKey);
+    const raw = localStorage.getItem(`${USERS_UID_CACHE_PREFIX}${uid}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (
-      parsed &&
-      parsed.data &&
-      typeof parsed.data === 'object' &&
-      typeof parsed.cachedAt === 'number' &&
-      Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS
-    ) {
+    if (parsed && typeof parsed.cachedAt === 'number' && Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS) {
       return parsed;
     }
-    try {
-      localStorage.removeItem(cacheKey);
-    } catch {}
-  } catch {
-    try {
-      localStorage.removeItem(cacheKey);
-    } catch {}
-  }
+  } catch {}
   return null;
 }
 
@@ -335,7 +312,7 @@ function setLocalUsersUidCache(
     hasDeadBlob: boolean;
   }
 ): void {
-  if (typeof window === 'undefined' || !uid || !entry.data) return;
+  if (typeof window === 'undefined' || !uid) return;
   try {
     localStorage.setItem(`${USERS_UID_CACHE_PREFIX}${uid}`, JSON.stringify({ ...entry, cachedAt: Date.now() }));
   } catch {}
@@ -412,16 +389,10 @@ async function readSingleUserDocByUid(
         return result;
       }
       const emptyResult = { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
-      if (!snap.metadata?.fromCache) {
-        sessionUsersDocCache.set(cleanUid, emptyResult);
-      }
+      sessionUsersDocCache.set(cleanUid, emptyResult);
+      setLocalUsersUidCache(cleanUid, emptyResult);
       return emptyResult;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        notifyQuotaExceeded();
-      } else {
-        console.warn(`readSingleUserDocByUid fallback for ${cleanUid}:`, err);
-      }
+    } catch {
       // Strictly isolated: silently fall back on permission-denied / quota / network errors
       const localFallback = getLocalUsersUidCache(cleanUid);
       if (localFallback) {
@@ -451,8 +422,7 @@ async function readSingleProfileDocOnce(
 ): Promise<Record<string, any> | null> {
   if (!safeDocId) return null;
   if (!forceRefresh && sessionProfileDocCache.has(safeDocId)) {
-    const cachedVal = sessionProfileDocCache.get(safeDocId);
-    if (cachedVal) return cachedVal;
+    return sessionProfileDocCache.get(safeDocId) ?? null;
   }
   if (!forceRefresh && inFlightProfileDocFetch.has(safeDocId)) {
     return inFlightProfileDocFetch.get(safeDocId)!;
@@ -463,16 +433,9 @@ async function readSingleProfileDocOnce(
       await waitForAuthReady();
       const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
       const data = profileSnap.exists() ? profileSnap.data() : null;
-      if (data || !profileSnap.metadata?.fromCache) {
-        sessionProfileDocCache.set(safeDocId, data);
-      }
+      sessionProfileDocCache.set(safeDocId, data);
       return data;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        notifyQuotaExceeded();
-      } else {
-        console.warn(`readSingleProfileDocOnce fallback for ${safeDocId}:`, err);
-      }
+    } catch {
       return sessionProfileDocCache.get(safeDocId) ?? null;
     } finally {
       inFlightProfileDocFetch.delete(safeDocId);
@@ -1481,49 +1444,25 @@ let hasFetchedAllUserProfilesThisSession = false;
 let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
 let userProfilesWindowListenersAttached = false;
 
-let lastEmptyUserProfilesServerCheckAt = 0;
-
 function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   if (typeof window === 'undefined') return {};
   try {
     const raw = localStorage.getItem(ALL_USER_PROFILES_CACHE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        if (Object.keys(parsed).length === 0) {
-          try {
-            localStorage.removeItem(ALL_USER_PROFILES_CACHE_KEY);
-          } catch {}
-          return {};
-        }
+      if (parsed && typeof parsed === 'object') {
         return parsed as Record<string, FullUserProfile>;
       }
-      try {
-        localStorage.removeItem(ALL_USER_PROFILES_CACHE_KEY);
-      } catch {}
     }
-  } catch (err) {
-    console.warn('Failed to read user profiles map cache (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(ALL_USER_PROFILES_CACHE_KEY);
-    } catch {}
-  }
+  } catch {}
   return {};
 }
 
 function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): void {
   if (typeof window === 'undefined') return;
   try {
-    if (Object.keys(map).length === 0) {
-      try {
-        localStorage.removeItem(ALL_USER_PROFILES_CACHE_KEY);
-      } catch {}
-      return;
-    }
     localStorage.setItem(ALL_USER_PROFILES_CACHE_KEY, JSON.stringify(map));
-  } catch (err) {
-    console.warn('Failed to save user profiles map cache (quota fallback to memory):', err);
-  }
+  } catch {}
 }
 
 function rebuildAndBroadcastMergedProfiles(): Record<string, FullUserProfile> {
@@ -1615,29 +1554,12 @@ function ensureUserProfilesWindowListeners(): void {
  * One-time getDocs fetch for `user_profiles` (deduplicated per page load unless forceRefresh=true)
  */
 export async function refreshAllUserProfiles(forceRefresh = true): Promise<Record<string, FullUserProfile>> {
-  const localFallback =
-    sharedUserProfilesMap && Object.keys(sharedUserProfilesMap).length > 0
-      ? sharedUserProfilesMap
-      : {
-          ...getStoredAllUserProfilesMap(),
-          ...getAllLocalUserProfilesMap(),
-        };
+  const localFallback = sharedUserProfilesMap || {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+  };
 
-  if (
-    !forceRefresh &&
-    hasFetchedAllUserProfilesThisSession &&
-    sharedUserProfilesMap &&
-    Object.keys(sharedUserProfilesMap).length > 0
-  ) {
-    return sharedUserProfilesMap;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptyUserProfilesServerCheckAt > 0 &&
-    Date.now() - lastEmptyUserProfilesServerCheckAt < 30000 &&
-    sharedUserProfilesMap
-  ) {
+  if (!forceRefresh && hasFetchedAllUserProfilesThisSession && sharedUserProfilesMap) {
     return sharedUserProfilesMap;
   }
 
@@ -1668,27 +1590,16 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
           nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
         }
       });
-      if (Object.keys(nextProfileDocs).length > 0) {
+      if (Object.keys(nextProfileDocs).length > 0 || Object.keys(localFallback).length === 0) {
         latestProfileDocsByEmail = nextProfileDocs;
         hasFetchedAllUserProfilesThisSession = true;
-        lastEmptyUserProfilesServerCheckAt = 0;
         return rebuildAndBroadcastMergedProfiles();
       }
-
-      if (!snapshot.metadata?.fromCache) {
-        lastEmptyUserProfilesServerCheckAt = Date.now();
-      }
-      if (Object.keys(localFallback).length > 0) {
-        broadcastUserProfiles(localFallback);
-        return localFallback;
-      }
-      broadcastUserProfiles({});
-      return {};
+      broadcastUserProfiles(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
-      } else {
-        console.warn('refreshAllUserProfiles error (using local fallback):', err);
       }
       broadcastUserProfiles(localFallback);
       return localFallback;

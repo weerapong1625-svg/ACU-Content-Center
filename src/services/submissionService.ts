@@ -233,187 +233,6 @@ export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
 export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
 
-const INNOVATIONS_FETCHED_AT_KEY = 'acu_cached_innovations_fetched_at';
-const TEACHER_MEDIA_FETCHED_AT_KEY = 'acu_cached_teacher_media_fetched_at';
-const FACILITY_FETCHED_AT_KEY = 'acu_cached_facilities_fetched_at';
-const SHARED_IDEAS_FETCHED_AT_KEY = 'acu_cached_shared_ideas_fetched_at';
-
-export const COLLECTION_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours strict cache-first TTL
-export const MANUAL_REFRESH_COOLDOWN_MS = 60 * 1000; // 60 seconds manual refresh cooldown
-
-export type CachedCollectionKey = 'teacherMedia' | 'allInnovations' | 'facilities' | 'sharedIdeas';
-
-const lastManualRefreshMap: Record<CachedCollectionKey, number> = {
-  teacherMedia: 0,
-  allInnovations: 0,
-  facilities: 0,
-  sharedIdeas: 0,
-};
-
-export function getManualRefreshCooldownSeconds(key: CachedCollectionKey): number {
-  const lastAt = lastManualRefreshMap[key] || 0;
-  if (!lastAt) return 0;
-  const remainingMs = MANUAL_REFRESH_COOLDOWN_MS - (Date.now() - lastAt);
-  return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
-}
-
-function readCacheFetchedAt(tsKey: string): number {
-  if (typeof window === 'undefined') return 0;
-  try {
-    const raw = localStorage.getItem(tsKey);
-    const parsed = raw ? Number(raw) : 0;
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-  } catch {
-    return 0;
-  }
-}
-
-function isCacheTimestampFresh(inMemoryFetchedAt: number, tsKey: string): boolean {
-  const effectiveTs = Math.max(inMemoryFetchedAt || 0, readCacheFetchedAt(tsKey));
-  if (effectiveTs <= 0) return false;
-  return Date.now() - effectiveTs < COLLECTION_CACHE_TTL_MS;
-}
-
-function stripHeavyDataUrl(val: unknown, fallback = ''): string {
-  if (typeof val !== 'string') return fallback;
-  const trimmed = val.trim();
-  if (!trimmed) return fallback;
-  if (/^data:/i.test(trimmed)) return fallback;
-  return trimmed;
-}
-
-function sanitizeInnovationForStorage(item: InnovationSubmission): InnovationSubmission {
-  return {
-    ...item,
-    imageUrl: stripHeavyDataUrl(item.imageUrl, ''),
-    coverImageUrl: stripHeavyDataUrl(item.coverImageUrl, ''),
-    onlineUrl: stripHeavyDataUrl(item.onlineUrl, ''),
-  };
-}
-
-function sanitizeTeacherMediaForStorage(item: TeacherMediaWork): TeacherMediaWork {
-  return {
-    ...item,
-    thumbnailUrl: stripHeavyDataUrl(item.thumbnailUrl, '/acu_active_logo.png'),
-    onlineUrl: stripHeavyDataUrl(item.onlineUrl, ''),
-  };
-}
-
-function sanitizeFacilityForStorage(item: FacilitySubmission): FacilitySubmission {
-  return {
-    ...item,
-    imageUrl: stripHeavyDataUrl(item.imageUrl, ''),
-  };
-}
-
-function sanitizeSharedIdeaForStorage(item: SharedIdeaItem): SharedIdeaItem {
-  return {
-    ...item,
-    imageUrl: stripHeavyDataUrl(item.imageUrl, ''),
-  };
-}
-
-function clearStaleLocalStorageKeysOnQuota(preserveKey: string, preserveTsKey: string): void {
-  if (typeof window === 'undefined') return;
-  try {
-    const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
-    const evictableExactKeys = [
-      'acu_persistent_login_logs',
-      'acu_pending_login_logs',
-      'acu_admin_overall_stats_cache',
-      'acu_site_summary_cache',
-      'acu_all_user_profiles_cache',
-      'acu_cached_all_user_profiles_map',
-      'acu_cached_reward_claims',
-      'acu_reward_privilege_claims_cache',
-      'acu_popup_banner_config',
-      'acu_school_logo_config',
-      'acu_certificate_logo_config',
-      'acu_media_criteria_poster',
-      'acu_criteria_poster_config',
-      'acu_google_sheets_config_cache',
-    ];
-    evictableExactKeys.forEach((k) => {
-      if (k !== preserveKey && k !== preserveTsKey) {
-        try {
-          localStorage.removeItem(k);
-        } catch {}
-      }
-    });
-
-    const protectedKeys = new Set([
-      preserveKey,
-      preserveTsKey,
-      'acu_current_user_email',
-      'acu_remembered_gmail',
-      'acu_last_active_time',
-      'acu_deleted_media_ids',
-      'acu_deleted_user_emails',
-      'acu_active_firestore_db_id',
-      'acu_user_credentials_vault',
-      INNOVATIONS_STORAGE_KEY,
-      INNOVATIONS_FETCHED_AT_KEY,
-      TEACHER_MEDIA_STORAGE_KEY,
-      TEACHER_MEDIA_FETCHED_AT_KEY,
-      FACILITY_STORAGE_KEY,
-      FACILITY_FETCHED_AT_KEY,
-      SHARED_IDEAS_STORAGE_KEY,
-      SHARED_IDEAS_FETCHED_AT_KEY,
-    ]);
-    if (currentEmail) {
-      protectedKeys.add(`acu_user_avatar_${currentEmail}`);
-      protectedKeys.add(`acu_user_full_profile_${currentEmail}`);
-    }
-
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-      const k = localStorage.key(i);
-      if (!k || protectedKeys.has(k)) continue;
-      if (
-        k.startsWith('acu_users_uid_cache_') ||
-        k.startsWith('acu_user_avatar_') ||
-        k.startsWith('acu_user_full_profile_') ||
-        k.startsWith('acu_last_auto_visit_')
-      ) {
-        try {
-          localStorage.removeItem(k);
-        } catch {}
-      }
-    }
-  } catch {
-    // ignore
-  }
-}
-
-function writeLightweightArrayToStorage<T>(
-  storageKey: string,
-  tsKey: string,
-  items: T[],
-  updateFetchedAt = false
-): void {
-  if (typeof window === 'undefined') return;
-  const serialized = JSON.stringify(items);
-  const nowStr = String(Date.now());
-  try {
-    localStorage.setItem(storageKey, serialized);
-    if (updateFetchedAt) {
-      localStorage.setItem(tsKey, nowStr);
-    }
-    return;
-  } catch (err) {
-    console.warn(`Storage quota hit for ${storageKey}; evicting stale caches and retrying:`, err);
-  }
-
-  try {
-    clearStaleLocalStorageKeysOnQuota(storageKey, tsKey);
-    localStorage.setItem(storageKey, serialized);
-    if (updateFetchedAt) {
-      localStorage.setItem(tsKey, nowStr);
-    }
-  } catch (retryErr) {
-    console.warn(`Retry storage write skipped for ${storageKey} (keeping in-memory cache):`, retryErr);
-  }
-}
-
 /**
  * Legacy hardcoded seed IDs that previously caused false "submitted" status
  * for weerapong1625@acu.ac.th — stripped cleanly without touching other users' data.
@@ -842,142 +661,72 @@ function notifyTeacherMediaChanged(): void {
  * Get cached innovations from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredInnovations(): InnovationSubmission[] {
-  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(INNOVATIONS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        if (parsed.length === 0) {
-          try {
-            localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
-          } catch {}
-          return [];
-        }
         const cleaned = parsed.filter(
           (item: InnovationSubmission) => item && !isMediaIdBlocked(item.id)
         );
         if (cleaned.length !== parsed.length) {
-          const lightweight = cleaned.map(sanitizeInnovationForStorage);
-          writeLightweightArrayToStorage(INNOVATIONS_STORAGE_KEY, INNOVATIONS_FETCHED_AT_KEY, lightweight, false);
+          saveStoredInnovations(cleaned);
         }
         return cleaned;
       }
-      try {
-        localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
-      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read innovations cache (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
-    } catch {}
+    console.warn('Failed to read innovations cache:', err);
   }
   return [];
 }
 
 /**
- * Save innovations to localStorage cache (QuotaExceededError-safe on mobile/iPad)
+ * Save innovations to localStorage cache
  */
-export function saveStoredInnovations(
-  list: InnovationSubmission[],
-  options?: { updateFetchedAt?: boolean }
-): void {
-  const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
-  const sortedFull = [...cleaned].sort(
-    (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
-  );
-  sharedLatestInnovations = sortedFull.filter((item) => item.isDeleted !== true);
-
-  if (typeof window === 'undefined') return;
-  if (cleaned.length === 0) {
-    try {
-      localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
-      localStorage.removeItem(INNOVATIONS_FETCHED_AT_KEY);
-    } catch {}
-    return;
+export function saveStoredInnovations(list: InnovationSubmission[]): void {
+  try {
+    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
+    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
+  } catch (err) {
+    console.warn('Failed to save innovations cache:', err);
   }
-  const lightweight = sortedFull.map(sanitizeInnovationForStorage);
-  writeLightweightArrayToStorage(
-    INNOVATIONS_STORAGE_KEY,
-    INNOVATIONS_FETCHED_AT_KEY,
-    lightweight,
-    Boolean(options?.updateFetchedAt)
-  );
 }
 
 /**
- * Get cached teacher media from localStorage (stripping legacy fake seed IDs & corrupted JSON)
+ * Get cached teacher media from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredTeacherMedia(): TeacherMediaWork[] {
-  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(TEACHER_MEDIA_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        if (parsed.length === 0) {
-          try {
-            localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
-          } catch {}
-          return [];
-        }
         const cleaned = parsed.filter(
           (item: TeacherMediaWork) => item && !isMediaIdBlocked(item.id)
         );
         if (cleaned.length !== parsed.length) {
-          const lightweight = cleaned.map(sanitizeTeacherMediaForStorage);
-          writeLightweightArrayToStorage(TEACHER_MEDIA_STORAGE_KEY, TEACHER_MEDIA_FETCHED_AT_KEY, lightweight, false);
+          saveStoredTeacherMedia(cleaned);
         }
         return cleaned;
       }
-      try {
-        localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
-      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read teacher media cache (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
-    } catch {}
+    console.warn('Failed to read teacher media cache:', err);
   }
   return [];
 }
 
 /**
- * Save teacher media: preserves full objects in module memory, strips heavy Base64 strings for localStorage
+ * Save teacher media to localStorage cache
  */
-export function saveStoredTeacherMedia(
-  list: TeacherMediaWork[],
-  options?: { updateFetchedAt?: boolean }
-): void {
-  const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
-  const deletedUsers = getDeletedUserEmails();
-  const filteredFull = cleaned
-    .filter(
-      (w) =>
-        w.isDeleted !== true &&
-        w.title?.trim().length > 0 &&
-        !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
-    )
-    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  sharedLatestTeacherMedia = filteredFull;
-
-  if (typeof window === 'undefined') return;
-  if (cleaned.length === 0) {
-    try {
-      localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
-      localStorage.removeItem(TEACHER_MEDIA_FETCHED_AT_KEY);
-    } catch {}
-    return;
+export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
+  try {
+    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
+    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
+  } catch (err) {
+    console.warn('Failed to save teacher media cache:', err);
   }
-  const lightweight = cleaned.map(sanitizeTeacherMediaForStorage);
-  writeLightweightArrayToStorage(
-    TEACHER_MEDIA_STORAGE_KEY,
-    TEACHER_MEDIA_FETCHED_AT_KEY,
-    lightweight,
-    Boolean(options?.updateFetchedAt)
-  );
 }
 
 /**
@@ -1076,17 +825,13 @@ export async function saveInnovationSubmission(data: {
     createdAt: nowIso,
   };
 
-  // 1. Immediately save into in-memory & lightweight localStorage caches (guarantees 0% data loss)
+  // 1. Immediately save into local storage caches (guarantees 0% data loss)
   try {
-    const currentList = sharedLatestInnovations && sharedLatestInnovations.length > 0
-      ? sharedLatestInnovations
-      : getStoredInnovations();
+    const currentList = getStoredInnovations();
     const updatedList = [payload, ...currentList.filter((item) => item.id !== id)];
     saveStoredInnovations(updatedList);
 
-    const currentMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
+    const currentMedia = getStoredTeacherMedia();
     const updatedMedia = [mediaPayload, ...currentMedia.filter((m) => m.id !== mediaDocId)];
     saveStoredTeacherMedia(updatedMedia);
   } catch (cacheErr) {
@@ -1276,33 +1021,13 @@ export async function updateInnovationSubmission(
       // ignore
     }
 
-    // Update in-memory & localStorage cache immediately
+    // Update local storage cache immediately
     try {
-      const currentList = sharedLatestInnovations && sharedLatestInnovations.length > 0
-        ? sharedLatestInnovations
-        : getStoredInnovations();
+      const currentList = getStoredInnovations();
       const updatedList = currentList.map((item) =>
         item.id === id ? { ...item, ...updates, updatedAt: new Date().toISOString() } : item
       );
       saveStoredInnovations(updatedList);
-      if (sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0) {
-        const mediaDocId = `work_${id}`;
-        const updatedMedia = sharedLatestTeacherMedia.map((m) =>
-          m.id === mediaDocId
-            ? {
-                ...m,
-                ...(updates.mediaTitle ? { title: updates.mediaTitle } : {}),
-                ...(updates.imageUrl ? { thumbnailUrl: updates.imageUrl } : {}),
-                ...(updates.onlineUrl !== undefined ? { onlineUrl: updates.onlineUrl } : {}),
-                ...(updates.mediaType ? { mediaType: updates.mediaType } : {}),
-                ...(updates.productionType ? { productionType: updates.productionType } : {}),
-                ...(updates.gradeLevel ? { gradeLevel: updates.gradeLevel } : {}),
-                ...(updates.subjectGroup ? { subjectGroup: updates.subjectGroup } : {}),
-              }
-            : m
-        );
-        saveStoredTeacherMedia(updatedMedia);
-      }
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
     } catch {}
@@ -1415,9 +1140,7 @@ export async function deleteInnovationSubmission(
   id: string,
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
-  const cachedList = sharedLatestInnovations && sharedLatestInnovations.length > 0
-    ? sharedLatestInnovations
-    : getStoredInnovations();
+  const cachedList = getStoredInnovations();
   const cachedItem = cachedList.find((item) => item.id === id);
 
   try {
@@ -1443,10 +1166,7 @@ export async function deleteInnovationSubmission(
       }
 
       saveStoredInnovations(cachedList.filter((item) => item.id !== id));
-      const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-        ? sharedLatestTeacherMedia
-        : getStoredTeacherMedia();
-      saveStoredTeacherMedia(baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
       if (cachedItem) {
         await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
         if (ownerEmail) {
@@ -1485,13 +1205,10 @@ export async function deleteInnovationSubmission(
       // ignore
     }
 
-    // Delete from in-memory & local caches immediately
+    // Delete from local caches immediately
     try {
-      saveStoredInnovations(cachedList.filter((item) => item.id !== id));
-      const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-        ? sharedLatestTeacherMedia
-        : getStoredTeacherMedia();
-      saveStoredTeacherMedia(baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id));
+      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
     } catch {}
 
     // Reset the owner's slot in user_profiles back to pending & decrement counter atomically
@@ -1509,11 +1226,8 @@ export async function deleteInnovationSubmission(
       notifyQuotaExceeded();
       console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
       addDeletedMediaIds([id, `work_${id}`]);
-      saveStoredInnovations(cachedList.filter((item) => item.id !== id));
-      const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-        ? sharedLatestTeacherMedia
-        : getStoredTeacherMedia();
-      saveStoredTeacherMedia(baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id));
+      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
+      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
       return { success: true };
@@ -1523,11 +1237,10 @@ export async function deleteInnovationSubmission(
   }
 }
 
-// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; strict 12-hour cache-first)
+// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; protects Firestore read quotas)
 const allInnovationsListeners = new Set<(submissions: InnovationSubmission[]) => void>();
 let sharedLatestInnovations: InnovationSubmission[] | null = null;
 let hasFetchedInnovationsThisSession = false;
-let lastInnovationsFetchedAt = 0;
 let inFlightInnovationsFetch: Promise<InnovationSubmission[]> | null = null;
 let innovationsWindowListenerAttached = false;
 
@@ -1553,72 +1266,30 @@ function ensureInnovationsWindowListeners(): void {
   innovationsWindowListenerAttached = true;
 
   const handleChanged = () => {
-    const source = sharedLatestInnovations && sharedLatestInnovations.length > 0
-      ? sharedLatestInnovations.filter((item) => item && item.isDeleted !== true && !isMediaIdBlocked(item.id))
-      : getSortedStoredInnovations();
-    broadcastAllInnovations(source);
-  };
-  const handleUserDeleted = () => {
-    const deletedUsers = getDeletedUserEmails();
-    const base = sharedLatestInnovations && sharedLatestInnovations.length > 0
-      ? sharedLatestInnovations.filter((item) => !extractMediaEmails(item).every((em) => deletedUsers.has(em) && extractMediaEmails(item).length > 0))
-      : getSortedStoredInnovations();
-    broadcastAllInnovations(base);
+    broadcastAllInnovations(getSortedStoredInnovations());
   };
   window.addEventListener('acu_innovations_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleUserDeleted);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
-let lastEmptyInnovationsServerCheckAt = 0;
-
 /**
- * Strict cache-first getDocs fetch for teacher_innovations_submissions (12-hour TTL, 60s manual cooldown, limit 100).
- * Never triggers duplicate Firestore reads while in-flight or when valid cache exists.
+ * One-time getDocs fetch for teacher_innovations_submissions (deduplicated per session unless forceRefresh=true)
  */
-export async function refreshAllInnovations(forceRefresh = false): Promise<InnovationSubmission[]> {
-  const localFallback = sharedLatestInnovations && sharedLatestInnovations.length > 0
-    ? sharedLatestInnovations
-    : getSortedStoredInnovations();
+export async function refreshAllInnovations(forceRefresh = true): Promise<InnovationSubmission[]> {
+  const localFallback = sharedLatestInnovations || getSortedStoredInnovations();
 
-  const isFresh =
-    localFallback.length > 0 &&
-    (hasFetchedInnovationsThisSession || isCacheTimestampFresh(lastInnovationsFetchedAt, INNOVATIONS_FETCHED_AT_KEY));
-
-  if (!forceRefresh && isFresh) {
-    if (!sharedLatestInnovations || sharedLatestInnovations.length === 0) {
-      sharedLatestInnovations = localFallback;
-    }
-    return localFallback;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptyInnovationsServerCheckAt > 0 &&
-    Date.now() - lastEmptyInnovationsServerCheckAt < 30000 &&
-    sharedLatestInnovations
-  ) {
+  if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
     return sharedLatestInnovations;
   }
 
-  if (forceRefresh && getManualRefreshCooldownSeconds('allInnovations') > 0) {
-    if (inFlightInnovationsFetch) {
-      return inFlightInnovationsFetch;
-    }
-    return localFallback;
-  }
-
-  if (inFlightInnovationsFetch) {
+  if (!forceRefresh && inFlightInnovationsFetch) {
     return inFlightInnovationsFetch;
-  }
-
-  if (forceRefresh) {
-    lastManualRefreshMap.allInnovations = Date.now();
   }
 
   inFlightInnovationsFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(100));
+      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastAllInnovations(localFallback);
@@ -1636,30 +1307,19 @@ export async function refreshAllInnovations(forceRefresh = false): Promise<Innov
       liveList.sort(
         (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
       );
-
-      if (liveList.length > 0) {
-        hasFetchedInnovationsThisSession = true;
-        lastInnovationsFetchedAt = Date.now();
-        lastEmptyInnovationsServerCheckAt = 0;
-        saveStoredInnovations(liveList, { updateFetchedAt: true });
+      hasFetchedInnovationsThisSession = true;
+      if (liveList.length > 0 || localFallback.length === 0) {
+        saveStoredInnovations(liveList);
         broadcastAllInnovations(liveList);
         return liveList;
       }
-
-      if (!snapshot.metadata?.fromCache) {
-        lastEmptyInnovationsServerCheckAt = Date.now();
-      }
-      if (localFallback.length > 0) {
-        broadcastAllInnovations(localFallback);
-        return localFallback;
-      }
-      broadcastAllInnovations([]);
-      return [];
+      broadcastAllInnovations(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllInnovations error (using fallback cache):', err);
+      console.warn('refreshAllInnovations fallback to local cache:', err);
       broadcastAllInnovations(localFallback);
       return localFallback;
     } finally {
@@ -1799,12 +1459,6 @@ export function getStoredFacilities(): FacilitySubmission[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
-        if (parsed.length === 0) {
-          try {
-            localStorage.removeItem(FACILITY_STORAGE_KEY);
-          } catch {}
-          return [];
-        }
         const deletedUsers = getDeletedUserEmails();
         const cleaned = parsed.filter(
           (item: FacilitySubmission) =>
@@ -1815,48 +1469,28 @@ export function getStoredFacilities(): FacilitySubmission[] {
         cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         return cleaned;
       }
-      try {
-        localStorage.removeItem(FACILITY_STORAGE_KEY);
-      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read facilities cache (clearing corrupted entry):', err);
-    try {
-      localStorage.removeItem(FACILITY_STORAGE_KEY);
-    } catch {}
+    console.warn('Failed to read facilities cache:', err);
   }
   return [];
 }
 
-export function saveStoredFacilities(
-  list: FacilitySubmission[],
-  options?: { updateFetchedAt?: boolean }
-): void {
-  const deletedUsers = getDeletedUserEmails();
-  const cleaned = list.filter(
-    (item) =>
-      item &&
-      item.learningCenter &&
-      !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
-  );
-  cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  sharedLatestFacilities = cleaned;
-
+export function saveStoredFacilities(list: FacilitySubmission[]): void {
   if (typeof window === 'undefined') return;
-  if (cleaned.length === 0) {
-    try {
-      localStorage.removeItem(FACILITY_STORAGE_KEY);
-      localStorage.removeItem(FACILITY_FETCHED_AT_KEY);
-    } catch {}
-    return;
+  try {
+    const deletedUsers = getDeletedUserEmails();
+    const cleaned = list.filter(
+      (item) =>
+        item &&
+        item.learningCenter &&
+        !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
+    );
+    cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    localStorage.setItem(FACILITY_STORAGE_KEY, JSON.stringify(cleaned));
+  } catch (err) {
+    console.warn('Failed to save facilities cache:', err);
   }
-  const lightweight = cleaned.map(sanitizeFacilityForStorage);
-  writeLightweightArrayToStorage(
-    FACILITY_STORAGE_KEY,
-    FACILITY_FETCHED_AT_KEY,
-    lightweight,
-    Boolean(options?.updateFetchedAt)
-  );
 }
 
 /**
@@ -1891,9 +1525,7 @@ export async function saveFacilitySubmission(data: {
   };
 
   try {
-    const current = sharedLatestFacilities && sharedLatestFacilities.length > 0
-      ? sharedLatestFacilities
-      : getStoredFacilities();
+    const current = getStoredFacilities();
     saveStoredFacilities([payload, ...current.filter((item) => item.id !== id)]);
   } catch {}
 
@@ -1945,11 +1577,8 @@ export async function updateFacilitySubmission(
       updatedAt,
     });
 
-    const baseList = sharedLatestFacilities && sharedLatestFacilities.length > 0
-      ? sharedLatestFacilities
-      : getStoredFacilities();
     saveStoredFacilities(
-      baseList.map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
+      getStoredFacilities().map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
     );
     notifyFacilitiesChanged();
     return { success: true };
@@ -1980,10 +1609,7 @@ export async function deleteFacilitySubmission(
     }
 
     await deleteDoc(docRef);
-    const baseList = sharedLatestFacilities && sharedLatestFacilities.length > 0
-      ? sharedLatestFacilities
-      : getStoredFacilities();
-    saveStoredFacilities(baseList.filter((f) => f.id !== id));
+    saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
     notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
@@ -1995,7 +1621,6 @@ export async function deleteFacilitySubmission(
 const allFacilityListeners = new Set<(submissions: FacilitySubmission[]) => void>();
 let sharedLatestFacilities: FacilitySubmission[] | null = null;
 let hasFetchedFacilitiesThisSession = false;
-let lastFacilitiesFetchedAt = 0;
 let inFlightFacilitiesFetch: Promise<FacilitySubmission[]> | null = null;
 let facilitiesWindowListenerAttached = false;
 
@@ -2015,71 +1640,30 @@ function ensureFacilitiesWindowListeners(): void {
   facilitiesWindowListenerAttached = true;
 
   const handleChanged = () => {
-    const source = sharedLatestFacilities && sharedLatestFacilities.length > 0
-      ? sharedLatestFacilities
-      : getStoredFacilities();
-    broadcastAllFacilities(source);
-  };
-  const handleUserDeleted = () => {
-    const deletedUsers = getDeletedUserEmails();
-    const source = sharedLatestFacilities && sharedLatestFacilities.length > 0
-      ? sharedLatestFacilities.filter((item) => !deletedUsers.has((item.userEmail || '').trim().toLowerCase()))
-      : getStoredFacilities();
-    broadcastAllFacilities(source);
+    broadcastAllFacilities(getStoredFacilities());
   };
   window.addEventListener('acu_facilities_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleUserDeleted);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
-let lastEmptyFacilitiesServerCheckAt = 0;
-
 /**
- * Strict cache-first getDocs fetch for facility usage records (12-hour TTL, 60s manual cooldown).
+ * One-time getDocs fetch for facility usage records (deduplicated per session unless forceRefresh=true)
  */
-export async function refreshAllFacilities(forceRefresh = false): Promise<FacilitySubmission[]> {
-  const localFallback = sharedLatestFacilities && sharedLatestFacilities.length > 0
-    ? sharedLatestFacilities
-    : getStoredFacilities();
+export async function refreshAllFacilities(forceRefresh = true): Promise<FacilitySubmission[]> {
+  const localFallback = sharedLatestFacilities || getStoredFacilities();
 
-  const isFresh =
-    localFallback.length > 0 &&
-    (hasFetchedFacilitiesThisSession || isCacheTimestampFresh(lastFacilitiesFetchedAt, FACILITY_FETCHED_AT_KEY));
-
-  if (!forceRefresh && isFresh) {
-    if (!sharedLatestFacilities || sharedLatestFacilities.length === 0) {
-      sharedLatestFacilities = localFallback;
-    }
-    return localFallback;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptyFacilitiesServerCheckAt > 0 &&
-    Date.now() - lastEmptyFacilitiesServerCheckAt < 30000 &&
-    sharedLatestFacilities
-  ) {
+  if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
     return sharedLatestFacilities;
   }
 
-  if (forceRefresh && getManualRefreshCooldownSeconds('facilities') > 0) {
-    if (inFlightFacilitiesFetch) {
-      return inFlightFacilitiesFetch;
-    }
-    return localFallback;
-  }
-
-  if (inFlightFacilitiesFetch) {
+  if (!forceRefresh && inFlightFacilitiesFetch) {
     return inFlightFacilitiesFetch;
-  }
-
-  if (forceRefresh) {
-    lastManualRefreshMap.facilities = Date.now();
   }
 
   inFlightFacilitiesFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(200));
+      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastAllFacilities(localFallback);
@@ -2094,30 +1678,19 @@ export async function refreshAllFacilities(forceRefresh = false): Promise<Facili
         }
       });
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
-      if (list.length > 0) {
-        hasFetchedFacilitiesThisSession = true;
-        lastFacilitiesFetchedAt = Date.now();
-        lastEmptyFacilitiesServerCheckAt = 0;
-        saveStoredFacilities(list, { updateFetchedAt: true });
+      hasFetchedFacilitiesThisSession = true;
+      if (list.length > 0 || localFallback.length === 0) {
+        saveStoredFacilities(list);
         broadcastAllFacilities(list);
         return list;
       }
-
-      if (!snapshot.metadata?.fromCache) {
-        lastEmptyFacilitiesServerCheckAt = Date.now();
-      }
-      if (localFallback.length > 0) {
-        broadcastAllFacilities(localFallback);
-        return localFallback;
-      }
-      broadcastAllFacilities([]);
-      return [];
+      broadcastAllFacilities(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllFacilities error (using local fallback):', err);
+      console.warn('refreshAllFacilities fallback to local cache:', err);
       broadcastAllFacilities(localFallback);
       return localFallback;
     } finally {
@@ -2226,6 +1799,7 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
+const TEACHER_MEDIA_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for fresh view counts
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
 let hasFetchedTeacherMediaThisSession = false;
@@ -2251,7 +1825,7 @@ function getFilteredStoredTeacherMedia(): TeacherMediaWork[] {
       !isMediaIdBlocked(w.id) &&
       w.isDeleted !== true &&
       w.title?.trim().length > 0 &&
-      !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
+      !extractMediaEmails(w).every((em) => deletedUsers.has(em) && extractMediaEmails(w).length > 0)
   );
   cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   return cached;
@@ -2261,77 +1835,34 @@ function ensureTeacherMediaWindowListeners(): void {
   if (typeof window === 'undefined' || teacherMediaWindowListenerAttached) return;
   teacherMediaWindowListenerAttached = true;
   const handleChanged = () => {
-    const source = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia.filter((w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0)
-      : getFilteredStoredTeacherMedia();
-    broadcastTeacherMedia(source);
-  };
-  const handleUserDeleted = () => {
-    const deletedUsers = getDeletedUserEmails();
-    const source = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia.filter(
-          (w) =>
-            !isMediaIdBlocked(w.id) &&
-            w.isDeleted !== true &&
-            !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
-        )
-      : getFilteredStoredTeacherMedia();
-    broadcastTeacherMedia(source);
+    broadcastTeacherMedia(getFilteredStoredTeacherMedia());
   };
   window.addEventListener('acu_teacher_media_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleUserDeleted);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
-let lastEmptyTeacherMediaServerCheckAt = 0;
-
 /**
- * Strict cache-first getDocs fetch for teacher_media_repository (12-hour TTL, 60s manual cooldown, limit 100).
- * Never locks empty caches from localStorage/offline cache/errors, and deduplicates concurrent renders.
+ * One-time getDocs fetch for teacher_media_repository (2-minute TTL unless forceRefresh=true)
  */
-export async function refreshTeacherMedia(forceRefresh = false): Promise<TeacherMediaWork[]> {
-  const localFallback = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-    ? sharedLatestTeacherMedia
-    : getFilteredStoredTeacherMedia();
-
+export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
+  const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
   const isMediaFresh =
-    localFallback.length > 0 &&
-    (hasFetchedTeacherMediaThisSession || isCacheTimestampFresh(lastTeacherMediaFetchedAt, TEACHER_MEDIA_FETCHED_AT_KEY));
+    hasFetchedTeacherMediaThisSession &&
+    lastTeacherMediaFetchedAt > 0 &&
+    Date.now() - lastTeacherMediaFetchedAt < TEACHER_MEDIA_CACHE_TTL_MS;
 
-  if (!forceRefresh && isMediaFresh) {
-    if (!sharedLatestTeacherMedia || sharedLatestTeacherMedia.length === 0) {
-      sharedLatestTeacherMedia = localFallback;
-    }
-    return localFallback;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptyTeacherMediaServerCheckAt > 0 &&
-    Date.now() - lastEmptyTeacherMediaServerCheckAt < 30000 &&
-    sharedLatestTeacherMedia
-  ) {
+  if (!forceRefresh && isMediaFresh && sharedLatestTeacherMedia) {
     return sharedLatestTeacherMedia;
   }
 
-  if (forceRefresh && getManualRefreshCooldownSeconds('teacherMedia') > 0) {
-    if (inFlightTeacherMediaFetch) {
-      return inFlightTeacherMediaFetch;
-    }
-    return localFallback;
-  }
-
-  if (inFlightTeacherMediaFetch) {
+  if (!forceRefresh && inFlightTeacherMediaFetch) {
     return inFlightTeacherMediaFetch;
-  }
-
-  if (forceRefresh) {
-    lastManualRefreshMap.teacherMedia = Date.now();
   }
 
   inFlightTeacherMediaFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(100));
+      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastTeacherMedia(localFallback);
@@ -2349,30 +1880,20 @@ export async function refreshTeacherMedia(forceRefresh = false): Promise<Teacher
       );
 
       realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
-      if (realWorks.length > 0) {
-        hasFetchedTeacherMediaThisSession = true;
-        lastTeacherMediaFetchedAt = Date.now();
-        lastEmptyTeacherMediaServerCheckAt = 0;
-        saveStoredTeacherMedia(realWorks, { updateFetchedAt: true });
+      hasFetchedTeacherMediaThisSession = true;
+      lastTeacherMediaFetchedAt = Date.now();
+      if (realWorks.length > 0 || localFallback.length === 0) {
+        saveStoredTeacherMedia(realWorks);
         broadcastTeacherMedia(realWorks);
         return realWorks;
       }
-
-      if (!snapshot.metadata?.fromCache) {
-        lastEmptyTeacherMediaServerCheckAt = Date.now();
-      }
-      if (localFallback.length > 0) {
-        broadcastTeacherMedia(localFallback);
-        return localFallback;
-      }
-      broadcastTeacherMedia([]);
-      return [];
+      broadcastTeacherMedia(localFallback);
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshTeacherMedia error (using fallback cache):', err);
+      console.warn('refreshTeacherMedia fallback:', err);
       broadcastTeacherMedia(localFallback);
       return localFallback;
     } finally {
@@ -2384,7 +1905,7 @@ export async function refreshTeacherMedia(forceRefresh = false): Promise<Teacher
 }
 
 /**
- * Smart-cached subscription to Teacher Media Repository (serves in-memory/localStorage immediately, fetches only if missing or >12h expired).
+ * Smart-cached subscription to Teacher Media Repository (serves localStorage immediately, fetches once per page load).
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
@@ -2392,9 +1913,7 @@ export function subscribeTeacherMedia(
   teacherMediaListeners.add(callback);
   ensureTeacherMediaWindowListeners();
 
-  const initial = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-    ? sharedLatestTeacherMedia
-    : getFilteredStoredTeacherMedia();
+  const initial = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
   callback(initial);
 
   refreshTeacherMedia(false).catch(() => {});
@@ -2426,11 +1945,8 @@ export async function updateTeacherMedia(
     }
 
     await updateDoc(docRef, updates);
-    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
     saveStoredTeacherMedia(
-      baseList.map((m) => (m.id === id ? { ...m, ...updates } : m))
+      getStoredTeacherMedia().map((m) => (m.id === id ? { ...m, ...updates } : m))
     );
     notifyTeacherMediaChanged();
     return { success: true };
@@ -2452,9 +1968,7 @@ export async function deleteTeacherMedia(
   try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     const snap = await getDoc(docRef);
-    const cachedList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
+    const cachedList = getStoredTeacherMedia();
     const cachedItem = cachedList.find((m) => m.id === id);
 
     if (!snap.exists()) {
@@ -2466,10 +1980,7 @@ export async function deleteTeacherMedia(
         addDeletedMediaIds([id, strippedId]);
         saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
         if (id.startsWith('work_')) {
-          const baseInnos = sharedLatestInnovations && sharedLatestInnovations.length > 0
-            ? sharedLatestInnovations
-            : getStoredInnovations();
-          saveStoredInnovations(baseInnos.filter((inv) => inv.id !== strippedId));
+          saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
           try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
           try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
         }
@@ -2498,10 +2009,7 @@ export async function deleteTeacherMedia(
     if (id.startsWith('work_')) {
       try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
       try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
-      const baseInnos = sharedLatestInnovations && sharedLatestInnovations.length > 0
-        ? sharedLatestInnovations
-        : getStoredInnovations();
-      saveStoredInnovations(baseInnos.filter((inv) => inv.id !== strippedId));
+      saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
     }
 
     saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
@@ -2602,18 +2110,12 @@ export async function clearAdminOwnMedia(
       { merge: true }
     );
 
-    // 5. Clean only weerapong1625@acu.ac.th items from in-memory & localStorage caches
-    const baseInnovs = sharedLatestInnovations && sharedLatestInnovations.length > 0
-      ? sharedLatestInnovations
-      : getStoredInnovations();
+    // 5. Clean only weerapong1625@acu.ac.th items from localStorage caches
     saveStoredInnovations(
-      baseInnovs.filter((item) => (item.userEmail || '').trim().toLowerCase() !== targetAdmin)
+      getStoredInnovations().filter((item) => (item.userEmail || '').trim().toLowerCase() !== targetAdmin)
     );
-    const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
     saveStoredTeacherMedia(
-      baseMedia.filter((m) => (m.submittedByEmail || '').trim().toLowerCase() !== targetAdmin)
+      getStoredTeacherMedia().filter((m) => (m.submittedByEmail || '').trim().toLowerCase() !== targetAdmin)
     );
 
     try {
@@ -2704,11 +2206,9 @@ export async function addTeacherMediaDirectly(data: {
     createdAt: nowIso,
   };
 
-  // Save immediately to in-memory & lightweight localStorage cache
+  // Save immediately to localStorage cache
   try {
-    const currentMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
+    const currentMedia = getStoredTeacherMedia();
     saveStoredTeacherMedia([payload, ...currentMedia.filter((m) => m.id !== id)]);
   } catch {}
 
@@ -2856,24 +2356,15 @@ export function getStoredSharedIdeas(): SharedIdeaItem[] {
       const raw = localStorage.getItem(SHARED_IDEAS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           parsed.forEach((item) => {
             if (item && item.id) {
               mergedMap.set(item.id, sanitizeSharedIdeaRecord(item as SharedIdeaItem));
             }
           });
-        } else {
-          try {
-            localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
-          } catch {}
         }
       }
-    } catch (err) {
-      console.warn('Failed to read shared ideas cache (clearing corrupted entry):', err);
-      try {
-        localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
-      } catch {}
-    }
+    } catch {}
   }
 
   const deletedUsers = getDeletedUserEmails();
@@ -2884,38 +2375,17 @@ export function getStoredSharedIdeas(): SharedIdeaItem[] {
   return list;
 }
 
-export function saveStoredSharedIdeas(
-  list: SharedIdeaItem[],
-  options?: { updateFetchedAt?: boolean }
-): void {
-  const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
-  clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  const deletedUsers = getDeletedUserEmails();
-  sharedLatestIdeas = clean.filter(
-    (item) => !deletedUsers.has((item.creatorEmail || '').trim().toLowerCase())
-  );
-
+export function saveStoredSharedIdeas(list: SharedIdeaItem[]): void {
   if (typeof window === 'undefined') return;
-  if (clean.length === 0) {
-    try {
-      localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
-      localStorage.removeItem(SHARED_IDEAS_FETCHED_AT_KEY);
-    } catch {}
-    return;
-  }
-  const lightweight = clean.map(sanitizeSharedIdeaForStorage);
-  writeLightweightArrayToStorage(
-    SHARED_IDEAS_STORAGE_KEY,
-    SHARED_IDEAS_FETCHED_AT_KEY,
-    lightweight,
-    Boolean(options?.updateFetchedAt)
-  );
+  try {
+    const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
+    clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    localStorage.setItem(SHARED_IDEAS_STORAGE_KEY, JSON.stringify(clean));
+  } catch {}
 }
 
 export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
-  const current = sharedLatestIdeas && sharedLatestIdeas.length > 0
-    ? sharedLatestIdeas
-    : getStoredSharedIdeas();
+  const current = getStoredSharedIdeas();
   const next = [sanitizeSharedIdeaRecord(idea), ...current.filter((i) => i.id !== idea.id)];
   saveStoredSharedIdeas(next);
   notifySharedIdeasChanged();
@@ -2924,8 +2394,6 @@ export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
 const sharedIdeasListeners = new Set<(ideas: SharedIdeaItem[]) => void>();
 let sharedLatestIdeas: SharedIdeaItem[] | null = null;
 let hasFetchedSharedIdeasThisSession = false;
-let lastSharedIdeasFetchedAt = 0;
-let lastEmptySharedIdeasServerCheckAt = 0;
 let inFlightSharedIdeasFetch: Promise<SharedIdeaItem[]> | null = null;
 let sharedIdeasWindowListenerAttached = false;
 
@@ -2945,75 +2413,31 @@ function ensureSharedIdeasWindowListeners(): void {
   sharedIdeasWindowListenerAttached = true;
 
   const handleChanged = () => {
-    const source = sharedLatestIdeas && sharedLatestIdeas.length > 0
-      ? sharedLatestIdeas
-      : getStoredSharedIdeas();
-    broadcastSharedIdeas(source);
-  };
-  const handleUserDeleted = () => {
-    const deletedUsers = getDeletedUserEmails();
-    const source = sharedLatestIdeas && sharedLatestIdeas.length > 0
-      ? sharedLatestIdeas.filter((item) => !deletedUsers.has((item.creatorEmail || '').trim().toLowerCase()))
-      : getStoredSharedIdeas();
-    broadcastSharedIdeas(source);
+    broadcastSharedIdeas(getStoredSharedIdeas());
   };
   window.addEventListener('acu_shared_ideas_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleUserDeleted);
+  window.addEventListener('acu_user_deleted', handleChanged);
 }
 
 /**
- * Strict cache-first getDocs fetch for shared_ideas (12-hour TTL, 60s manual cooldown, limit 100)
+ * One-time getDocs fetch for shared_ideas (deduplicated per session unless forceRefresh=true)
  */
-export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedIdeaItem[]> {
-  const localFallback = sharedLatestIdeas && sharedLatestIdeas.length > 0
-    ? sharedLatestIdeas
-    : getStoredSharedIdeas();
+export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIdeaItem[]> {
+  const localFallback = sharedLatestIdeas || getStoredSharedIdeas();
 
-  const hasCachedFirestoreIdeas = localFallback.length > DEFAULT_SEED_IDEAS.length;
-  const isFresh =
-    hasCachedFirestoreIdeas &&
-    (hasFetchedSharedIdeasThisSession || isCacheTimestampFresh(lastSharedIdeasFetchedAt, SHARED_IDEAS_FETCHED_AT_KEY));
-
-  if (!forceRefresh && isFresh) {
-    if (!sharedLatestIdeas || sharedLatestIdeas.length === 0) {
-      sharedLatestIdeas = localFallback;
-    }
-    return localFallback;
-  }
-
-  if (
-    !forceRefresh &&
-    lastEmptySharedIdeasServerCheckAt > 0 &&
-    Date.now() - lastEmptySharedIdeasServerCheckAt < 30000 &&
-    sharedLatestIdeas
-  ) {
+  if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
     return sharedLatestIdeas;
   }
 
-  if (forceRefresh && getManualRefreshCooldownSeconds('sharedIdeas') > 0) {
-    if (inFlightSharedIdeasFetch) {
-      return inFlightSharedIdeasFetch;
-    }
-    return localFallback;
-  }
-
-  if (inFlightSharedIdeasFetch) {
+  if (!forceRefresh && inFlightSharedIdeasFetch) {
     return inFlightSharedIdeasFetch;
-  }
-
-  if (forceRefresh) {
-    lastManualRefreshMap.sharedIdeas = Date.now();
   }
 
   inFlightSharedIdeasFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(100));
+      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
-      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > DEFAULT_SEED_IDEAS.length) {
-        broadcastSharedIdeas(localFallback);
-        return localFallback;
-      }
       const liveList: SharedIdeaItem[] = [];
       snapshot.forEach((docSnap) => {
         liveList.push(sanitizeSharedIdeaRecord({ ...(docSnap.data() as SharedIdeaItem), id: docSnap.id }));
@@ -3030,30 +2454,15 @@ export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedId
 
       const finalIdeas = Array.from(mergedMap.values());
       finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-
-      if (liveList.length > 0) {
-        hasFetchedSharedIdeasThisSession = true;
-        lastSharedIdeasFetchedAt = Date.now();
-        lastEmptySharedIdeasServerCheckAt = 0;
-        saveStoredSharedIdeas(finalIdeas, { updateFetchedAt: true });
-        broadcastSharedIdeas(finalIdeas);
-        return finalIdeas;
-      }
-
-      if (!snapshot.metadata?.fromCache) {
-        lastEmptySharedIdeasServerCheckAt = Date.now();
-      }
-      if (localFallback.length > DEFAULT_SEED_IDEAS.length) {
-        broadcastSharedIdeas(localFallback);
-        return localFallback;
-      }
+      hasFetchedSharedIdeasThisSession = true;
+      saveStoredSharedIdeas(finalIdeas);
       broadcastSharedIdeas(finalIdeas);
       return finalIdeas;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshSharedIdeas error (using fallback cache/seed):', err);
+      console.warn('refreshSharedIdeas fallback to cache/seed:', err);
       broadcastSharedIdeas(localFallback);
       return localFallback;
     } finally {
@@ -3065,7 +2474,7 @@ export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedId
 }
 
 /**
- * Smart-cached subscription to Shared Ideas (serves cache immediately, fetches only if missing or >12h expired)
+ * Smart-cached subscription to Shared Ideas (serves local cache immediately, fetches once per page load)
  */
 export function subscribeSharedIdeas(
   callback: (ideas: SharedIdeaItem[]) => void
@@ -3073,9 +2482,7 @@ export function subscribeSharedIdeas(
   sharedIdeasListeners.add(callback);
   ensureSharedIdeasWindowListeners();
 
-  const initial = sharedLatestIdeas && sharedLatestIdeas.length > 0
-    ? sharedLatestIdeas
-    : getStoredSharedIdeas();
+  const initial = sharedLatestIdeas || getStoredSharedIdeas();
   callback(initial);
 
   refreshSharedIdeas(false).catch(() => {});
@@ -3161,11 +2568,8 @@ export async function rateSharedIdea(
         ratingCount: count,
         userRatings,
       });
-      const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
-        ? sharedLatestIdeas
-        : getStoredSharedIdeas();
       saveStoredSharedIdeas(
-        baseIdeas.map((item) =>
+        getStoredSharedIdeas().map((item) =>
           item.id === ideaId ? { ...item, ratingAvg: avg, ratingCount: count, userRatings } : item
         )
       );
@@ -3219,13 +2623,10 @@ export async function deleteSharedIdea(
   try {
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
     const snap = await getDoc(docRef);
-    const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
-      ? sharedLatestIdeas
-      : getStoredSharedIdeas();
     if (!snap.exists()) {
       // Might be a local seed, check if admin
       if (currentUserEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
-        saveStoredSharedIdeas(baseIdeas.filter((i) => i.id !== ideaId));
+        saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
         notifySharedIdeasChanged();
         return { success: true };
       }
@@ -3238,7 +2639,7 @@ export async function deleteSharedIdea(
     }
 
     await deleteDoc(docRef);
-    saveStoredSharedIdeas(baseIdeas.filter((i) => i.id !== ideaId));
+    saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
     notifySharedIdeasChanged();
     return { success: true };
   } catch (err: any) {
@@ -3269,11 +2670,8 @@ export async function updateSharedIdea(
     }
 
     await updateDoc(docRef, updates);
-    const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
-      ? sharedLatestIdeas
-      : getStoredSharedIdeas();
     saveStoredSharedIdeas(
-      baseIdeas.map((i) => (i.id === ideaId ? { ...i, ...updates } : i))
+      getStoredSharedIdeas().map((i) => (i.id === ideaId ? { ...i, ...updates } : i))
     );
     notifySharedIdeasChanged();
     return { success: true };
@@ -3290,11 +2688,9 @@ export async function incrementTeacherMediaViews(mediaId: string): Promise<numbe
   if (!mediaId) return 0;
   let updatedViews = 1;
 
-  // 1. Update in-memory cache & active subscribers immediately (0ms UI reflection without reload)
+  // 1. Update local cache & active subscribers immediately (0ms UI reflection without reload)
   try {
-    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
+    const baseList = sharedLatestTeacherMedia || getStoredTeacherMedia();
     const nextList = baseList.map((m) => {
       if (m.id === mediaId) {
         updatedViews = (m.views || 0) + 1;
@@ -3331,10 +2727,6 @@ export async function rateTeacherMedia(
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaId);
     const snap = await getDoc(docRef);
 
-    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
-
     if (snap.exists()) {
       const data = snap.data() as TeacherMediaWork;
       const userRatings = data.userRatings || {};
@@ -3352,7 +2744,7 @@ export async function rateTeacherMedia(
         views: increment(1),
       });
       saveStoredTeacherMedia(
-        baseList.map((m) =>
+        getStoredTeacherMedia().map((m) =>
           m.id === mediaId
             ? { ...m, ratingAvg: avg, ratingCount: count, userRatings, views: (m.views || 0) + 1 }
             : m
@@ -3385,7 +2777,8 @@ export async function rateTeacherMedia(
       } as TeacherMediaWork;
 
       await setDoc(docRef, newWork);
-      saveStoredTeacherMedia([newWork, ...baseList.filter((m) => m.id !== mediaId)]);
+      const existing = getStoredTeacherMedia();
+      saveStoredTeacherMedia([newWork, ...existing.filter((m) => m.id !== mediaId)]);
       notifyTeacherMediaChanged();
       return true;
     }
@@ -3443,11 +2836,8 @@ export async function toggleLikeTeacherMedia(
       { merge: true }
     );
 
-    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
-      ? sharedLatestTeacherMedia
-      : getStoredTeacherMedia();
     saveStoredTeacherMedia(
-      baseList.map((m) =>
+      getStoredTeacherMedia().map((m) =>
         m.id === mediaId ? { ...m, likes: newLikes, likedBy } : m
       )
     );
