@@ -6,6 +6,8 @@ export const APP_CACHE_VERSION_STORAGE_KEY = 'appCacheVersion';
 const EXACT_DATA_CACHE_KEYS: readonly string[] = [
   'teacherMedia',
   'allInnovations',
+  'allFacilities',
+  'sharedIdeas',
   'admin_stats',
   'acu_cached_innovations_submissions',
   'acu_cached_innovations_fetched_at',
@@ -70,18 +72,20 @@ function isDataCacheKey(key: string): boolean {
 }
 
 /**
- * Compares APP_CACHE_VERSION against localStorage.getItem('appCacheVersion').
+ * Compares targetVersion (defaults to APP_CACHE_VERSION) against localStorage.getItem('appCacheVersion').
  * If mismatched or missing, wipes data cache keys while strictly preserving
  * authentication state and user session tokens, then stores the active version.
  *
  * Returns true if cache invalidation occurred.
  */
-export function invalidateAppDataCacheIfVersionMismatch(): boolean {
+export function invalidateAppDataCacheIfVersionMismatch(
+  targetVersion: string = APP_CACHE_VERSION
+): boolean {
   if (typeof window === 'undefined') return false;
 
   try {
     const storedVersion = localStorage.getItem(APP_CACHE_VERSION_STORAGE_KEY);
-    if (storedVersion === APP_CACHE_VERSION) {
+    if (storedVersion === targetVersion) {
       return false;
     }
 
@@ -106,10 +110,11 @@ export function invalidateAppDataCacheIfVersionMismatch(): boolean {
       }
     }
 
-    safeLocalStorageSetItem(APP_CACHE_VERSION_STORAGE_KEY, APP_CACHE_VERSION);
+    safeLocalStorageSetItem(APP_CACHE_VERSION_STORAGE_KEY, targetVersion);
+    console.log(`Cache cleared and updated to version ${targetVersion}`);
     window.dispatchEvent(
       new CustomEvent('acu_cache_invalidated', {
-        detail: { previousVersion: storedVersion, currentVersion: APP_CACHE_VERSION },
+        detail: { previousVersion: storedVersion, currentVersion: targetVersion },
       })
     );
     return true;
