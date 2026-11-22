@@ -306,12 +306,12 @@ function isSiteSummaryFresh(summary: SiteVisitSummary | null): boolean {
  * Cached in localStorage for 2 minutes; NEVER overwrites positive local counts with 0 on failure/empty.
  */
 export async function fetchSiteSummaryOnce(forceRefresh = false): Promise<SiteVisitSummary | null> {
+  if (inFlightSiteSummaryFetch) {
+    return inFlightSiteSummaryFetch;
+  }
   const cached = getLocalSiteSummary();
   if (!forceRefresh && isSiteSummaryFresh(cached)) {
     return cached;
-  }
-  if (!forceRefresh && inFlightSiteSummaryFetch) {
-    return inFlightSiteSummaryFetch;
   }
 
   inFlightSiteSummaryFetch = (async () => {
@@ -1110,6 +1110,10 @@ export async function fetchAdminLoginLogsOnce(
     return localFallback;
   }
 
+  if (inFlightLoginLogsFetch) {
+    return inFlightLoginLogsFetch;
+  }
+
   const storedFetchedAt =
     lastLoginLogsFetchedAt ||
     (typeof window !== 'undefined' ? Number(localStorage.getItem(LOGIN_LOGS_FETCHED_AT_KEY) || 0) : 0);
@@ -1122,10 +1126,6 @@ export async function fetchAdminLoginLogsOnce(
     hasFetchedLoginLogsFromServer = true;
     broadcastLogsToListeners(localFallback);
     return localFallback;
-  }
-
-  if (!forceRefresh && inFlightLoginLogsFetch) {
-    return inFlightLoginLogsFetch;
   }
 
   inFlightLoginLogsFetch = (async () => {
@@ -1323,12 +1323,20 @@ export async function saveUserProfile(profile: UserProfileData): Promise<boolean
   }
 }
 
+const inFlightUserProfileFetches = new Map<string, Promise<UserProfileData | null>>();
+
 /**
- * Fetch user profile from Firestore
+ * Fetch user profile from Firestore (deduplicated in-flight + 6h localStorage TTL)
  */
 export async function fetchUserProfile(email: string, forceRefresh = false): Promise<UserProfileData | null> {
   const normEmail = (email || '').toLowerCase().trim();
   if (!normEmail) return null;
+
+  const existingInFlight = inFlightUserProfileFetches.get(normEmail);
+  if (existingInFlight) {
+    return existingInFlight;
+  }
+
   const safeDocId = encodeURIComponent(normEmail);
   const localProfileKey = `acu_user_full_profile_${normEmail}`;
   const docCacheKey = `acu_profile_doc_cache_${safeDocId}`;
@@ -1370,19 +1378,26 @@ export async function fetchUserProfile(email: string, forceRefresh = false): Pro
     return cachedFallback;
   }
 
-  try {
-    const profileRef = doc(db, 'user_profiles', safeDocId);
-    const snapshot = await getDoc(profileRef);
-    if (snapshot.exists()) {
-      const data = snapshot.data() as UserProfileData;
-      try {
-        localStorage.setItem(docCacheKey, JSON.stringify({ data, cachedAt: Date.now() }));
-      } catch {}
-      return data;
+  const promise = (async () => {
+    try {
+      const profileRef = doc(db, 'user_profiles', safeDocId);
+      const snapshot = await getDoc(profileRef);
+      if (snapshot.exists()) {
+        const data = snapshot.data() as UserProfileData;
+        try {
+          localStorage.setItem(docCacheKey, JSON.stringify({ data, cachedAt: Date.now() }));
+        } catch {}
+        return data;
+      }
+      return cachedFallback;
+    } catch (err) {
+      console.warn('[Firestore] fetchUserProfile failed, falling back to localStorage:', err);
+      return cachedFallback;
+    } finally {
+      inFlightUserProfileFetches.delete(normEmail);
     }
-    return cachedFallback;
-  } catch (err) {
-    console.warn('[Firestore] fetchUserProfile failed, falling back to localStorage:', err);
-    return cachedFallback;
-  }
+  })();
+
+  inFlightUserProfileFetches.set(normEmail, promise);
+  return promise;
 }

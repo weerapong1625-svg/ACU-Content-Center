@@ -59,23 +59,16 @@ import {
 } from '../utils/avatarUtils';
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
-  subscribeAllInnovations,
   deleteInnovationSubmission,
   deleteTeacherMedia,
   InnovationSubmission,
-  subscribeTeacherMedia, 
   TeacherMediaWork,
   isValidActiveMediaRecord,
   doesMediaRecordBelongToTeacher,
   getUnifiedTeacherMediaRecords,
   syncUserSubmissionCountIfOutOfSync,
-  refreshAllInnovations,
-  refreshTeacherMedia
 } from '../services/submissionService';
 import { 
-  subscribeAllLoginLogs, 
-  subscribeSiteSummary,
-  fetchSiteSummaryOnce,
   getLocalSiteSummary,
   SiteVisitSummary,
   LoginLogEntry, 
@@ -84,6 +77,7 @@ import {
   resetUserLoginLogsByEmail,
   getBangkokDateParts
 } from '../services/auditService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
 
@@ -169,74 +163,78 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isSubmittingPraise, setIsSubmittingPraise] = useState<boolean>(false);
   const [praiseSuccessNotice, setPraiseSuccessNotice] = useState<string | null>(null);
 
-  // Verified login logs & Year selector (strictly read from local/memory cache on open — 0 Firestore reads)
-  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
-  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
+  const {
+    userEmail: rootUserEmail,
+    currentUserProfile: rootUserProfile,
+    innovations: globalInnovations,
+    teacherMedia: globalTeacherMedia,
+    siteSummary: globalSiteSummary,
+    loginLogs: globalLoginLogs,
+    ensureTeacherCoreLoaded,
+    ensureSiteSummaryLoaded,
+    syncProfileStats,
+  } = useFirestoreData();
+  const {
+    isSyncing: isManualRefreshing,
+    cooldownSeconds: manualRefreshCooldown,
+    isDisabled: isManualRefreshDisabled,
+    triggerSync: triggerProfileSync,
+    getButtonLabel: getProfileRefreshLabel,
+  } = useSyncButtonState('user_profile_stats');
+
+  // Verified login logs & Year selector (strictly read from centralized global state)
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => globalLoginLogs);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => globalSiteSummary || getLocalSiteSummary());
   const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
-  const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
-  const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>([]);
+  const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>(() => globalTeacherMedia);
+  const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>(() => globalInnovations);
   const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
-  const [isManualRefreshing, setIsManualRefreshing] = useState<boolean>(false);
   const [refreshCooldownNotice, setRefreshCooldownNotice] = useState<string | null>(null);
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to cached login logs + cached site_summary (0 Firestore reads on modal open or tab switch)
+  // Hydrate centralized streams once when modal opens (zero duplicate mounts/fetches)
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = subscribeAllLoginLogs((logs) => {
-      setLoginLogs((prev) => (logs.length > 0 || prev.length === 0 ? logs : prev));
-    });
-    const unsubSummary = subscribeSiteSummary((summary) => {
-      if (summary) {
-        setSiteSummary((prev) => {
-          if (!prev) return summary;
-          if ((summary.totalVisits || 0) === 0 && !summary.resetAt && (prev.totalVisits || 0) > 0) {
-            return prev;
-          }
-          return summary;
-        });
-      }
-    });
+    ensureTeacherCoreLoaded();
+    ensureSiteSummaryLoaded();
+  }, [isOpen, ensureTeacherCoreLoaded, ensureSiteSummaryLoaded]);
 
-    return () => {
-      unsub();
-      unsubSummary();
-    };
-  }, [isOpen]);
-
-  // Subscribe to cached teacher media repository (6h localStorage TTL)
   useEffect(() => {
-    if (!isOpen) return;
-    const unsub = subscribeTeacherMedia((works) => {
-      setTeacherMediaList((prev) => (works.length > 0 || prev.length === 0 ? works : prev));
-    });
-    return () => unsub();
-  }, [isOpen]);
+    if (globalLoginLogs.length > 0) {
+      setLoginLogs(globalLoginLogs);
+    }
+  }, [globalLoginLogs]);
+
+  useEffect(() => {
+    if (globalSiteSummary) {
+      setSiteSummary((prev) => {
+        if (!prev) return globalSiteSummary;
+        if ((globalSiteSummary.totalVisits || 0) === 0 && !globalSiteSummary.resetAt && (prev.totalVisits || 0) > 0) {
+          return prev;
+        }
+        return globalSiteSummary;
+      });
+    }
+  }, [globalSiteSummary]);
+
+  useEffect(() => {
+    if (globalTeacherMedia.length > 0 || teacherMediaList.length === 0) {
+      setTeacherMediaList(globalTeacherMedia);
+    }
+  }, [globalTeacherMedia]);
 
   const handleManualRefreshProfileStats = async () => {
-    if (isManualRefreshing) return;
+    if (isManualRefreshDisabled) return;
     setRefreshCooldownNotice(null);
-    setIsManualRefreshing(true);
-    try {
-      const [innovsRes, mediaRes, summaryRes] = await Promise.allSettled([
-        refreshAllInnovations(true),
-        refreshTeacherMedia(true),
-        fetchSiteSummaryOnce(true),
-      ]);
-      if (innovsRes.status === 'fulfilled' && Array.isArray(innovsRes.value) && innovsRes.value.length > 0) {
-        setAllInnovationsList(innovsRes.value);
-      }
-      if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value) && mediaRes.value.length > 0) {
-        setTeacherMediaList(mediaRes.value);
-      }
-      if (summaryRes.status === 'fulfilled' && summaryRes.value) {
-        setSiteSummary(summaryRes.value);
-      }
-    } finally {
-      setIsManualRefreshing(false);
+    const { executed } = await triggerProfileSync(async () => {
+      await syncProfileStats();
+    });
+    if (executed) {
+      setRefreshCooldownNotice('ซิงค์ข้อมูลสถิติและคลังสื่อล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
+      setTimeout(() => setRefreshCooldownNotice(null), 4000);
     }
   };
 
@@ -391,27 +389,34 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
 
     let isMounted = true;
-    const unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
-      if (!isMounted || !liveProf) return;
+    const isViewingOwnRootProfile =
+      Boolean(rootUserEmail) && rootUserEmail!.trim().toLowerCase() === normEmail && Boolean(rootUserProfile);
+    let unsubProfile = () => {};
+    if (isViewingOwnRootProfile && rootUserProfile) {
       const shouldInitForm = initializedFormKeyRef.current !== formKey;
-      applyProfileSnapshot(liveProf, shouldInitForm);
+      applyProfileSnapshot(rootUserProfile, shouldInitForm);
       initializedFormKeyRef.current = formKey;
-    });
+    } else {
+      unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
+        if (!isMounted || !liveProf) return;
+        const shouldInitForm = initializedFormKeyRef.current !== formKey;
+        applyProfileSnapshot(liveProf, shouldInitForm);
+        initializedFormKeyRef.current = formKey;
+      });
+    }
 
     return () => {
       isMounted = false;
       unsubProfile();
     };
-  }, [isOpen, userEmail, userName, isMasterWeerapong]);
+  }, [isOpen, userEmail, userName, isMasterWeerapong, rootUserEmail, rootUserProfile]);
 
-  // Subscribe to all innovations via 6h cached stream
+  // Sync innovations list from centralized global state
   useEffect(() => {
-    if (!isOpen || !userEmail) return;
-    const unsubscribe = subscribeAllInnovations((allInnos) => {
-      setAllInnovationsList((prev) => (allInnos.length > 0 || prev.length === 0 ? allInnos : prev));
-    });
-    return () => unsubscribe();
-  }, [isOpen, userEmail]);
+    if (globalInnovations.length > 0 || allInnovationsList.length === 0) {
+      setAllInnovationsList(globalInnovations);
+    }
+  }, [globalInnovations]);
 
   const liveUserSubmissions = React.useMemo(() => {
     const teacherMatcher = {
@@ -932,12 +937,14 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
               type="button"
               id="btn-profile-manual-refresh"
               onClick={handleManualRefreshProfileStats}
-              disabled={isManualRefreshing}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-sky-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลสถิติและสื่อจากฐานข้อมูล (คูลดาวน์ 60 วินาที)"
+              disabled={isManualRefreshDisabled}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-sky-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={manualRefreshCooldown > 0 ? `รอ ${manualRefreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลสถิติและสื่อจากฐานข้อมูล (คูลดาวน์ 60 วินาที)'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isManualRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className={isManualRefreshing || manualRefreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getProfileRefreshLabel('รีเฟรช')}
+              </span>
             </button>
 
             {/* Special Privileges Check Status Button */}

@@ -12,13 +12,12 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { 
-  subscribeCriteriaPoster, 
   saveCriteriaPoster, 
   resetCriteriaPoster,
-  getInitialCriteriaPosterUrl,
   ADMIN_TARGET_EMAIL,
   DEFAULT_CRITERIA_POSTER
 } from '../services/submissionService';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 
 interface MediaTypesPopupModalProps {
   userEmail?: string | null;
@@ -35,7 +34,8 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   userEmail,
   onClose 
 }) => {
-  const [posterUrl, setPosterUrl] = useState<string>(getInitialCriteriaPosterUrl());
+  const { criteriaPosterUrl } = useFirestoreData();
+  const [posterUrl, setPosterUrl] = useState<string>(criteriaPosterUrl);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [isAdminUploadOpen, setIsAdminUploadOpen] = useState(false);
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
@@ -59,13 +59,9 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
 
   const isAdmin = (activeEmail || '').trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
 
-  // Real-time subscription to criteria poster
   useEffect(() => {
-    const unsub = subscribeCriteriaPoster((url) => {
-      setPosterUrl(url);
-    });
-    return () => unsub();
-  }, []);
+    setPosterUrl(criteriaPosterUrl);
+  }, [criteriaPosterUrl]);
 
   const handleZoomIn = () => setZoomLevel((prev) => Math.min(prev + 0.25, 2.5));
   const handleZoomOut = () => setZoomLevel((prev) => Math.max(prev - 0.25, 0.75));

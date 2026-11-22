@@ -30,6 +30,7 @@ import {
   syncUserAvatarOnAuthOrLogin,
 } from './services/userProfileService';
 import { sanitizeAvatarUrl } from './utils/avatarUtils';
+import { FirestoreDataProvider } from './context/FirestoreDataContext';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -229,7 +230,7 @@ export default function App() {
   // If user has logged in, show Page 2 (Role Selection Dashboard) with optional timeout warning
   if (loggedInUser) {
     return (
-      <>
+      <FirestoreDataProvider userEmail={loggedInUser}>
         <RoleSelectionDashboard
           userEmail={loggedInUser}
           onLogout={() => handleLogout('manual')}
@@ -241,15 +242,16 @@ export default function App() {
             onLogout={() => handleLogout('manual')}
           />
         )}
-      </>
+      </FirestoreDataProvider>
     );
   }
 
   return (
-    <div
-      id="main-login-viewport"
-      className="relative min-h-screen w-full flex flex-col justify-between overflow-x-hidden select-none bg-slate-900"
-    >
+    <FirestoreDataProvider userEmail={null}>
+      <div
+        id="main-login-viewport"
+        className="relative min-h-screen w-full flex flex-col justify-between overflow-x-hidden select-none bg-slate-900"
+      >
       {/* Background Layer: International Educational Aesthetic */}
       <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden">
         {/* Academic Image Backdrop with 45% Gaussian blur (4.5px) and 45% opacity */}
@@ -444,7 +446,8 @@ export default function App() {
       {sessionTimedOut && (
         <SessionTimeoutModal onClose={() => setSessionTimedOut(false)} />
       )}
-    </div>
+      </div>
+    </FirestoreDataProvider>
   );
 }
 

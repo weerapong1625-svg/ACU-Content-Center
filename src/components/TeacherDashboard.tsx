@@ -4,9 +4,9 @@ import {
 } from './SchoolLogo';
 import { 
   FullUserProfile, 
-  subscribeFullUserProfile, 
   saveFullUserProfile 
 } from '../services/userProfileService';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import { UserProfileModal } from './UserProfileModal';
 import { FacilityUsageSubmissionModal } from './FacilityUsageSubmissionModal';
 import { TeacherInnovationSubmissionModal } from './TeacherInnovationSubmissionModal';
@@ -58,10 +58,6 @@ import {
 } from 'lucide-react';
 import {
   ADMIN_TARGET_EMAIL,
-  subscribeAllInnovations,
-  subscribeTeacherMedia,
-  InnovationSubmission,
-  TeacherMediaWork,
   getUnifiedTeacherMediaRecords,
 } from '../services/submissionService';
 
@@ -91,30 +87,26 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onBackToRoles,
   onLogout,
 }) => {
-  // Real-time synced profile from Cloud Firestore (same across mobile & desktop)
-  const [profile, setProfile] = useState<FullUserProfile | null>(null);
+  // Centralized global profile & collection data (zero duplicate mounts or getDocs calls)
+  const {
+    currentUserProfile,
+    innovations: allInnovations,
+    teacherMedia,
+    ensureTeacherCoreLoaded,
+  } = useFirestoreData();
+  const [profileOverride, setProfileOverride] = useState<FullUserProfile | null>(null);
+  const profile = profileOverride || currentUserProfile;
+  const setProfile = setProfileOverride;
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [isPrivilegesModalOpen, setIsPrivilegesModalOpen] = useState(false);
 
   // Active view modal when a button is clicked
   const [activeModalId, setActiveModalId] = useState<string | null>(null);
   const [innovationInitialTab, setInnovationInitialTab] = useState<'form' | 'status'>('form');
-  const [allInnovations, setAllInnovations] = useState<InnovationSubmission[]>([]);
-  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
 
-  // Real-time subscribe to user's unified 5-item submission count across both collections (shared multiplexed listeners)
   useEffect(() => {
-    const unsubInnos = subscribeAllInnovations((list) => {
-      setAllInnovations(list);
-    });
-    const unsubMedia = subscribeTeacherMedia((works) => {
-      setTeacherMedia(works);
-    });
-    return () => {
-      unsubInnos();
-      unsubMedia();
-    };
-  }, [userEmail]);
+    ensureTeacherCoreLoaded();
+  }, [ensureTeacherCoreLoaded]);
 
   const userInnovationsCount = React.useMemo(() => {
     return getUnifiedTeacherMediaRecords(
@@ -163,15 +155,12 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     { id: 4, title: 'สมุดบันทึกสะท้อนคิดดิจิทัล (Digital Reflection Journal)', teacher: 'ครูอรัญญา พิลาวัลย์', category: 'การวัดผลประเมินผล', likes: 16, date: '14 มี.ค. 2569' },
   ]);
 
-  // Subscribe to real-time full profile across devices
+  // Sync profile override cleanly when root profile updates
   useEffect(() => {
-    const unsubscribe = subscribeFullUserProfile(userEmail, (loaded) => {
-      setProfile(loaded);
-    });
-    return () => {
-      unsubscribe();
-    };
-  }, [userEmail]);
+    if (currentUserProfile) {
+      setProfileOverride(currentUserProfile);
+    }
+  }, [currentUserProfile]);
 
   // 7 Button Configurations exactly matching user's specification
   const menuButtons: MenuCardItem[] = [

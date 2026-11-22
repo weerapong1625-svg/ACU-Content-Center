@@ -232,6 +232,11 @@ async function fetchSingleClaimOnce(
   const cachedClaim = cachedMap[normEmail] || null;
   const singleTsKey = `${SINGLE_CLAIM_TS_PREFIX}${normEmail}`;
 
+  const existingPromise = inFlightSingleClaimFetches.get(normEmail);
+  if (existingPromise) {
+    return existingPromise;
+  }
+
   if (
     !forceRefresh &&
     (sessionSingleClaimFetched.has(normEmail) ||
@@ -241,11 +246,6 @@ async function fetchSingleClaimOnce(
   ) {
     sessionSingleClaimFetched.add(normEmail);
     return cachedClaim;
-  }
-
-  const existingPromise = inFlightSingleClaimFetches.get(normEmail);
-  if (!forceRefresh && existingPromise) {
-    return existingPromise;
   }
 
   const run = (async () => {
@@ -289,13 +289,13 @@ export async function refreshRewardClaims(
 ): Promise<Record<string, RewardClaimRecord>> {
   const localFallback = getStoredRewardClaimsMap();
 
+  if (inFlightClaimsListFetch) {
+    return inFlightClaimsListFetch;
+  }
+
   if (!forceRefresh && (sessionClaimsListFetched || hasFreshClaimsListCache())) {
     sessionClaimsListFetched = true;
     return localFallback;
-  }
-
-  if (!forceRefresh && inFlightClaimsListFetch) {
-    return inFlightClaimsListFetch;
   }
 
   inFlightClaimsListFetch = (async () => {

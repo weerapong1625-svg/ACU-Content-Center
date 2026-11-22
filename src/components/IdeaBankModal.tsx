@@ -33,14 +33,13 @@ import {
 } from '../data/ideaResources';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import {
-  subscribeSharedIdeas,
-  refreshSharedIdeas,
   saveSharedIdea,
   updateSharedIdea,
   deleteSharedIdea,
   canUserModify,
   SharedIdeaItem,
 } from '../services/submissionService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 
 interface IdeaBankModalProps {
   userEmail?: string;
@@ -257,7 +256,14 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const { sharedIdeas: globalIdeas, ensureSharedIdeasLoaded, syncSharedIdeas } = useFirestoreData();
+  const {
+    isSyncing: isRefreshing,
+    cooldownSeconds: refreshCooldown,
+    isDisabled: isRefreshDisabled,
+    triggerSync: triggerIdeasSync,
+    getButtonLabel: getRefreshLabel,
+  } = useSyncButtonState('shared_ideas');
 
   const showNotice = (type: 'success' | 'error', message: string) => {
     setActionNotice({ type, message });
@@ -266,22 +272,21 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     }, 3500);
   };
 
-  // Subscribe to smart-cached shared ideas (6h localStorage TTL)
   useEffect(() => {
-    const unsubscribe = subscribeSharedIdeas((ideas) => {
-      setFirestoreIdeas(ideas);
-    });
-    return () => unsubscribe();
-  }, []);
+    ensureSharedIdeasLoaded();
+  }, [ensureSharedIdeasLoaded]);
+
+  useEffect(() => {
+    setFirestoreIdeas(globalIdeas);
+  }, [globalIdeas]);
 
   const handleRefreshIdeas = async () => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    try {
-      await refreshSharedIdeas(true);
-      showNotice('success', 'อัปเดตคลังไอเดียล่าสุดเรียบร้อยแล้ว');
-    } finally {
-      setIsRefreshing(false);
+    if (isRefreshDisabled) return;
+    const { executed } = await triggerIdeasSync(async () => {
+      await syncSharedIdeas();
+    });
+    if (executed) {
+      showNotice('success', 'ซิงค์คลังไอเดียล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
     }
   };
 
@@ -524,12 +529,14 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
             <button
               type="button"
               onClick={handleRefreshIdeas}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลคลังไอเดียล่าสุด"
+              disabled={isRefreshDisabled}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={refreshCooldown > 0 ? `รอ ${refreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลคลังไอเดียล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className={isRefreshing || refreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getRefreshLabel('รีเฟรช')}
+              </span>
             </button>
 
             <button

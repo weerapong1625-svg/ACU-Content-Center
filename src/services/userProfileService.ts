@@ -395,6 +395,10 @@ async function readSingleUserDocByUid(
     return { uid: '', data: null, photoURL: '', hasDeadBlob: false };
   }
 
+  if (inFlightUsersDocFetch.has(cleanUid)) {
+    return inFlightUsersDocFetch.get(cleanUid)!;
+  }
+
   if (!forceRefresh) {
     if (sessionUsersDocCache.has(cleanUid)) {
       return sessionUsersDocCache.get(cleanUid)!;
@@ -409,9 +413,6 @@ async function readSingleUserDocByUid(
       };
       sessionUsersDocCache.set(cleanUid, cachedResult);
       return cachedResult;
-    }
-    if (inFlightUsersDocFetch.has(cleanUid)) {
-      return inFlightUsersDocFetch.get(cleanUid)!;
     }
   }
 
@@ -468,6 +469,10 @@ async function readSingleProfileDocOnce(
   forceRefresh = false
 ): Promise<Record<string, any> | null> {
   if (!safeDocId) return null;
+  if (inFlightProfileDocFetch.has(safeDocId)) {
+    return inFlightProfileDocFetch.get(safeDocId)!;
+  }
+
   if (!forceRefresh) {
     if (sessionProfileDocCache.has(safeDocId)) {
       return sessionProfileDocCache.get(safeDocId) ?? null;
@@ -476,9 +481,6 @@ async function readSingleProfileDocOnce(
     if (freshLocal) {
       sessionProfileDocCache.set(safeDocId, freshLocal.data ?? null);
       return freshLocal.data ?? null;
-    }
-    if (inFlightProfileDocFetch.has(safeDocId)) {
-      return inFlightProfileDocFetch.get(safeDocId)!;
     }
   }
 
@@ -1641,6 +1643,10 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
   };
   const localFallback = Object.keys(storedMap).length > 0 ? storedMap : (sharedUserProfilesMap || {});
 
+  if (inFlightAllUserProfilesFetch) {
+    return inFlightAllUserProfilesFetch;
+  }
+
   if (!forceRefresh && hasFreshAllUserProfilesCache()) {
     sharedUserProfilesMap = storedMap;
     hasFetchedAllUserProfilesThisSession = true;
@@ -1649,10 +1655,6 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
 
   if (!forceRefresh && hasFetchedAllUserProfilesThisSession && sharedUserProfilesMap) {
     return sharedUserProfilesMap;
-  }
-
-  if (!forceRefresh && inFlightAllUserProfilesFetch) {
-    return inFlightAllUserProfilesFetch;
   }
 
   inFlightAllUserProfilesFetch = (async () => {
@@ -2069,7 +2071,27 @@ export interface DatabaseEmailAuditResult {
  * - Aligns teacher full names across all databases for consistent certificate and report generation.
  * - Auto-repairs discrepancies in real-time and returns a detailed audit summary report.
  */
-export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise<DatabaseEmailAuditResult> {
+const EMAIL_AUDIT_CACHE_KEY = 'acu_email_audit_result_cache';
+let inFlightEmailAudit: Promise<DatabaseEmailAuditResult> | null = null;
+
+function readCachedEmailAudit(allowExpired = false): DatabaseEmailAuditResult | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(EMAIL_AUDIT_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { result?: DatabaseEmailAuditResult; cachedAt?: number };
+    if (!parsed?.result || typeof parsed.cachedAt !== 'number') return null;
+    if (!allowExpired && Date.now() - parsed.cachedAt >= ALL_USER_PROFILES_TTL_MS) return null;
+    return parsed.result;
+  } catch {
+    return null;
+  }
+}
+
+export async function auditAndSyncAllDatabaseEmails(
+  adminEmail: string,
+  forceRefresh = false
+): Promise<DatabaseEmailAuditResult> {
   const normAdmin = adminEmail.trim().toLowerCase();
   const nowIso = new Date().toISOString();
 
@@ -2089,7 +2111,19 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
     };
   }
 
-  try {
+  if (inFlightEmailAudit) {
+    return inFlightEmailAudit;
+  }
+
+  if (!forceRefresh) {
+    const cachedAudit = readCachedEmailAudit(false);
+    if (cachedAudit) {
+      return cachedAudit;
+    }
+  }
+
+  inFlightEmailAudit = (async () => {
+    try {
     const safeGetDocs = async (colName: string) => {
       try {
         return await getDocs(collection(db, colName));
@@ -2321,7 +2355,7 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
 
     const scannedEmailsList = Array.from(uniqueEmailsMap.keys()).sort();
 
-    return {
+    const result: DatabaseEmailAuditResult = {
       success: true,
       timestamp: nowIso,
       scannedUniqueEmails: scannedEmailsList.length,
@@ -2339,8 +2373,18 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       discrepancies,
       isFullyConsistent: true,
     };
+
+    try {
+      localStorage.setItem(EMAIL_AUDIT_CACHE_KEY, JSON.stringify({ result, cachedAt: Date.now() }));
+    } catch {}
+
+    return result;
   } catch (err: any) {
-    console.error('Audit and sync database emails failed:', err);
+    console.warn('[Firestore] auditAndSyncAllDatabaseEmails failed, falling back to localStorage:', err);
+    const fallbackAudit = readCachedEmailAudit(true);
+    if (fallbackAudit) {
+      return fallbackAudit;
+    }
     return {
       success: false,
       timestamp: nowIso,
@@ -2354,6 +2398,11 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
       isFullyConsistent: false,
       error: err?.message || 'เกิดข้อผิดพลาดในการตรวจสอบฐานข้อมูล',
     };
+  } finally {
+    inFlightEmailAudit = null;
   }
+  })();
+
+  return inFlightEmailAudit;
 }
 

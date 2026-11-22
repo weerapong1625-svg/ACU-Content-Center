@@ -49,7 +49,7 @@ function getDefaultBannerConfig(): PopupBannerConfig {
   };
 }
 
-function getCachedOrDefaultBannerConfig(): PopupBannerConfig {
+export function getCachedOrDefaultBannerConfig(): PopupBannerConfig {
   const cached = getCachedBannerConfig();
   if (cached && cached.bannerImageUrl) {
     return {
@@ -99,13 +99,13 @@ export function hasCachedBannerConfig(): boolean {
  * Fetch the active popup banner configuration (one-time getDoc cached 24h in localStorage)
  */
 export async function fetchPopupBannerConfig(force = false): Promise<PopupBannerConfig> {
+  if (inFlightBannerFetch) {
+    return inFlightBannerFetch;
+  }
+
   const cached = getCachedBannerConfig();
   if (!force && (sessionBannerFetched || isBannerCacheFresh(cached))) {
     return getCachedOrDefaultBannerConfig();
-  }
-
-  if (!force && inFlightBannerFetch) {
-    return inFlightBannerFetch;
   }
 
   inFlightBannerFetch = (async () => {

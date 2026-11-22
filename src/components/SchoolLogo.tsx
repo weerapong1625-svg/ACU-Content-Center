@@ -1,14 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ACUEmblemVector } from './ACUEmblemVector';
 import { 
-  getInitialLogoUrl, 
-  subscribeSchoolLogo, 
   saveSchoolLogo, 
   resetSchoolLogo, 
   isSuperAdmin,
   SUPER_ADMIN_EMAIL,
   DEFAULT_LOGO_IMAGE 
 } from '../services/logoService';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import { Camera, RefreshCw, X, Check, ShieldAlert } from 'lucide-react';
 
 interface SchoolLogoProps {
@@ -29,7 +28,8 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   size = 'md',
   currentUserEmail,
 }) => {
-  const [logoUrl, setLogoUrl] = useState<string>(getInitialLogoUrl());
+  const { schoolLogoUrl } = useFirestoreData();
+  const [logoUrl, setLogoUrl] = useState<string>(schoolLogoUrl);
   const [imgFailed, setImgFailed] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
@@ -51,14 +51,11 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
 
   const canEdit = isSuperAdmin(activeEmail);
 
-  // Subscribe to real-time updates from Firestore & local custom events
+  // Sync logo from centralized global state
   useEffect(() => {
-    const unsubscribe = subscribeSchoolLogo((updatedUrl) => {
-      setLogoUrl(updatedUrl);
-      setImgFailed(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    setLogoUrl(schoolLogoUrl);
+    setImgFailed(false);
+  }, [schoolLogoUrl]);
 
   // Listen for global open admin modal request from anywhere in the app
   useEffect(() => {

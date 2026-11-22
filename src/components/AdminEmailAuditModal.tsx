@@ -19,10 +19,10 @@ import {
 import { 
   auditAndSyncAllDatabaseEmails, 
   DatabaseEmailAuditResult, 
-  deleteUserAccountCompletely, 
-  FullUserProfile 
+  deleteUserAccountCompletely
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
+import { useSyncButtonState } from '../context/FirestoreDataContext';
 
 interface AdminEmailAuditModalProps {
   isOpen: boolean;
@@ -45,17 +45,41 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
 
-  // Run audit on mount when modal is opened
+  const {
+    isSyncing: isSyncingAudit,
+    cooldownSeconds: auditCooldown,
+    isDisabled: isAuditRefreshDisabled,
+    triggerSync: triggerAuditSync,
+    getButtonLabel: getAuditButtonLabel,
+  } = useSyncButtonState('admin_email_audit');
+
+  // Run audit on mount when modal is opened (uses 6h localStorage cache unless forced)
   useEffect(() => {
     if (isOpen && !auditResult) {
-      handleRunAudit();
+      handleRunAudit(false);
     }
   }, [isOpen]);
 
-  const handleRunAudit = async () => {
+  const handleRunAudit = async (forceRefresh = false) => {
+    if (forceRefresh) {
+      if (isAuditRefreshDisabled) return;
+      await triggerAuditSync(async () => {
+        setIsLoading(true);
+        try {
+          const res = await auditAndSyncAllDatabaseEmails(adminEmail, true);
+          setAuditResult(res);
+        } catch (err) {
+          console.error('Audit failed:', err);
+        } finally {
+          setIsLoading(false);
+        }
+      });
+      return;
+    }
+
     setIsLoading(true);
     try {
-      const res = await auditAndSyncAllDatabaseEmails(adminEmail);
+      const res = await auditAndSyncAllDatabaseEmails(adminEmail, false);
       setAuditResult(res);
     } catch (err) {
       console.error('Audit failed:', err);
@@ -90,7 +114,7 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
           onUserDeleted(targetEmail);
         }
         // Refresh audit report
-        await handleRunAudit();
+        await handleRunAudit(true);
       } else {
         alert(res.error || 'ไม่สามารถลบบัญชีได้');
       }
@@ -160,12 +184,13 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
 
           <div className="flex items-center gap-2.5">
             <button
-              onClick={handleRunAudit}
-              disabled={isLoading}
-              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-md active:scale-95 disabled:opacity-50"
+              onClick={() => handleRunAudit(true)}
+              disabled={isLoading || isAuditRefreshDisabled}
+              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-blue-600 hover:bg-blue-500 text-white transition-all shadow-md active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+              title={auditCooldown > 0 ? `รอ ${auditCooldown} วินาทีก่อนตรวจสอบและซิงค์อีกครั้ง` : 'ตรวจสอบและซิงค์บัญชีอีเมลจากฐานข้อมูล'}
             >
-              <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin' : ''}`} />
-              <span>{isLoading ? 'กำลังตรวจสอบ...' : 'เริ่มตรวจสอบและซิงค์ใหม่'}</span>
+              <RefreshCw className={`w-3.5 h-3.5 ${isLoading || isSyncingAudit ? 'animate-spin' : ''}`} />
+              <span>{getAuditButtonLabel('เริ่มตรวจสอบและซิงค์ใหม่')}</span>
             </button>
             <button
               onClick={onClose}
@@ -194,10 +219,11 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
                 <span>{auditResult.error}</span>
               </div>
               <button
-                onClick={handleRunAudit}
-                className="px-3 py-1 rounded-lg bg-red-800 hover:bg-red-700 text-white font-semibold text-xs cursor-pointer"
+                onClick={() => handleRunAudit(true)}
+                disabled={isAuditRefreshDisabled}
+                className="px-3 py-1 rounded-lg bg-red-800 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed text-white font-semibold text-xs cursor-pointer"
               >
-                ลองใหม่อีกครั้ง
+                {getAuditButtonLabel('ลองใหม่อีกครั้ง')}
               </button>
             </div>
           )}

@@ -31,13 +31,11 @@ import {
   saveFacilitySubmission, 
   updateFacilitySubmission,
   deleteFacilitySubmission,
-  subscribeUserSubmissions, 
-  subscribeAllSubmissions,
-  refreshAllFacilities,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify
 } from '../services/submissionService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 
 interface FacilityUsageSubmissionModalProps {
   userEmail: string;
@@ -81,43 +79,42 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
   const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
 
-  // Submissions lists (Real-time from Firestore Project: System Test)
-  const [userSubmissions, setUserSubmissions] = useState<FacilitySubmission[]>([]);
-  const [allSubmissions, setAllSubmissions] = useState<FacilitySubmission[]>([]);
+  const { facilities: allSubmissions, ensureFacilitiesLoaded, syncFacilities } = useFirestoreData();
+  const {
+    isSyncing: isRefreshing,
+    cooldownSeconds: refreshCooldown,
+    isDisabled: isRefreshDisabled,
+    triggerSync: triggerFacilitySync,
+    getButtonLabel: getRefreshLabel,
+  } = useSyncButtonState('facility_submissions');
+
+  const userSubmissions = React.useMemo(() => {
+    const normEmail = userEmail.trim().toLowerCase();
+    if (!normEmail) return [];
+    return allSubmissions
+      .filter((item) => (item.userEmail || '').trim().toLowerCase() === normEmail)
+      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  }, [allSubmissions, userEmail]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync user submissions in real-time
   useEffect(() => {
-    const unsub = subscribeUserSubmissions(userEmail, (data) => {
-      setUserSubmissions(data);
-    });
-    return () => unsub();
-  }, [userEmail]);
-
-  // Sync all submissions for Google Sheets export
-  useEffect(() => {
-    const unsub = subscribeAllSubmissions((data) => {
-      setAllSubmissions(data);
-    });
-    return () => unsub();
-  }, []);
+    ensureFacilitiesLoaded();
+  }, [ensureFacilitiesLoaded]);
 
   const handleRefresh = async () => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    try {
-      await refreshAllFacilities(true);
-      setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
-      setTimeout(() => setActionNotice(null), 2500);
-    } finally {
-      setIsRefreshing(false);
+    if (isRefreshDisabled) return;
+    const { executed } = await triggerFacilitySync(async () => {
+      await syncFacilities();
+    });
+    if (executed) {
+      setActionNotice('ซิงค์ข้อมูลล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
+      setTimeout(() => setActionNotice(null), 3000);
     }
   };
 
@@ -372,12 +369,14 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
+              disabled={isRefreshDisabled}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={refreshCooldown > 0 ? `รอ ${refreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className={isRefreshing || refreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getRefreshLabel('รีเฟรช')}
+              </span>
             </button>
             <button
               type="button"

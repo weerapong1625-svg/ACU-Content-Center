@@ -1314,6 +1314,10 @@ export async function refreshAllInnovations(forceRefresh = false): Promise<Innov
   const localFallback = getSortedStoredInnovations();
   const effectiveFallback = localFallback.length > 0 ? localFallback : (sharedLatestInnovations || []);
 
+  if (inFlightInnovationsFetch) {
+    return inFlightInnovationsFetch;
+  }
+
   if (!forceRefresh && hasFreshLocalCache(INNOVATIONS_STORAGE_KEY, INNOVATIONS_FETCHED_AT_KEY)) {
     const freshList = getSortedStoredInnovations();
     sharedLatestInnovations = freshList;
@@ -1323,10 +1327,6 @@ export async function refreshAllInnovations(forceRefresh = false): Promise<Innov
 
   if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
     return sharedLatestInnovations;
-  }
-
-  if (!forceRefresh && inFlightInnovationsFetch) {
-    return inFlightInnovationsFetch;
   }
 
   inFlightInnovationsFetch = (async () => {
@@ -1701,6 +1701,10 @@ export async function refreshAllFacilities(forceRefresh = false): Promise<Facili
   const localStored = getStoredFacilities();
   const localFallback = localStored.length > 0 ? localStored : (sharedLatestFacilities || []);
 
+  if (inFlightFacilitiesFetch) {
+    return inFlightFacilitiesFetch;
+  }
+
   if (!forceRefresh && hasFreshLocalCache(FACILITY_STORAGE_KEY, FACILITY_FETCHED_AT_KEY)) {
     const freshList = getStoredFacilities();
     sharedLatestFacilities = freshList;
@@ -1710,10 +1714,6 @@ export async function refreshAllFacilities(forceRefresh = false): Promise<Facili
 
   if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
     return sharedLatestFacilities;
-  }
-
-  if (!forceRefresh && inFlightFacilitiesFetch) {
-    return inFlightFacilitiesFetch;
   }
 
   inFlightFacilitiesFetch = (async () => {
@@ -1907,6 +1907,10 @@ export async function refreshTeacherMedia(forceRefresh = false): Promise<Teacher
   const localStored = getFilteredStoredTeacherMedia();
   const localFallback = localStored.length > 0 ? localStored : (sharedLatestTeacherMedia || []);
 
+  if (inFlightTeacherMediaFetch) {
+    return inFlightTeacherMediaFetch;
+  }
+
   if (!forceRefresh && hasFreshLocalCache(TEACHER_MEDIA_STORAGE_KEY, TEACHER_MEDIA_FETCHED_AT_KEY, TEACHER_MEDIA_CACHE_TTL_MS)) {
     const freshList = getFilteredStoredTeacherMedia();
     sharedLatestTeacherMedia = freshList;
@@ -1921,10 +1925,6 @@ export async function refreshTeacherMedia(forceRefresh = false): Promise<Teacher
 
   if (!forceRefresh && isMediaFreshInMemory && sharedLatestTeacherMedia) {
     return sharedLatestTeacherMedia;
-  }
-
-  if (!forceRefresh && inFlightTeacherMediaFetch) {
-    return inFlightTeacherMediaFetch;
   }
 
   inFlightTeacherMediaFetch = (async () => {
@@ -2500,6 +2500,10 @@ export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedId
   const localFallback = getStoredSharedIdeas();
   const effectiveFallback = localFallback.length > 0 ? localFallback : (sharedLatestIdeas || []);
 
+  if (inFlightSharedIdeasFetch) {
+    return inFlightSharedIdeasFetch;
+  }
+
   if (!forceRefresh && hasFreshLocalCache(SHARED_IDEAS_STORAGE_KEY, SHARED_IDEAS_FETCHED_AT_KEY)) {
     const freshIdeas = getStoredSharedIdeas();
     sharedLatestIdeas = freshIdeas;
@@ -2509,10 +2513,6 @@ export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedId
 
   if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
     return sharedLatestIdeas;
-  }
-
-  if (!forceRefresh && inFlightSharedIdeasFetch) {
-    return inFlightSharedIdeasFetch;
   }
 
   inFlightSharedIdeasFetch = (async () => {
@@ -2998,11 +2998,11 @@ export function getInitialCriteriaPosterUrl(): string {
 
 export async function fetchCriteriaPosterOnce(forceRefresh = false): Promise<string> {
   const localUrl = getInitialCriteriaPosterUrl();
+  if (inFlightCriteriaPosterFetch) {
+    return inFlightCriteriaPosterFetch;
+  }
   if (!forceRefresh && (hasFetchedCriteriaPosterThisSession || isCriteriaCacheFresh())) {
     return localUrl;
-  }
-  if (!forceRefresh && inFlightCriteriaPosterFetch) {
-    return inFlightCriteriaPosterFetch;
   }
 
   inFlightCriteriaPosterFetch = (async () => {

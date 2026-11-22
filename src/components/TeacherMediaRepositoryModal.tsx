@@ -34,8 +34,6 @@ import {
 } from '../utils/mediaThumbnailUtils';
 import { 
   TeacherMediaWork, 
-  subscribeTeacherMedia, 
-  refreshTeacherMedia,
   rateTeacherMedia, 
   toggleLikeTeacherMedia,
   updateTeacherMedia,
@@ -45,6 +43,7 @@ import {
   canUserModify,
   SUBJECT_GROUPS 
 } from '../services/submissionService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 
 interface TeacherMediaRepositoryModalProps {
   userEmail: string;
@@ -186,7 +185,14 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [submittingRatingIds, setSubmittingRatingIds] = useState<{ [id: string]: boolean }>({});
   const [likingIds, setLikingIds] = useState<{ [id: string]: boolean }>({});
-  const [isRefreshing, setIsRefreshing] = useState(false);
+  const { teacherMedia: globalMediaList, ensureTeacherMediaLoaded, syncTeacherMedia } = useFirestoreData();
+  const {
+    isSyncing: isRefreshing,
+    cooldownSeconds: refreshCooldown,
+    isDisabled: isRefreshDisabled,
+    triggerSync: triggerMediaSync,
+    getButtonLabel: getRefreshLabel,
+  } = useSyncButtonState('teacher_media');
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -244,22 +250,22 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     []
   );
 
-  // Subscribe once to teacher media works (0ms instant cached render + one-time fetch)
+  // Hydrate from centralized global state (zero duplicate Firestore fetches on mount)
   useEffect(() => {
-    const unsub = subscribeTeacherMedia((items) => {
-      setRawMediaList(items);
-    });
-    return () => unsub();
-  }, []);
+    ensureTeacherMediaLoaded();
+  }, [ensureTeacherMediaLoaded]);
+
+  useEffect(() => {
+    setRawMediaList(globalMediaList);
+  }, [globalMediaList]);
 
   const handleRefreshMedia = async () => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    try {
-      await refreshTeacherMedia(true);
-      showSuccessFeedback('อัปเดตคลังสื่อล่าสุดเรียบร้อยแล้ว');
-    } finally {
-      setIsRefreshing(false);
+    if (isRefreshDisabled) return;
+    const { executed } = await triggerMediaSync(async () => {
+      await syncTeacherMedia();
+    });
+    if (executed) {
+      showSuccessFeedback('ซิงค์คลังสื่อล่าสุดเรียบร้อยแล้ว (ปุ่มรีเฟรชจะพร้อมใช้งานอีกครั้งใน 60 วินาที)');
     }
   };
 
@@ -601,12 +607,14 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleRefreshMedia}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลคลังสื่อล่าสุด"
+              disabled={isRefreshDisabled}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={refreshCooldown > 0 ? `รอ ${refreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลคลังสื่อล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className={isRefreshing || refreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getRefreshLabel('รีเฟรช')}
+              </span>
             </button>
 
             <button

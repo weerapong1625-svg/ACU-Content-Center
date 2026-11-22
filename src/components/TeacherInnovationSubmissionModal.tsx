@@ -37,10 +37,6 @@ import {
   updateInnovationSubmission,
   deleteInnovationSubmission,
   deleteTeacherMedia,
-  subscribeAllInnovations,
-  subscribeTeacherMedia,
-  refreshAllInnovations,
-  refreshTeacherMedia,
   exportInnovationsToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify,
@@ -49,6 +45,7 @@ import {
   extractMediaEmails,
   getUnifiedTeacherMediaRecords
 } from '../services/submissionService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 import { resolveUserUid } from '../services/userProfileService';
 import {
   detectMediaLinkCategory,
@@ -99,39 +96,39 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [submittedId, setSubmittedId] = useState('');
-  const [allSubmissions, setAllSubmissions] = useState<InnovationSubmission[]>([]);
-  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
+  const {
+    innovations: allSubmissions,
+    teacherMedia,
+    ensureTeacherCoreLoaded,
+    syncInnovations,
+    syncTeacherMedia,
+  } = useFirestoreData();
+  const {
+    isSyncing: isRefreshing,
+    cooldownSeconds: refreshCooldown,
+    isDisabled: isRefreshDisabled,
+    triggerSync: triggerInnovationsSync,
+    getButtonLabel: getRefreshLabel,
+  } = useSyncButtonState('teacher_innovations');
   const [copyNotice, setCopyNotice] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
-  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
   const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
 
-  // Subscribe once via shared multiplexed streams (zero extra Firestore reads; never tear down on editingId change)
   useEffect(() => {
-    const unsubAll = subscribeAllInnovations((list) => {
-      setAllSubmissions(list);
-    });
-    const unsubMedia = subscribeTeacherMedia((works) => {
-      setTeacherMedia(works);
-    });
-    return () => {
-      unsubAll();
-      unsubMedia();
-    };
-  }, [userEmail]);
+    ensureTeacherCoreLoaded();
+  }, [ensureTeacherCoreLoaded]);
 
   const handleRefresh = async () => {
-    if (isRefreshing) return;
-    setIsRefreshing(true);
-    try {
-      await Promise.all([refreshAllInnovations(true), refreshTeacherMedia(true)]);
-      setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
-      setTimeout(() => setActionNotice(null), 2500);
-    } finally {
-      setIsRefreshing(false);
+    if (isRefreshDisabled) return;
+    const { executed } = await triggerInnovationsSync(async () => {
+      await Promise.all([syncInnovations(), syncTeacherMedia()]);
+    });
+    if (executed) {
+      setActionNotice('ซิงค์ข้อมูลล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
+      setTimeout(() => setActionNotice(null), 3000);
     }
   };
 
@@ -418,12 +415,14 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลการส่งสื่อล่าสุด"
+              disabled={isRefreshDisabled}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={refreshCooldown > 0 ? `รอ ${refreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลการส่งสื่อล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className={isRefreshing || refreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getRefreshLabel('รีเฟรช')}
+              </span>
             </button>
             <button
               type="button"

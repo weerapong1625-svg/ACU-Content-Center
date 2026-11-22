@@ -45,8 +45,6 @@ import {
 import { SchoolLogo } from './SchoolLogo';
 import { 
   FullUserProfile, 
-  subscribeAllUserProfiles, 
-  refreshAllUserProfiles,
   getCleanRealName,
   deleteUserAccountCompletely 
 } from '../services/userProfileService';
@@ -63,8 +61,6 @@ import { AdminPrivilegeRewardModal } from './AdminPrivilegeRewardModal';
 import { UserProfileModal } from './UserProfileModal';
 import { 
   TeacherPrivilegeAdminItem, 
-  subscribeAllTeachersPrivilegeStatus, 
-  refreshRewardClaims,
   generatePrivilegesCSV, 
   generatePrivilegesTSV,
   TARGET_SHARE_COUNT,
@@ -75,13 +71,11 @@ import {
   SUPER_ADMIN_EMAIL, 
   saveSchoolLogo, 
   resetSchoolLogo, 
-  subscribeSchoolLogo, 
   getInitialLogoUrl,
   DEFAULT_LOGO_IMAGE 
 } from '../services/logoService';
 import { 
   getInitialCertificateLogoUrl, 
-  subscribeCertificateLogo, 
   saveCertificateLogo, 
   resetCertificateLogo 
 } from '../services/certificateLogoService';
@@ -91,16 +85,8 @@ import {
   InnovationSubmission, 
   FacilitySubmission, 
   TeacherMediaWork,
-  subscribeAllInnovations, 
-  subscribeAllSubmissions,
-  subscribeTeacherMedia,
-  refreshAllInnovations,
-  refreshAllFacilities,
-  refreshTeacherMedia,
-  refreshSharedIdeas,
   syncUserSubmissionCountIfOutOfSync,
   saveCriteriaPoster,
-  subscribeCriteriaPoster,
   getInitialCriteriaPosterUrl,
   DEFAULT_CRITERIA_POSTER,
   GRADE_LEVELS,
@@ -134,10 +120,6 @@ import {
   SiteVisitSummary,
   getLocalSiteSummary,
   getLocalLoginLogs,
-  subscribeSiteSummary,
-  subscribeAllLoginLogs,
-  fetchSiteSummaryOnce,
-  fetchAdminLoginLogsOnce,
   generateLoginLogsTSV,
   generateLoginLogsCSV,
   resetAllLoginLogs,
@@ -147,11 +129,11 @@ import {
 import { sanitizeMediaThumbnailForFirestore } from '../utils/mediaThumbnailUtils';
 import {
   PopupBannerConfig,
-  subscribePopupBanner,
   savePopupBannerConfig,
   DEFAULT_BANNER_IMAGE,
   DEFAULT_BANNER_IMAGE_2
 } from '../services/bannerService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 
 const CURRENT_CALENDAR_YEAR = getBangkokDateParts()?.year || new Date().getFullYear() || 2026;
 // ลิสต์ปีการศึกษาล่วงหน้า 10 ปีข้างหน้า และปีย้อนหลัง (พ.ศ. 2579 ลงมาถึง 2567 / 2036 ลงมาถึง 2024)
@@ -183,20 +165,53 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [authReady, setAuthReady] = useState<boolean>(() => isAuthReady());
   const isAdminResolved = authReady && isSuperAdmin;
 
-  // Real-time / smart-cached Firestore data (strict 6-hour localStorage TTL, zero onSnapshot)
-  const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
-  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
-  const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
-  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
-  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
+  // Centralized global Firestore state (strict 6-hour localStorage TTL, zero duplicate mounts)
+  const {
+    innovations: globalInnovations,
+    teacherMedia: globalTeacherMedia,
+    facilities: globalFacilities,
+    loginLogs: globalLoginLogs,
+    siteSummary: globalSiteSummary,
+    userProfilesMap: globalUserProfilesMap,
+    privilegeSummaries: globalPrivilegeSummaries,
+    schoolLogoUrl: globalSchoolLogoUrl,
+    certificateLogoUrl: globalCertLogoUrl,
+    criteriaPosterUrl: globalPosterUrl,
+    popupBannerConfig: globalBannerConfig,
+    innovationsLoaded,
+    ensureAdminDashboardLoaded,
+    ensureLoginLogsLoaded,
+    syncLoginLogsAndSummary,
+    syncAllAdminData,
+  } = useFirestoreData();
+
+  const {
+    isSyncing: isRefreshingAll,
+    cooldownSeconds: refreshAllCooldown,
+    isDisabled: isRefreshAllDisabled,
+    triggerSync: triggerAllAdminSync,
+    getButtonLabel: getRefreshAllLabel,
+  } = useSyncButtonState('admin_all_data');
+
+  const {
+    isSyncing: isRefreshingLogs,
+    cooldownSeconds: refreshLogsCooldown,
+    isDisabled: isRefreshLogsDisabled,
+    triggerSync: triggerLogsSync,
+    getButtonLabel: getRefreshLogsLabel,
+  } = useSyncButtonState('admin_login_logs');
+
+  const [innovations, setInnovations] = useState<InnovationSubmission[]>(() => globalInnovations);
+  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>(() => globalTeacherMedia);
+  const [facilities, setFacilities] = useState<FacilitySubmission[]>(() => globalFacilities);
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => (globalLoginLogs.length > 0 ? globalLoginLogs : getLocalLoginLogs()));
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => globalSiteSummary || getLocalSiteSummary());
   const [isQuotaFallback, setIsQuotaFallback] = useState<boolean>(false);
-  const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
-  const [isLoading, setIsLoading] = useState(true);
-  const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
-  const [isRefreshingAll, setIsRefreshingAll] = useState(false);
+  const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>(() => globalUserProfilesMap);
+  const [isLoading, setIsLoading] = useState(!innovationsLoaded);
 
   // 0. Special Privileges and 20-Share Rewards Management
-  const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
+  const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>(() => globalPrivilegeSummaries);
   const [privilegeFilter, setPrivilegeFilter] = useState<'all' | 'eligible' | 'received' | 'pending' | 'in_progress'>('all');
   const [privilegeSearchTerm, setPrivilegeSearchTerm] = useState<string>('');
   const [managingPrivilegeTeacher, setManagingPrivilegeTeacher] = useState<TeacherPrivilegeAdminItem | null>(null);
@@ -400,93 +415,76 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, []);
 
-  // 1. Hydrate from localStorage immediately and fetch only when 6-hour TTL cache has expired
+  // 1. Activate centralized admin streams once and mirror global context updates into Admin state
   useEffect(() => {
-    setIsLoading(true);
-    const unsubInnovations = subscribeAllInnovations((list) => {
-      setInnovations(list);
-      setIsLoading(false);
-    });
-
-    const unsubFacilities = subscribeAllSubmissions((list) => {
-      setFacilities(list);
-    });
-
-    const unsubTeacherMedia = subscribeTeacherMedia((works) => {
-      setTeacherMedia(works);
-    });
-
-    const unsubLogo = subscribeSchoolLogo((url: string) => {
-      setCurrentLogoUrl(url);
-    });
-
-    const unsubCertLogo = subscribeCertificateLogo((url: string) => {
-      setCurrentCertLogoUrl(url);
-    });
-
-    const unsubPoster = subscribeCriteriaPoster((url: string) => {
-      setCurrentPosterUrl(url);
-    });
-
-    const unsubProfiles = subscribeAllUserProfiles((profiles) => {
-      setUserProfilesMap(profiles);
-    });
-
-    const unsubBanner = subscribePopupBanner((cfg) => {
-      if (cfg) {
-        setBannerConfig(cfg);
-        if (cfg.title) setBanner1Title(cfg.title);
-        if (cfg.title2) setBanner2Title(cfg.title2);
-      }
-    });
-
-    const unsubPrivileges = subscribeAllTeachersPrivilegeStatus((list) => {
-      setPrivilegeSummaries(list);
-    });
-
-    const unsubLoginLogs = subscribeAllLoginLogs((logs) => {
-      setLoginLogs((prev) => (logs.length > 0 || prev.length === 0 ? logs : prev));
-    });
-
-    const unsubSiteSummary = subscribeSiteSummary((summary) => {
-      if (summary) {
-        setSiteSummary(summary);
-      }
-    });
-
-    const handleSiteSummaryUpdated = (e: Event) => {
-      const detail = (e as CustomEvent<SiteVisitSummary>)?.detail;
-      if (detail) {
-        setSiteSummary(detail);
-      }
-    };
+    ensureAdminDashboardLoaded();
     const handleQuotaExceeded = () => {
       setIsQuotaFallback(true);
     };
-
     if (typeof window !== 'undefined') {
-      window.addEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
       window.addEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
     }
-
     return () => {
-      unsubInnovations();
-      unsubFacilities();
-      unsubTeacherMedia();
-      unsubLogo();
-      unsubCertLogo();
-      unsubPoster();
-      unsubProfiles();
-      unsubBanner();
-      unsubPrivileges();
-      unsubLoginLogs();
-      unsubSiteSummary();
       if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
         window.removeEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
       }
     };
-  }, []);
+  }, [ensureAdminDashboardLoaded]);
+
+  useEffect(() => {
+    setInnovations(globalInnovations);
+    if (innovationsLoaded || globalInnovations.length > 0) setIsLoading(false);
+  }, [globalInnovations, innovationsLoaded]);
+
+  useEffect(() => {
+    setTeacherMedia(globalTeacherMedia);
+  }, [globalTeacherMedia]);
+
+  useEffect(() => {
+    setFacilities(globalFacilities);
+  }, [globalFacilities]);
+
+  useEffect(() => {
+    if (Object.keys(globalUserProfilesMap).length > 0) {
+      setUserProfilesMap(globalUserProfilesMap);
+    }
+  }, [globalUserProfilesMap]);
+
+  useEffect(() => {
+    setPrivilegeSummaries(globalPrivilegeSummaries);
+  }, [globalPrivilegeSummaries]);
+
+  useEffect(() => {
+    if (globalLoginLogs.length > 0) {
+      setLoginLogs(globalLoginLogs);
+    }
+  }, [globalLoginLogs]);
+
+  useEffect(() => {
+    if (globalSiteSummary) {
+      setSiteSummary(globalSiteSummary);
+    }
+  }, [globalSiteSummary]);
+
+  useEffect(() => {
+    if (globalSchoolLogoUrl) setCurrentLogoUrl(globalSchoolLogoUrl);
+  }, [globalSchoolLogoUrl]);
+
+  useEffect(() => {
+    if (globalCertLogoUrl) setCurrentCertLogoUrl(globalCertLogoUrl);
+  }, [globalCertLogoUrl]);
+
+  useEffect(() => {
+    if (globalPosterUrl) setCurrentPosterUrl(globalPosterUrl);
+  }, [globalPosterUrl]);
+
+  useEffect(() => {
+    if (globalBannerConfig) {
+      setBannerConfig(globalBannerConfig);
+      if (globalBannerConfig.title) setBanner1Title(globalBannerConfig.title);
+      if (globalBannerConfig.title2) setBanner2Title(globalBannerConfig.title2);
+    }
+  }, [globalBannerConfig]);
 
   // 2. Mount: Load cached Google Sheets config (24h localStorage TTL)
   useEffect(() => {
@@ -509,86 +507,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // 3. Tab changes render from localStorage/memory cache; 'visitors' respects 6h TTL before getDocs
   useEffect(() => {
     if (!isAdminResolved) return;
-
     if (activeTab === 'visitors') {
-      setIsRefreshingLogs(true);
-      fetchAdminLoginLogsOnce(false, 30, userEmail)
-        .then((logs) => {
-          if (Array.isArray(logs) && logs.length > 0) {
-            setLoginLogs(logs);
-          }
-        })
-        .finally(() => setIsRefreshingLogs(false));
+      ensureLoginLogsLoaded(userEmail).catch(() => {});
     }
-  }, [activeTab, isAdminResolved, userEmail]);
+  }, [activeTab, isAdminResolved, userEmail, ensureLoginLogsLoaded]);
 
   const handleRefreshLoginLogs = async () => {
-    if (!isAdminResolved || isRefreshingLogs) return;
-    setIsRefreshingLogs(true);
-    try {
-      const [siteRes, logsRes] = await Promise.allSettled([
-        fetchSiteSummaryOnce(true),
-        fetchAdminLoginLogsOnce(true, 30, userEmail),
-      ]);
-      if (siteRes.status === 'fulfilled' && siteRes.value) {
-        setSiteSummary(siteRes.value);
-      }
-      if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
-        setLoginLogs(logsRes.value);
-      }
-      showToast('อัปเดตสถิติและประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
-    } finally {
-      setIsRefreshingLogs(false);
+    if (!isAdminResolved || isRefreshLogsDisabled) return;
+    const { executed } = await triggerLogsSync(async () => {
+      await syncLoginLogsAndSummary(userEmail);
+    });
+    if (executed) {
+      showToast('อัปเดตสถิติและประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ — รีเฟรชได้อีกครั้งใน 60 วินาที');
     }
   };
 
   const handleRefreshAllAdminData = async () => {
-    if (!isAdminResolved || isRefreshingAll) return;
-    setIsRefreshingAll(true);
+    if (!isAdminResolved || isRefreshAllDisabled) return;
     setIsQuotaFallback(false);
-    try {
-      const [
-        innovRes,
-        mediaRes,
-        facRes,
-        profilesRes,
-        claimsRes,
-        ideasRes,
-        siteRes,
-        logsRes,
-      ] = await Promise.allSettled([
-        refreshAllInnovations(true),
-        refreshTeacherMedia(true),
-        refreshAllFacilities(true),
-        refreshAllUserProfiles(true),
-        refreshRewardClaims(true),
-        refreshSharedIdeas(true),
-        fetchSiteSummaryOnce(true),
-        fetchAdminLoginLogsOnce(true, 30, userEmail),
-      ]);
-      if (innovRes.status === 'fulfilled' && Array.isArray(innovRes.value) && innovRes.value.length > 0) {
-        setInnovations(innovRes.value);
-      }
-      if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value) && mediaRes.value.length > 0) {
-        setTeacherMedia(mediaRes.value);
-      }
-      if (facRes.status === 'fulfilled' && Array.isArray(facRes.value) && facRes.value.length > 0) {
-        setFacilities(facRes.value);
-      }
-      if (profilesRes.status === 'fulfilled' && profilesRes.value && Object.keys(profilesRes.value).length > 0) {
-        setUserProfilesMap(profilesRes.value);
-      }
-      if (siteRes.status === 'fulfilled' && siteRes.value) {
-        setSiteSummary(siteRes.value);
-      }
-      if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
-        setLoginLogs(logsRes.value);
-      }
-      void claimsRes;
-      void ideasRes;
-      showToast('รีเฟรชข้อมูลล่าสุดจากฐานข้อมูลและอัปเดตแคชเรียบร้อยแล้ว');
-    } finally {
-      setIsRefreshingAll(false);
+    const { executed } = await triggerAllAdminSync(async () => {
+      await syncAllAdminData(userEmail);
+    });
+    if (executed) {
+      showToast('ซิงค์ข้อมูลล่าสุดจากฐานข้อมูลและอัปเดตแคชเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
     }
   };
 
@@ -1885,12 +1826,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <button
               type="button"
               onClick={handleRefreshAllAdminData}
-              disabled={isRefreshingAll || !isAdminResolved}
-              className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="ดึงข้อมูลสถิติล่าสุดจากฐานข้อมูลและอัปเดตแคช"
+              disabled={isRefreshAllDisabled || !isAdminResolved}
+              className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={refreshAllCooldown > 0 ? `รอ ${refreshAllCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'ดึงข้อมูลสถิติล่าสุดจากฐานข้อมูลและอัปเดตแคช'}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              <span>{isRefreshingAll ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ'}</span>
+              <span>{getRefreshAllLabel('รีเฟรชข้อมูลสถิติ')}</span>
             </button>
 
             <button
@@ -2068,13 +2009,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     type="button"
                     id="btn-refresh-admin-stats-overall"
                     onClick={handleRefreshAllAdminData}
-                    disabled={isRefreshingAll || !isAdminResolved}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50"
+                    disabled={isRefreshAllDisabled || !isAdminResolved}
+                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    title={refreshAllCooldown > 0 ? `รอ ${refreshAllCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลสถิติจากฐานข้อมูล'}
                   >
                     <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-                    <span>
-                      {isRefreshingAll ? 'กำลังอัปเดตสถิติ...' : 'รีเฟรชข้อมูลสถิติ'}
-                    </span>
+                    <span>{getRefreshAllLabel('รีเฟรชข้อมูลสถิติ')}</span>
                   </button>
                 </div>
               </div>
@@ -2448,12 +2388,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 <button
                   type="button"
                   onClick={handleRefreshLoginLogs}
-                  disabled={isRefreshingLogs || !isAdminResolved}
-                  className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
+                  disabled={isRefreshLogsDisabled || !isAdminResolved}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  title={refreshLogsCooldown > 0 ? `รอ ${refreshLogsCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'ดึงยอดรวมและประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล'}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
-                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (30 ล่าสุด)'}</span>
+                  <span>{getRefreshLogsLabel('รีเฟรชข้อมูลสถิติ (30 ล่าสุด)')}</span>
                 </button>
 
                 <button
