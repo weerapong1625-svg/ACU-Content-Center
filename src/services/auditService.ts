@@ -33,7 +33,7 @@ const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
 export const LOGIN_LOGS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for login_logs getDocs
 export const SITE_SUMMARY_CACHE_KEY = 'acu_site_summary_cache';
-export const VISITOR_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for lightweight site_summary counter
+export const VISITOR_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for lightweight site_summary counter
 
 export interface SiteVisitSummary {
   totalVisits: number;
@@ -1326,32 +1326,59 @@ export async function saveUserProfile(profile: UserProfileData): Promise<boolean
 /**
  * Fetch user profile from Firestore
  */
-export async function fetchUserProfile(email: string): Promise<UserProfileData | null> {
+export async function fetchUserProfile(email: string, forceRefresh = false): Promise<UserProfileData | null> {
   const normEmail = (email || '').toLowerCase().trim();
   if (!normEmail) return null;
+  const safeDocId = encodeURIComponent(normEmail);
   const localProfileKey = `acu_user_full_profile_${normEmail}`;
+  const docCacheKey = `acu_profile_doc_cache_${safeDocId}`;
   let cachedFallback: UserProfileData | null = null;
+  let isFreshCache = false;
   try {
-    const raw = localStorage.getItem(localProfileKey);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.email) {
+    const rawDoc = localStorage.getItem(docCacheKey);
+    if (rawDoc) {
+      const parsedDoc = JSON.parse(rawDoc);
+      if (parsedDoc?.data) {
         cachedFallback = {
-          email: parsed.email,
-          displayName: parsed.displayName || parsed.fullName || normEmail.split('@')[0],
-          avatarUrl: parsed.avatarUrl || parsed.photoURL || '',
-          updatedAt: parsed.updatedAt,
+          email: parsedDoc.data.email || normEmail,
+          displayName: parsedDoc.data.displayName || parsedDoc.data.fullName || normEmail.split('@')[0],
+          avatarUrl: parsedDoc.data.avatarUrl || parsedDoc.data.photoURL || '',
+          updatedAt: parsedDoc.data.updatedAt,
         };
+      }
+      if (!forceRefresh && typeof parsedDoc?.cachedAt === 'number' && Date.now() - parsedDoc.cachedAt < LOGIN_LOGS_CACHE_TTL_MS) {
+        isFreshCache = true;
+      }
+    }
+    if (!cachedFallback) {
+      const raw = localStorage.getItem(localProfileKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && parsed.email) {
+          cachedFallback = {
+            email: parsed.email,
+            displayName: parsed.displayName || parsed.fullName || normEmail.split('@')[0],
+            avatarUrl: parsed.avatarUrl || parsed.photoURL || '',
+            updatedAt: parsed.updatedAt,
+          };
+        }
       }
     }
   } catch {}
 
+  if (isFreshCache && cachedFallback) {
+    return cachedFallback;
+  }
+
   try {
-    const safeDocId = encodeURIComponent(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
     const snapshot = await getDoc(profileRef);
     if (snapshot.exists()) {
-      return snapshot.data() as UserProfileData;
+      const data = snapshot.data() as UserProfileData;
+      try {
+        localStorage.setItem(docCacheKey, JSON.stringify({ data, cachedAt: Date.now() }));
+      } catch {}
+      return data;
     }
     return cachedFallback;
   } catch (err) {

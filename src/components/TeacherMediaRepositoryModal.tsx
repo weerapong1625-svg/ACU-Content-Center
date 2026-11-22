@@ -36,7 +36,6 @@ import {
   TeacherMediaWork, 
   subscribeTeacherMedia, 
   refreshTeacherMedia,
-  getManualRefreshCooldownSeconds,
   rateTeacherMedia, 
   toggleLikeTeacherMedia,
   updateTeacherMedia,
@@ -188,9 +187,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [submittingRatingIds, setSubmittingRatingIds] = useState<{ [id: string]: boolean }>({});
   const [likingIds, setLikingIds] = useState<{ [id: string]: boolean }>({});
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
-    getManualRefreshCooldownSeconds('teacherMedia')
-  );
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -256,25 +252,11 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     return () => unsub();
   }, []);
 
-  useEffect(() => {
-    if (refreshCooldownSec <= 0) return;
-    const timer = setInterval(() => {
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('teacherMedia'));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [refreshCooldownSec]);
-
   const handleRefreshMedia = async () => {
-    const remaining = getManualRefreshCooldownSeconds('teacherMedia');
-    if (remaining > 0) {
-      setRefreshCooldownSec(remaining);
-      showSuccessFeedback(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
-      return;
-    }
+    if (isRefreshing) return;
     setIsRefreshing(true);
     try {
       await refreshTeacherMedia(true);
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('teacherMedia') || 60);
       showSuccessFeedback('อัปเดตคลังสื่อล่าสุดเรียบร้อยแล้ว');
     } finally {
       setIsRefreshing(false);
@@ -619,14 +601,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleRefreshMedia}
-              disabled={isRefreshing || refreshCooldownSec > 0}
+              disabled={isRefreshing}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title={refreshCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshCooldownSec} วินาที` : 'รีเฟรชข้อมูลคลังสื่อล่าสุด'}
+              title="รีเฟรชข้อมูลคลังสื่อล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">
-                {refreshCooldownSec > 0 ? `รีเฟรช (${refreshCooldownSec}s)` : 'รีเฟรช'}
-              </span>
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
 
             <button

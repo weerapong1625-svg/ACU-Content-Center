@@ -70,8 +70,7 @@ import {
   getUnifiedTeacherMediaRecords,
   syncUserSubmissionCountIfOutOfSync,
   refreshAllInnovations,
-  refreshTeacherMedia,
-  getManualRefreshCooldownSeconds
+  refreshTeacherMedia
 } from '../services/submissionService';
 import { 
   subscribeAllLoginLogs, 
@@ -208,28 +207,18 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     };
   }, [isOpen]);
 
-  // Subscribe to cached teacher media repository in memory (0 Firestore reads on open/tab switch)
+  // Subscribe to cached teacher media repository (6h localStorage TTL)
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = subscribeTeacherMedia(
-      (works) => {
-        setTeacherMediaList((prev) => (works.length > 0 || prev.length === 0 ? works : prev));
-      },
-      { skipFetch: true }
-    );
+    const unsub = subscribeTeacherMedia((works) => {
+      setTeacherMediaList((prev) => (works.length > 0 || prev.length === 0 ? works : prev));
+    });
     return () => unsub();
   }, [isOpen]);
 
   const handleManualRefreshProfileStats = async () => {
-    const remaining = Math.max(
-      getManualRefreshCooldownSeconds('teacherMedia'),
-      getManualRefreshCooldownSeconds('allInnovations')
-    );
-    if (remaining > 0) {
-      setRefreshCooldownNotice(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
-      setTimeout(() => setRefreshCooldownNotice(null), 3000);
-      return;
-    }
+    if (isManualRefreshing) return;
+    setRefreshCooldownNotice(null);
     setIsManualRefreshing(true);
     try {
       const [innovsRes, mediaRes, summaryRes] = await Promise.allSettled([
@@ -415,15 +404,12 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     };
   }, [isOpen, userEmail, userName, isMasterWeerapong]);
 
-  // Subscribe to all innovations via shared in-memory stream (0 extra Firestore reads)
+  // Subscribe to all innovations via 6h cached stream
   useEffect(() => {
     if (!isOpen || !userEmail) return;
-    const unsubscribe = subscribeAllInnovations(
-      (allInnos) => {
-        setAllInnovationsList((prev) => (allInnos.length > 0 || prev.length === 0 ? allInnos : prev));
-      },
-      { skipFetch: true }
-    );
+    const unsubscribe = subscribeAllInnovations((allInnos) => {
+      setAllInnovationsList((prev) => (allInnos.length > 0 || prev.length === 0 ? allInnos : prev));
+    });
     return () => unsubscribe();
   }, [isOpen, userEmail]);
 

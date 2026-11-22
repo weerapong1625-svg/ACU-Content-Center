@@ -47,7 +47,6 @@ if (typeof window !== 'undefined') {
         'acu_login_logs_fetched_at',
         'acu_site_summary_cache',
         'acu_admin_overall_stats_cache',
-        'acu_admin_overview_cache',
         'acu_cached_all_user_profiles_fetched_at',
         'acu_cached_reward_claims_fetched_at',
         'acu_school_logo_config',

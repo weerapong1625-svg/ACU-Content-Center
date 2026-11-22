@@ -29,8 +29,7 @@ import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
   fetchRecentLoginLogs, 
-  LoginLogEntry, 
-  fetchUserProfile 
+  LoginLogEntry
 } from '../services/auditService';
 import { UserProfileModal } from './UserProfileModal';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
