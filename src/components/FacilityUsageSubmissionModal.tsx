@@ -32,8 +32,9 @@ import {
   updateFacilitySubmission,
   deleteFacilitySubmission,
   subscribeUserSubmissions, 
-  subscribeAllSubmissions, 
+  subscribeAllSubmissions,
   refreshAllFacilities,
+  getManualRefreshCooldownSeconds,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify
@@ -81,6 +82,9 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
+    getManualRefreshCooldownSeconds('facilities')
+  );
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -108,10 +112,26 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (refreshCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('facilities'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshCooldownSec]);
+
   const handleRefresh = async () => {
+    const remaining = getManualRefreshCooldownSeconds('facilities');
+    if (remaining > 0) {
+      setRefreshCooldownSec(remaining);
+      setActionNotice(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
+      setTimeout(() => setActionNotice(null), 2500);
+      return;
+    }
     setIsRefreshing(true);
     try {
       await refreshAllFacilities(true);
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('facilities') || 60);
       setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
       setTimeout(() => setActionNotice(null), 2500);
     } finally {
@@ -359,12 +379,14 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing}
+              disabled={isRefreshing || refreshCooldownSec > 0}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
+              title={refreshCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshCooldownSec} วินาที` : 'รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className="hidden sm:inline">
+                {refreshCooldownSec > 0 ? `รีเฟรช (${refreshCooldownSec}s)` : 'รีเฟรช'}
+              </span>
             </button>
             <button
               type="button"

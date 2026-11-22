@@ -19,12 +19,24 @@ import {
   Calendar,
   Plus,
   Heart,
-  RefreshCw
+  RefreshCw,
+  Youtube,
+  FileText,
+  Palette,
+  HardDrive,
+  Globe
 } from 'lucide-react';
+import {
+  detectMediaLinkCategory,
+  isDataOrBlobUri,
+  resolveDisplayThumbnailUrl,
+  sanitizeMediaThumbnailForFirestore,
+} from '../utils/mediaThumbnailUtils';
 import { 
   TeacherMediaWork, 
   subscribeTeacherMedia, 
   refreshTeacherMedia,
+  getManualRefreshCooldownSeconds,
   rateTeacherMedia, 
   toggleLikeTeacherMedia,
   updateTeacherMedia,
@@ -85,6 +97,76 @@ function shuffleWithSeed<T>(array: T[], seed: number): T[] {
   return copy;
 }
 
+const MediaThumbnailOrIcon: React.FC<{
+  thumbnailUrl?: string;
+  onlineUrl?: string;
+  mediaType?: string;
+  title: string;
+  size?: 'sm' | 'lg';
+}> = ({ thumbnailUrl, onlineUrl, mediaType, title, size = 'sm' }) => {
+  const [imgFailed, setImgFailed] = useState(false);
+  const resolvedUrl = resolveDisplayThumbnailUrl(thumbnailUrl, onlineUrl);
+  const cat = detectMediaLinkCategory(onlineUrl, mediaType);
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [resolvedUrl]);
+
+  if (resolvedUrl && !imgFailed) {
+    return (
+      <img
+        src={resolvedUrl}
+        alt={title}
+        loading="lazy"
+        decoding="async"
+        onError={() => setImgFailed(true)}
+        className={
+          size === 'lg'
+            ? 'w-full max-h-72 object-contain rounded-2xl bg-slate-950 border border-slate-800 mb-4'
+            : 'w-full h-full object-cover group-hover/thumb:scale-110 transition-transform duration-300'
+        }
+      />
+    );
+  }
+
+  const iconSize = size === 'lg' ? 'w-12 h-12' : 'w-6 h-6';
+  const renderIcon = () => {
+    switch (cat.key) {
+      case 'youtube':
+        return <Youtube className={`${iconSize} text-rose-400`} />;
+      case 'gdrive':
+        return <HardDrive className={`${iconSize} text-emerald-400`} />;
+      case 'canva':
+        return <Palette className={`${iconSize} text-cyan-400`} />;
+      case 'pdf':
+      case 'print':
+        return <FileText className={`${iconSize} text-amber-400`} />;
+      case 'tech':
+        return <Globe className={`${iconSize} text-blue-400`} />;
+      default:
+        return <Layers className={`${iconSize} text-purple-400`} />;
+    }
+  };
+
+  if (size === 'lg') {
+    return (
+      <div className="w-full h-44 rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-purple-950/40 border border-slate-800 mb-4 flex flex-col items-center justify-center gap-2">
+        {renderIcon()}
+        <span className="text-xs font-semibold text-slate-300">{cat.label}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="w-full h-full bg-gradient-to-br from-slate-900 to-purple-950/50 flex flex-col items-center justify-center gap-0.5 p-1 text-center">
+      {renderIcon()}
+      <span className="text-[8px] font-semibold text-slate-300 leading-tight line-clamp-1">
+        {cat.key === 'youtube' ? 'YouTube' : cat.key === 'gdrive' ? 'Drive' : cat.key === 'canva' ? 'Canva' : cat.key === 'pdf' ? 'PDF' : ''}
+      </span>
+    </div>
+  );
+};
+
 export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalProps> = ({
   userEmail,
   onClose,
@@ -103,6 +185,9 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<TeacherMediaWork | null>(null);
   const [isDeletingTarget, setIsDeletingTarget] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
+    getManualRefreshCooldownSeconds('teacherMedia')
+  );
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -168,10 +253,25 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (refreshCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('teacherMedia'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshCooldownSec]);
+
   const handleRefreshMedia = async () => {
+    const remaining = getManualRefreshCooldownSeconds('teacherMedia');
+    if (remaining > 0) {
+      setRefreshCooldownSec(remaining);
+      showSuccessFeedback(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
+      return;
+    }
     setIsRefreshing(true);
     try {
       await refreshTeacherMedia(true);
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('teacherMedia') || 60);
       showSuccessFeedback('อัปเดตคลังสื่อล่าสุดเรียบร้อยแล้ว');
     } finally {
       setIsRefreshing(false);
@@ -204,17 +304,22 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       title: item.title,
       description: item.description,
       onlineUrl: item.onlineUrl || '',
-      thumbnailUrl: item.thumbnailUrl,
+      thumbnailUrl: sanitizeMediaThumbnailForFirestore(item.thumbnailUrl, item.onlineUrl),
     });
   };
 
   const handleSaveEdit = async () => {
     if (!editingItem) return;
+    if (isDataOrBlobUri(editForm.thumbnailUrl)) {
+      showErrorFeedback('ไม่รองรับลิงก์ภาพ Base64 (data:) เพื่อประหยัดพื้นที่ กรุณาใช้ลิงก์ https:// หรือเว้นว่างให้ระบบดึงปกอัตโนมัติ');
+      return;
+    }
+    const cleanThumb = sanitizeMediaThumbnailForFirestore(editForm.thumbnailUrl, editForm.onlineUrl.trim());
     const updates = {
       title: editForm.title.trim(),
       description: editForm.description.trim(),
       onlineUrl: editForm.onlineUrl.trim(),
-      thumbnailUrl: editForm.thumbnailUrl.trim() || editingItem.thumbnailUrl,
+      thumbnailUrl: cleanThumb,
     };
 
     const res = await updateTeacherMedia(editingItem.id, updates, userEmail);
@@ -257,6 +362,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       showErrorFeedback('กรุณากรอกชื่อครูผู้จัดทำ');
       return;
     }
+    if (isDataOrBlobUri(addForm.thumbnailUrl)) {
+      showErrorFeedback('ไม่รองรับภาพ Base64 เพื่อประหยัดพื้นที่ฐานข้อมูล กรุณาใช้ลิงก์ https:// หรือปล่อยว่าง');
+      return;
+    }
+
+    const cleanThumb = sanitizeMediaThumbnailForFirestore(addForm.thumbnailUrl, addForm.onlineUrl.trim());
 
     setIsSubmittingNew(true);
     const res = await addTeacherMediaDirectly({
@@ -266,7 +377,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       subjectName: addForm.subjectName.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
       mediaType: addForm.mediaType,
       description: addForm.description.trim() || `สื่อการสอนวิชา ${addForm.subjectGroup}`,
-      thumbnailUrl: addForm.thumbnailUrl.trim() || '/acu_active_logo.png',
+      thumbnailUrl: cleanThumb,
       onlineUrl: addForm.onlineUrl.trim(),
       submittedByEmail: userEmail,
     });
@@ -470,12 +581,14 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleRefreshMedia}
-              disabled={isRefreshing}
+              disabled={isRefreshing || refreshCooldownSec > 0}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลคลังสื่อล่าสุด"
+              title={refreshCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshCooldownSec} วินาที` : 'รีเฟรชข้อมูลคลังสื่อล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className="hidden sm:inline">
+                {refreshCooldownSec > 0 ? `รีเฟรช (${refreshCooldownSec}s)` : 'รีเฟรช'}
+              </span>
             </button>
 
             <button
@@ -590,23 +703,20 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                   <div>
                     {/* Header: Thumbnail + Meta */}
                     <div className="flex items-start gap-3 mb-3">
-                      {/* Small thumbnail preview */}
+                      {/* Small thumbnail preview or crisp category icon */}
                       <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb">
-                        <img
-                          src={item.thumbnailUrl}
-                          alt={item.title}
-                          loading="lazy"
-                          decoding="async"
-                          className="w-full h-full object-cover group-hover/thumb:scale-110 transition-transform duration-300"
-                          onError={(e) => {
-                            (e.target as HTMLImageElement).src = '/ACU N.png';
-                          }}
+                        <MediaThumbnailOrIcon
+                          thumbnailUrl={item.thumbnailUrl}
+                          onlineUrl={item.onlineUrl}
+                          mediaType={item.mediaType}
+                          title={item.title}
+                          size="sm"
                         />
                         <button
                           type="button"
                           onClick={() => handleViewMedia(item, true)}
                           className="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 flex items-center justify-center text-white transition-opacity cursor-pointer"
-                          title="ดูภาพขยาย"
+                          title="ดูรายละเอียด"
                         >
                           <Eye className="w-4 h-4" />
                         </button>
@@ -848,12 +958,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               </div>
 
               <div>
-                <label className="block text-slate-300 mb-1 font-semibold">URL รูปภาพตัวอย่างสื่อ</label>
+                <label className="block text-slate-300 mb-1 font-semibold">URL รูปภาพตัวอย่างสื่อภายนอก (ไม่บังคับ — ระบบดึงปก YouTube หรือแสดงไอคอนอัตโนมัติ)</label>
                 <input
-                  type="text"
+                  type="url"
                   value={editForm.thumbnailUrl}
                   onChange={(e) => setEditForm(prev => ({ ...prev, thumbnailUrl: e.target.value }))}
-                  placeholder="https://..."
+                  placeholder="https://... (เว้นว่างไว้หากใช้ปก YouTube หรือไอคอนหมวดหมู่)"
                   className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
                 />
               </div>
@@ -909,13 +1019,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             </div>
 
             <div className="py-4">
-              <img
-                src={activeViewItem.thumbnailUrl}
-                alt={activeViewItem.title}
-                onError={(e) => {
-                  (e.target as HTMLImageElement).src = '/ACU N.png';
-                }}
-                className="w-full max-h-72 object-contain rounded-2xl bg-slate-950 border border-slate-800 mb-4"
+              <MediaThumbnailOrIcon
+                thumbnailUrl={activeViewItem.thumbnailUrl}
+                onlineUrl={activeViewItem.onlineUrl}
+                mediaType={activeViewItem.mediaType}
+                title={activeViewItem.title}
+                size="lg"
               />
 
               <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700 text-xs space-y-2">

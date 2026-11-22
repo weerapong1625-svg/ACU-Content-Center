@@ -28,13 +28,20 @@ import {
   RotateCcw,
   Printer,
   Trash2,
-  Gift
+  Gift,
+  Youtube,
+  HardDrive,
+  Palette,
+  Globe
 } from 'lucide-react';
+import {
+  detectMediaLinkCategory,
+  resolveDisplayThumbnailUrl,
+} from '../utils/mediaThumbnailUtils';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { 
   FullUserProfile, 
   InnovationItem, 
-  fetchFullUserProfile, 
   subscribeFullUserProfile,
   saveFullUserProfile, 
   saveUserPhotoToFirestore,
@@ -61,12 +68,16 @@ import {
   isValidActiveMediaRecord,
   doesMediaRecordBelongToTeacher,
   getUnifiedTeacherMediaRecords,
-  syncUserSubmissionCountIfOutOfSync
+  syncUserSubmissionCountIfOutOfSync,
+  refreshAllInnovations,
+  refreshTeacherMedia,
+  getManualRefreshCooldownSeconds
 } from '../services/submissionService';
 import { 
   subscribeAllLoginLogs, 
   subscribeSiteSummary,
   fetchSiteSummaryOnce,
+  getLocalSiteSummary,
   SiteVisitSummary,
   LoginLogEntry, 
   resetAllLoginLogs,
@@ -158,59 +169,86 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isSubmittingPraise, setIsSubmittingPraise] = useState<boolean>(false);
   const [praiseSuccessNotice, setPraiseSuccessNotice] = useState<string | null>(null);
 
-  // Real-time verified login logs & Year selector (aligned to Asia/Bangkok)
+  // Verified login logs & Year selector (strictly read from local/memory cache on open — 0 Firestore reads)
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
-  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(null);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
   const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
   const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
   const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>([]);
   const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
+  const [isManualRefreshing, setIsManualRefreshing] = useState<boolean>(false);
+  const [refreshCooldownNotice, setRefreshCooldownNotice] = useState<string | null>(null);
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to cached login logs + lightweight site_summary (2-min TTL, single getDoc read)
+  // Subscribe to cached login logs + cached site_summary (0 Firestore reads on modal open or tab switch)
   useEffect(() => {
     if (!isOpen) return;
     const unsub = subscribeAllLoginLogs((logs) => {
-      setLoginLogs(logs);
+      setLoginLogs((prev) => (logs.length > 0 || prev.length === 0 ? logs : prev));
     });
     const unsubSummary = subscribeSiteSummary((summary) => {
-      setSiteSummary(summary);
+      if (summary) {
+        setSiteSummary((prev) => {
+          if (!prev) return summary;
+          if ((summary.totalVisits || 0) === 0 && !summary.resetAt && (prev.totalVisits || 0) > 0) {
+            return prev;
+          }
+          return summary;
+        });
+      }
     });
-    fetchSiteSummaryOnce(false).catch(() => {});
-
-    const handleAuthReady = () => {
-      fetchSiteSummaryOnce(false).catch(() => {});
-    };
-    if (typeof window !== 'undefined') {
-      window.addEventListener('acu_auth_ready', handleAuthReady);
-    }
 
     return () => {
       unsub();
       unsubSummary();
-      if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_auth_ready', handleAuthReady);
-      }
     };
   }, [isOpen]);
 
-  // Background refresh visitor summary whenever switching to stats tab (2-min TTL = 0 reads if fresh)
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'stats') return;
-    fetchSiteSummaryOnce(false).catch(() => {});
-  }, [isOpen, activeTab]);
-
-  // Subscribe to real-time teacher media repository for kudos/likes counting
+  // Subscribe to cached teacher media repository in memory (0 Firestore reads on open/tab switch)
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = subscribeTeacherMedia((works) => {
-      setTeacherMediaList(works);
-    });
+    const unsub = subscribeTeacherMedia(
+      (works) => {
+        setTeacherMediaList((prev) => (works.length > 0 || prev.length === 0 ? works : prev));
+      },
+      { skipFetch: true }
+    );
     return () => unsub();
   }, [isOpen]);
+
+  const handleManualRefreshProfileStats = async () => {
+    const remaining = Math.max(
+      getManualRefreshCooldownSeconds('teacherMedia'),
+      getManualRefreshCooldownSeconds('allInnovations')
+    );
+    if (remaining > 0) {
+      setRefreshCooldownNotice(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
+      setTimeout(() => setRefreshCooldownNotice(null), 3000);
+      return;
+    }
+    setIsManualRefreshing(true);
+    try {
+      const [innovsRes, mediaRes, summaryRes] = await Promise.allSettled([
+        refreshAllInnovations(true),
+        refreshTeacherMedia(true),
+        fetchSiteSummaryOnce(true),
+      ]);
+      if (innovsRes.status === 'fulfilled' && Array.isArray(innovsRes.value) && innovsRes.value.length > 0) {
+        setAllInnovationsList(innovsRes.value);
+      }
+      if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value) && mediaRes.value.length > 0) {
+        setTeacherMediaList(mediaRes.value);
+      }
+      if (summaryRes.status === 'fulfilled' && summaryRes.value) {
+        setSiteSummary(summaryRes.value);
+      }
+    } finally {
+      setIsManualRefreshing(false);
+    }
+  };
 
   // Handle Admin's OWN visitor logs reset to 0 (never touches other users)
   const handleResetAdminOnlyStats = async () => {
@@ -363,17 +401,6 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
 
     let isMounted = true;
-    fetchFullUserProfile(userEmail, userName, avatarUrl)
-      .then((fullData) => {
-        if (!isMounted || !fullData) return;
-        const shouldInitForm = initializedFormKeyRef.current !== formKey;
-        applyProfileSnapshot(fullData, shouldInitForm);
-        initializedFormKeyRef.current = formKey;
-      })
-      .catch((err) => {
-        console.error('Error loading full profile:', err);
-      });
-
     const unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
       if (!isMounted || !liveProf) return;
       const shouldInitForm = initializedFormKeyRef.current !== formKey;
@@ -387,12 +414,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     };
   }, [isOpen, userEmail, userName, isMasterWeerapong]);
 
-  // Subscribe to all innovations via shared multiplexed stream (zero extra Firestore reads & no re-subscribe on name edits)
+  // Subscribe to all innovations via shared in-memory stream (0 extra Firestore reads)
   useEffect(() => {
     if (!isOpen || !userEmail) return;
-    const unsubscribe = subscribeAllInnovations((allInnos) => {
-      setAllInnovationsList(allInnos);
-    });
+    const unsubscribe = subscribeAllInnovations(
+      (allInnos) => {
+        setAllInnovationsList((prev) => (allInnos.length > 0 || prev.length === 0 ? allInnos : prev));
+      },
+      { skipFetch: true }
+    );
     return () => unsubscribe();
   }, [isOpen, userEmail]);
 
@@ -448,10 +478,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   );
   const progressPercent = Math.min(100, Math.round((completedInnovationsCount / 5) * 100));
 
-  // Self-healing sync: keep user_profiles stats.submissionCount in sync with dynamic count when out of sync
+  // Self-healing sync: keep user_profiles stats.submissionCount in sync only when media caches are populated
   useEffect(() => {
     if (!isOpen || !userEmail) return;
-    if (completedInnovationsCount !== profile?.stats?.submissionCount) {
+    if (
+      (allInnovationsList.length > 0 || teacherMediaList.length > 0) &&
+      completedInnovationsCount !== profile?.stats?.submissionCount
+    ) {
       syncUserSubmissionCountIfOutOfSync(
         userEmail,
         completedInnovationsCount,
@@ -459,7 +492,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         profile?.uid
       );
     }
-  }, [isOpen, userEmail, completedInnovationsCount, profile?.stats?.submissionCount, profile?.uid]);
+  }, [
+    isOpen,
+    userEmail,
+    allInnovationsList.length,
+    teacherMediaList.length,
+    completedInnovationsCount,
+    profile?.stats?.submissionCount,
+    profile?.uid,
+  ]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear, 10) || getBangkokDateParts()?.year || new Date().getFullYear();
@@ -889,6 +930,19 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Manual Refresh Button (60s cooldown) */}
+            <button
+              type="button"
+              id="btn-profile-manual-refresh"
+              onClick={handleManualRefreshProfileStats}
+              disabled={isManualRefreshing}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-sky-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลสถิติและสื่อจากฐานข้อมูล (คูลดาวน์ 60 วินาที)"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isManualRefreshing ? 'animate-spin' : ''}`} />
+              <span className="hidden sm:inline">รีเฟรช</span>
+            </button>
+
             {/* Special Privileges Check Status Button */}
             <button
               type="button"
@@ -915,6 +969,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             </button>
           </div>
         </div>
+
+        {refreshCooldownNotice && (
+          <div className="mt-2 px-3 py-1.5 rounded-xl bg-amber-950/70 border border-amber-500/40 text-amber-200 text-[11px] flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+            <span>{refreshCooldownNotice}</span>
+          </div>
+        )}
 
         {/* 4 Interactive Functional Tabs */}
         <div className="flex items-center gap-1 sm:gap-2 pt-4 pb-3 border-b border-slate-800/80 overflow-x-auto no-scrollbar text-xs">
@@ -1205,26 +1266,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       className="p-3.5 sm:p-4 rounded-2xl bg-slate-800/60 border border-slate-700/70 hover:border-slate-600 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs"
                     >
                       <div className="flex items-start gap-3 flex-1 min-w-0">
-                        {/* Cover Image Thumbnail or Number badge */}
-                        {item.coverImageUrl ? (
-                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb shadow-sm">
-                            <img
-                              src={item.coverImageUrl}
-                              alt={item.title}
-                              className="w-full h-full object-cover"
-                              onError={(e) => {
-                                (e.target as HTMLImageElement).src = '/ACU N.png';
-                              }}
-                            />
-                            <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 rounded text-[9px] text-white font-bold">
-                              #{idx + 1}
+                        {/* Cover Image Thumbnail (YouTube / External URL) or Number/Category Badge */}
+                        {(() => {
+                          const resolvedSlotThumb = resolveDisplayThumbnailUrl(item.coverImageUrl, item.linkUrl);
+                          if (resolvedSlotThumb) {
+                            return (
+                              <div className="w-14 h-14 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb shadow-sm">
+                                <img
+                                  src={resolvedSlotThumb}
+                                  alt={item.title}
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => {
+                                    (e.target as HTMLImageElement).src = '/ACU N.png';
+                                  }}
+                                />
+                                <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 rounded text-[9px] text-white font-bold">
+                                  #{idx + 1}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
+                              {idx + 1}
                             </div>
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
-                            {idx + 1}
-                          </div>
-                        )}
+                          );
+                        })()}
 
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -1792,17 +1859,37 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                           className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 text-xs gap-3"
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
-                            {work.thumbnailUrl ? (
-                              <img
-                                src={work.thumbnailUrl}
-                                alt={work.title}
-                                className="w-9 h-9 rounded-lg object-cover flex-shrink-0 border border-slate-700"
-                              />
-                            ) : (
-                              <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center flex-shrink-0 text-slate-400">
-                                <FileText className="w-4 h-4" />
-                              </div>
-                            )}
+                            {(() => {
+                              const resolvedWorkThumb = resolveDisplayThumbnailUrl(work.thumbnailUrl, work.onlineUrl);
+                              if (resolvedWorkThumb) {
+                                return (
+                                  <img
+                                    src={resolvedWorkThumb}
+                                    alt={work.title}
+                                    className="w-9 h-9 rounded-lg object-cover flex-shrink-0 border border-slate-700"
+                                    onError={(e) => {
+                                      (e.target as HTMLImageElement).src = '/ACU N.png';
+                                    }}
+                                  />
+                                );
+                              }
+                              const workCat = detectMediaLinkCategory(work.onlineUrl, work.mediaType);
+                              return (
+                                <div className="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700/80 flex items-center justify-center flex-shrink-0">
+                                  {workCat.key === 'youtube' ? (
+                                    <Youtube className="w-4 h-4 text-rose-400" />
+                                  ) : workCat.key === 'gdrive' ? (
+                                    <HardDrive className="w-4 h-4 text-emerald-400" />
+                                  ) : workCat.key === 'canva' ? (
+                                    <Palette className="w-4 h-4 text-cyan-400" />
+                                  ) : workCat.key === 'tech' ? (
+                                    <Globe className="w-4 h-4 text-blue-400" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-slate-400" />
+                                  )}
+                                </div>
+                              );
+                            })()}
                             <div className="min-w-0">
                               <p className="font-semibold text-white truncate">{work.title}</p>
                               <p className="text-[10px] text-slate-400 truncate">{work.subjectGroup || work.subjectName || work.mediaType || 'สื่อนวัตกรรม'}</p>

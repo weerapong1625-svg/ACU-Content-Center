@@ -13,6 +13,18 @@ import {
   increment 
 } from 'firebase/firestore';
 import { db, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
+import { incrementAdminOverviewCounters } from './adminOverviewService';
+import {
+  readBundleIndexOnce,
+  removeBundleEntries,
+  toIdeaBundleEntry,
+  toInnovationBundleEntry,
+  toMediaBundleEntry,
+  upsertBundleEntry,
+  writeBundleIndex,
+  BundleIndexEntry,
+} from './bundleService';
+import { sanitizeMediaThumbnailForFirestore } from '../utils/mediaThumbnailUtils';
 import {
   adjustUserSubmissionCount,
   DEFAULT_INNOVATION_ITEMS,
@@ -23,6 +35,26 @@ import {
   resolveUserUid,
   setCachedUserProfile,
 } from './userProfileService';
+
+function getSubmissionBangkokYearMonth(input?: string): { yearKey: string; monthKey: string } {
+  try {
+    const d = input ? new Date(input) : new Date();
+    if (!isNaN(d.getTime())) {
+      const fmt = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Bangkok',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(d);
+      const [y, m] = fmt.split('-');
+      if (y && m) {
+        return { yearKey: y, monthKey: String(parseInt(m, 10) - 1) };
+      }
+    }
+  } catch {}
+  const now = new Date();
+  return { yearKey: String(now.getFullYear()), monthKey: String(now.getMonth()) };
+}
 
 export const ADMIN_TARGET_EMAIL = 'weerapong1625@acu.ac.th';
 
@@ -232,6 +264,215 @@ export const INNOVATIONS_STORAGE_KEY = 'acu_cached_innovations_submissions';
 export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
 export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
+
+const INNOVATIONS_FETCHED_AT_KEY = 'acu_cached_innovations_fetched_at';
+const TEACHER_MEDIA_FETCHED_AT_KEY = 'acu_cached_teacher_media_fetched_at';
+const FACILITY_FETCHED_AT_KEY = 'acu_cached_facilities_fetched_at';
+const SHARED_IDEAS_FETCHED_AT_KEY = 'acu_cached_shared_ideas_fetched_at';
+
+export const COLLECTION_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours strict bundle cache-first TTL
+export const MANUAL_REFRESH_COOLDOWN_MS = 60 * 1000; // 60 seconds manual refresh cooldown
+
+export type CachedCollectionKey = 'teacherMedia' | 'allInnovations' | 'facilities' | 'sharedIdeas';
+
+const lastManualRefreshMap: Record<CachedCollectionKey, number> = {
+  teacherMedia: 0,
+  allInnovations: 0,
+  facilities: 0,
+  sharedIdeas: 0,
+};
+
+export function getManualRefreshCooldownSeconds(key: CachedCollectionKey): number {
+  const lastAt = lastManualRefreshMap[key] || 0;
+  if (!lastAt) return 0;
+  const remainingMs = MANUAL_REFRESH_COOLDOWN_MS - (Date.now() - lastAt);
+  return remainingMs > 0 ? Math.ceil(remainingMs / 1000) : 0;
+}
+
+function readCacheFetchedAt(tsKey: string): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = localStorage.getItem(tsKey);
+    const parsed = raw ? Number(raw) : 0;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function isCacheTimestampFresh(inMemoryFetchedAt: number, tsKey: string): boolean {
+  const effectiveTs = Math.max(inMemoryFetchedAt || 0, readCacheFetchedAt(tsKey));
+  if (effectiveTs <= 0) return false;
+  return Date.now() - effectiveTs < COLLECTION_CACHE_TTL_MS;
+}
+
+function stripHeavyDataUrl(val: unknown, fallback = ''): string {
+  if (typeof val !== 'string') return fallback;
+  const trimmed = val.trim();
+  if (!trimmed) return fallback;
+  if (/^data:/i.test(trimmed)) return fallback;
+  return trimmed;
+}
+
+function stripAllDataUrlsDeep<T>(value: T, keyFallbacks?: Record<string, string>): T {
+  if (value === null || value === undefined) return value;
+  if (typeof value === 'string') {
+    return (/^data:/i.test(value.trim()) ? '' : value) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((el) => stripAllDataUrlsDeep(el)) as unknown as T;
+  }
+  if (typeof value === 'object') {
+    const out: Record<string, any> = {};
+    Object.entries(value as Record<string, any>).forEach(([k, v]) => {
+      if (typeof v === 'string' && /^data:/i.test(v.trim())) {
+        out[k] = keyFallbacks && k in keyFallbacks ? keyFallbacks[k] : '';
+      } else if (v && typeof v === 'object') {
+        out[k] = stripAllDataUrlsDeep(v);
+      } else {
+        out[k] = v;
+      }
+    });
+    return out as T;
+  }
+  return value;
+}
+
+function sanitizeInnovationForStorage(item: InnovationSubmission): InnovationSubmission {
+  const stripped = stripAllDataUrlsDeep(item);
+  return {
+    ...stripped,
+    imageUrl: stripHeavyDataUrl(stripped.imageUrl, ''),
+    coverImageUrl: stripHeavyDataUrl(stripped.coverImageUrl, ''),
+    onlineUrl: stripHeavyDataUrl(stripped.onlineUrl, ''),
+  };
+}
+
+function sanitizeTeacherMediaForStorage(item: TeacherMediaWork): TeacherMediaWork {
+  const stripped = stripAllDataUrlsDeep(item, { thumbnailUrl: '/acu_active_logo.png' });
+  return {
+    ...stripped,
+    thumbnailUrl: stripHeavyDataUrl(stripped.thumbnailUrl, '/acu_active_logo.png'),
+    onlineUrl: stripHeavyDataUrl(stripped.onlineUrl, ''),
+  };
+}
+
+function sanitizeFacilityForStorage(item: FacilitySubmission): FacilitySubmission {
+  const stripped = stripAllDataUrlsDeep(item);
+  return {
+    ...stripped,
+    imageUrl: stripHeavyDataUrl(stripped.imageUrl, ''),
+  };
+}
+
+function sanitizeSharedIdeaForStorage(item: SharedIdeaItem): SharedIdeaItem {
+  const stripped = stripAllDataUrlsDeep(item);
+  return {
+    ...stripped,
+    imageUrl: stripHeavyDataUrl(stripped.imageUrl, ''),
+  };
+}
+
+function clearStaleLocalStorageKeysOnQuota(preserveKey: string, preserveTsKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
+    const evictableExactKeys = [
+      'acu_persistent_login_logs',
+      'acu_pending_login_logs',
+      'acu_admin_overall_stats_cache',
+      'acu_site_summary_cache',
+      'acu_all_user_profiles_cache',
+      'acu_cached_all_user_profiles_map',
+      'acu_cached_reward_claims',
+      'acu_reward_privilege_claims_cache',
+      'acu_popup_banner_config',
+      'acu_school_logo_config',
+      'acu_certificate_logo_config',
+      'acu_media_criteria_poster',
+      'acu_criteria_poster_config',
+      'acu_google_sheets_config_cache',
+    ];
+    evictableExactKeys.forEach((k) => {
+      if (k !== preserveKey && k !== preserveTsKey) {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      }
+    });
+
+    const protectedKeys = new Set([
+      preserveKey,
+      preserveTsKey,
+      'acu_current_user_email',
+      'acu_remembered_gmail',
+      'acu_last_active_time',
+      'acu_deleted_media_ids',
+      'acu_deleted_user_emails',
+      'acu_active_firestore_db_id',
+      'acu_user_credentials_vault',
+      INNOVATIONS_STORAGE_KEY,
+      INNOVATIONS_FETCHED_AT_KEY,
+      TEACHER_MEDIA_STORAGE_KEY,
+      TEACHER_MEDIA_FETCHED_AT_KEY,
+      FACILITY_STORAGE_KEY,
+      FACILITY_FETCHED_AT_KEY,
+      SHARED_IDEAS_STORAGE_KEY,
+      SHARED_IDEAS_FETCHED_AT_KEY,
+    ]);
+    if (currentEmail) {
+      protectedKeys.add(`acu_user_avatar_${currentEmail}`);
+      protectedKeys.add(`acu_user_full_profile_${currentEmail}`);
+    }
+
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+      const k = localStorage.key(i);
+      if (!k || protectedKeys.has(k)) continue;
+      if (
+        k.startsWith('acu_users_uid_cache_') ||
+        k.startsWith('acu_user_avatar_') ||
+        k.startsWith('acu_user_full_profile_') ||
+        k.startsWith('acu_last_auto_visit_')
+      ) {
+        try {
+          localStorage.removeItem(k);
+        } catch {}
+      }
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function writeLightweightArrayToStorage<T>(
+  storageKey: string,
+  tsKey: string,
+  items: T[],
+  updateFetchedAt = false
+): void {
+  if (typeof window === 'undefined') return;
+  const serialized = JSON.stringify(items);
+  const nowStr = String(Date.now());
+  try {
+    localStorage.setItem(storageKey, serialized);
+    if (updateFetchedAt) {
+      localStorage.setItem(tsKey, nowStr);
+    }
+    return;
+  } catch (err) {
+    console.warn(`Storage quota hit for ${storageKey}; evicting stale caches and retrying:`, err);
+  }
+
+  try {
+    clearStaleLocalStorageKeysOnQuota(storageKey, tsKey);
+    localStorage.setItem(storageKey, serialized);
+    if (updateFetchedAt) {
+      localStorage.setItem(tsKey, nowStr);
+    }
+  } catch (retryErr) {
+    console.warn(`Retry storage write skipped for ${storageKey} (keeping in-memory cache):`, retryErr);
+  }
+}
 
 /**
  * Legacy hardcoded seed IDs that previously caused false "submitted" status
@@ -661,72 +902,142 @@ function notifyTeacherMediaChanged(): void {
  * Get cached innovations from localStorage (stripping legacy fake seed IDs)
  */
 export function getStoredInnovations(): InnovationSubmission[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(INNOVATIONS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        if (parsed.length === 0) {
+          try {
+            localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
+          } catch {}
+          return [];
+        }
         const cleaned = parsed.filter(
           (item: InnovationSubmission) => item && !isMediaIdBlocked(item.id)
         );
         if (cleaned.length !== parsed.length) {
-          saveStoredInnovations(cleaned);
+          const lightweight = cleaned.map(sanitizeInnovationForStorage);
+          writeLightweightArrayToStorage(INNOVATIONS_STORAGE_KEY, INNOVATIONS_FETCHED_AT_KEY, lightweight, false);
         }
         return cleaned;
       }
+      try {
+        localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
+      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read innovations cache:', err);
+    console.warn('Failed to read innovations cache (clearing corrupted entry):', err);
+    try {
+      localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
+    } catch {}
   }
   return [];
 }
 
 /**
- * Save innovations to localStorage cache
+ * Save innovations to localStorage cache (QuotaExceededError-safe on mobile/iPad)
  */
-export function saveStoredInnovations(list: InnovationSubmission[]): void {
-  try {
-    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
-    localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
-  } catch (err) {
-    console.warn('Failed to save innovations cache:', err);
+export function saveStoredInnovations(
+  list: InnovationSubmission[],
+  options?: { updateFetchedAt?: boolean }
+): void {
+  const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
+  const sortedFull = [...cleaned].sort(
+    (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+  );
+  sharedLatestInnovations = sortedFull.filter((item) => item.isDeleted !== true);
+
+  if (typeof window === 'undefined') return;
+  if (cleaned.length === 0) {
+    try {
+      localStorage.removeItem(INNOVATIONS_STORAGE_KEY);
+      localStorage.removeItem(INNOVATIONS_FETCHED_AT_KEY);
+    } catch {}
+    return;
   }
+  const lightweight = sortedFull.map(sanitizeInnovationForStorage);
+  writeLightweightArrayToStorage(
+    INNOVATIONS_STORAGE_KEY,
+    INNOVATIONS_FETCHED_AT_KEY,
+    lightweight,
+    Boolean(options?.updateFetchedAt)
+  );
 }
 
 /**
- * Get cached teacher media from localStorage (stripping legacy fake seed IDs)
+ * Get cached teacher media from localStorage (stripping legacy fake seed IDs & corrupted JSON)
  */
 export function getStoredTeacherMedia(): TeacherMediaWork[] {
+  if (typeof window === 'undefined') return [];
   try {
     const raw = localStorage.getItem(TEACHER_MEDIA_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        if (parsed.length === 0) {
+          try {
+            localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
+          } catch {}
+          return [];
+        }
         const cleaned = parsed.filter(
           (item: TeacherMediaWork) => item && !isMediaIdBlocked(item.id)
         );
         if (cleaned.length !== parsed.length) {
-          saveStoredTeacherMedia(cleaned);
+          const lightweight = cleaned.map(sanitizeTeacherMediaForStorage);
+          writeLightweightArrayToStorage(TEACHER_MEDIA_STORAGE_KEY, TEACHER_MEDIA_FETCHED_AT_KEY, lightweight, false);
         }
         return cleaned;
       }
+      try {
+        localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
+      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read teacher media cache:', err);
+    console.warn('Failed to read teacher media cache (clearing corrupted entry):', err);
+    try {
+      localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
+    } catch {}
   }
   return [];
 }
 
 /**
- * Save teacher media to localStorage cache
+ * Save teacher media: preserves full objects in module memory, strips heavy Base64 strings for localStorage
  */
-export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
-  try {
-    const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
-    localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
-  } catch (err) {
-    console.warn('Failed to save teacher media cache:', err);
+export function saveStoredTeacherMedia(
+  list: TeacherMediaWork[],
+  options?: { updateFetchedAt?: boolean }
+): void {
+  const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
+  const deletedUsers = getDeletedUserEmails();
+  const filteredFull = cleaned
+    .filter(
+      (w) =>
+        w.isDeleted !== true &&
+        w.title?.trim().length > 0 &&
+        !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
+    )
+    .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  sharedLatestTeacherMedia = filteredFull;
+
+  if (typeof window === 'undefined') return;
+  if (cleaned.length === 0) {
+    try {
+      localStorage.removeItem(TEACHER_MEDIA_STORAGE_KEY);
+      localStorage.removeItem(TEACHER_MEDIA_FETCHED_AT_KEY);
+    } catch {}
+    return;
   }
+  const lightweight = cleaned.map(sanitizeTeacherMediaForStorage);
+  writeLightweightArrayToStorage(
+    TEACHER_MEDIA_STORAGE_KEY,
+    TEACHER_MEDIA_FETCHED_AT_KEY,
+    lightweight,
+    Boolean(options?.updateFetchedAt)
+  );
 }
 
 /**
@@ -773,6 +1084,9 @@ export async function saveInnovationSubmission(data: {
   const itemNum = Number(data.itemNumber) || 1;
   const trimmedName = data.teacherName.trim();
 
+  const cleanOnlineUrl = data.onlineUrl?.trim() || '';
+  const safeCoverUrl = sanitizeMediaThumbnailForFirestore(data.imageUrl, cleanOnlineUrl);
+
   const payload: InnovationSubmission = {
     id,
     uid: resolvedUid,
@@ -789,8 +1103,9 @@ export async function saveInnovationSubmission(data: {
     mediaType: data.mediaType,
     productionType: data.productionType,
     usageDetails: data.usageDetails.trim(),
-    onlineUrl: data.onlineUrl?.trim() || '',
-    imageUrl: data.imageUrl || '',
+    onlineUrl: cleanOnlineUrl,
+    imageUrl: safeCoverUrl,
+    coverImageUrl: safeCoverUrl,
     status: 'ส่งเรียบร้อย',
     submittedAt: nowIso,
     updatedAt: nowIso,
@@ -810,12 +1125,12 @@ export async function saveInnovationSubmission(data: {
     subjectGroup: selectedSubjectGroup,
     gradeLevel: data.gradeLevel,
     subjectName: data.usageDetails.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-    thumbnailUrl: data.imageUrl || '/acu_active_logo.png',
+    thumbnailUrl: safeCoverUrl,
     description: `กลุ่มสาระ: ${selectedSubjectGroup} | นำไปใช้: ${data.usageDetails} | ประเภท: ${data.mediaType}${data.productionType ? ` (${data.productionType})` : ''}`,
     mediaType: data.mediaType,
     productionType: data.productionType,
     itemNumber: itemNum,
-    onlineUrl: data.onlineUrl?.trim() || '',
+    onlineUrl: cleanOnlineUrl,
     ratingAvg: 5.0,
     ratingCount: 1,
     views: 1,
@@ -825,20 +1140,34 @@ export async function saveInnovationSubmission(data: {
     createdAt: nowIso,
   };
 
-  // 1. Immediately save into local storage caches (guarantees 0% data loss)
-  try {
-    const currentList = getStoredInnovations();
-    const updatedList = [payload, ...currentList.filter((item) => item.id !== id)];
-    saveStoredInnovations(updatedList);
+  // Snapshot pre-save unified count for this teacher so admin overview tracks teachersWithSubmissions & completed5 accurately
+  const preSaveUnified = getUnifiedTeacherMediaRecords(
+    { uid: resolvedUid, email: normalizedEmail, teacherName: trimmedName },
+    sharedLatestInnovations || getStoredInnovations(),
+    sharedLatestTeacherMedia || getStoredTeacherMedia()
+  );
+  const prevTeacherCount = preSaveUnified.submittedCount;
 
-    const currentMedia = getStoredTeacherMedia();
-    const updatedMedia = [mediaPayload, ...currentMedia.filter((m) => m.id !== mediaDocId)];
-    saveStoredTeacherMedia(updatedMedia);
+  // 1. Immediately save into in-memory & lightweight localStorage caches (guarantees 0% data loss)
+  let nextInnovationsList: InnovationSubmission[] = [payload];
+  let nextMediaList: TeacherMediaWork[] = [mediaPayload];
+  try {
+    const currentList = sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations
+      : getStoredInnovations();
+    nextInnovationsList = [payload, ...currentList.filter((item) => item.id !== id)];
+    saveStoredInnovations(nextInnovationsList);
+
+    const currentMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    nextMediaList = [mediaPayload, ...currentMedia.filter((m) => m.id !== mediaDocId)];
+    saveStoredTeacherMedia(nextMediaList);
   } catch (cacheErr) {
     console.warn('Local cache save warning:', cacheErr);
   }
 
-  // 2. Write to Firebase Cloud Firestore
+  // 2. Write to Firebase Cloud Firestore + keep bundles/* 100% up-to-date
   try {
     const docRef = doc(db, INNOVATIONS_COLLECTION, id);
     await setDoc(docRef, payload);
@@ -859,6 +1188,20 @@ export async function saveInnovationSubmission(data: {
       const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
       await setDoc(mediaRef, mediaPayload, { merge: true });
     } catch {}
+
+    // Keep bundles/innovations_index & bundles/media_index 100% synchronized
+    await Promise.allSettled([
+      upsertBundleEntry(
+        'innovations_index',
+        toInnovationBundleEntry(payload),
+        nextInnovationsList.map(toInnovationBundleEntry)
+      ),
+      upsertBundleEntry(
+        'media_index',
+        toMediaBundleEntry(mediaPayload),
+        nextMediaList.map(toMediaBundleEntry)
+      ),
+    ]);
 
     // Update user profile document in user_profiles & atomically increment submissionCount
     try {
@@ -892,8 +1235,8 @@ export async function saveInnovationSubmission(data: {
               month: 'short',
               year: 'numeric',
             }),
-            linkUrl: data.onlineUrl?.trim() || '',
-            coverImageUrl: data.imageUrl || '',
+            linkUrl: cleanOnlineUrl,
+            coverImageUrl: safeCoverUrl,
             notes: `${data.productionType}${data.usageDetails ? ` • ${data.usageDetails}` : ''}`,
           };
           await setDoc(
@@ -912,6 +1255,27 @@ export async function saveInnovationSubmission(data: {
     } catch (profErr) {
       console.warn('Could not sync to user_profiles:', profErr);
     }
+
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(nowIso);
+    const isSelfProduced = data.productionType === 'ครูผลิตสื่อเอง';
+    incrementAdminOverviewCounters({
+      totalTeachersWithSubmissions: prevTeacherCount === 0 ? 1 : 0,
+      totalMediaCount: 1,
+      totalInnovationsCount: 1,
+      totalUnifiedSubmissions: 1,
+      teachersCompleted5Count: prevTeacherCount < 5 && prevTeacherCount + 1 >= 5 ? 1 : 0,
+      mediaType: data.mediaType,
+      mediaTypeDelta: 1,
+      gradeLevel: data.gradeLevel,
+      gradeLevelDelta: 1,
+      subjectGroup: selectedSubjectGroup,
+      subjectGroupDelta: 1,
+      selfProducedCount: isSelfProduced ? 1 : 0,
+      externalSourceCount: isSelfProduced ? 0 : 1,
+      yearKey,
+      monthKey,
+      yearMediaDelta: 1,
+    }).catch(() => {});
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -952,8 +1316,22 @@ export async function updateInnovationSubmission(
       return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขผลงานของผู้อื่น (สิทธิ์เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้น)' };
     }
 
-    const payload = {
+    const nextOnlineUrl = updates.onlineUrl !== undefined ? updates.onlineUrl : currentData.onlineUrl || '';
+    const hasImageUpdate = updates.imageUrl !== undefined || updates.coverImageUrl !== undefined || updates.onlineUrl !== undefined;
+    const sanitizedCover = hasImageUpdate
+      ? sanitizeMediaThumbnailForFirestore(
+          updates.imageUrl ?? updates.coverImageUrl ?? currentData.imageUrl ?? currentData.coverImageUrl,
+          nextOnlineUrl
+        )
+      : sanitizeMediaThumbnailForFirestore(currentData.imageUrl ?? currentData.coverImageUrl, nextOnlineUrl);
+
+    const cleanUpdates: Partial<InnovationSubmission> = {
       ...updates,
+      ...(hasImageUpdate ? { imageUrl: sanitizedCover, coverImageUrl: sanitizedCover } : {}),
+    };
+
+    const payload = {
+      ...cleanUpdates,
       updatedAt: new Date().toISOString(),
     };
 
@@ -968,45 +1346,47 @@ export async function updateInnovationSubmission(
     }
 
     // If there is a corresponding media item in teacher media repository, update or create it
+    let syncedMediaItem: TeacherMediaWork | null = null;
     try {
       const mediaDocId = `work_${id}`;
       const mediaRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaDocId);
       const mediaSnap = await getDoc(mediaRef);
       if (mediaSnap.exists()) {
         const mediaUpdate: Partial<TeacherMediaWork> = {};
-        if (updates.mediaTitle) mediaUpdate.title = updates.mediaTitle;
-        if (updates.imageUrl) mediaUpdate.thumbnailUrl = updates.imageUrl;
-        if (updates.onlineUrl !== undefined) mediaUpdate.onlineUrl = updates.onlineUrl;
-        if (updates.mediaType) mediaUpdate.mediaType = updates.mediaType;
-        if (updates.productionType) mediaUpdate.productionType = updates.productionType;
-        if (updates.gradeLevel) {
-          mediaUpdate.gradeLevel = updates.gradeLevel;
+        if (cleanUpdates.mediaTitle) mediaUpdate.title = cleanUpdates.mediaTitle;
+        if (hasImageUpdate) mediaUpdate.thumbnailUrl = sanitizedCover;
+        if (cleanUpdates.onlineUrl !== undefined) mediaUpdate.onlineUrl = cleanUpdates.onlineUrl;
+        if (cleanUpdates.mediaType) mediaUpdate.mediaType = cleanUpdates.mediaType;
+        if (cleanUpdates.productionType) mediaUpdate.productionType = cleanUpdates.productionType;
+        if (cleanUpdates.gradeLevel) {
+          mediaUpdate.gradeLevel = cleanUpdates.gradeLevel;
         }
-        if (updates.subjectGroup) {
-          mediaUpdate.subjectGroup = updates.subjectGroup;
+        if (cleanUpdates.subjectGroup) {
+          mediaUpdate.subjectGroup = cleanUpdates.subjectGroup;
         }
-        if (updates.usageDetails || updates.subjectGroup || updates.mediaType || updates.productionType) {
-          const sGroup = updates.subjectGroup || currentData.subjectGroup || '-';
-          const uDetails = updates.usageDetails || currentData.usageDetails || '-';
-          const mType = updates.mediaType || currentData.mediaType || '-';
-          const pType = updates.productionType || currentData.productionType || '';
+        if (cleanUpdates.usageDetails || cleanUpdates.subjectGroup || cleanUpdates.mediaType || cleanUpdates.productionType) {
+          const sGroup = cleanUpdates.subjectGroup || currentData.subjectGroup || '-';
+          const uDetails = cleanUpdates.usageDetails || currentData.usageDetails || '-';
+          const mType = cleanUpdates.mediaType || currentData.mediaType || '-';
+          const pType = cleanUpdates.productionType || currentData.productionType || '';
           mediaUpdate.description = `กลุ่มสาระ: ${sGroup} | นำไปใช้: ${uDetails} | ประเภท: ${mType}${pType ? ` (${pType})` : ''}`;
         }
         await updateDoc(mediaRef, mediaUpdate);
+        syncedMediaItem = { ...(mediaSnap.data() as TeacherMediaWork), ...mediaUpdate, id: mediaDocId };
       } else {
         const newMediaPayload: TeacherMediaWork = {
           id: mediaDocId,
-          title: updates.mediaTitle || currentData.mediaTitle,
-          teacherName: updates.teacherName || currentData.teacherName,
-          subjectGroup: updates.subjectGroup || currentData.subjectGroup || SUBJECT_GROUPS[0],
-          gradeLevel: updates.gradeLevel || currentData.gradeLevel,
-          subjectName: updates.usageDetails || currentData.usageDetails || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-          thumbnailUrl: updates.imageUrl || currentData.imageUrl || '/acu_active_logo.png',
-          description: `กลุ่มสาระ: ${updates.subjectGroup || currentData.subjectGroup || '-'} | นำไปใช้: ${updates.usageDetails || currentData.usageDetails || '-'} | ประเภท: ${updates.mediaType || currentData.mediaType || '-'}${updates.productionType || currentData.productionType ? ` (${updates.productionType || currentData.productionType})` : ''}`,
-          mediaType: updates.mediaType || currentData.mediaType,
-          productionType: updates.productionType || currentData.productionType,
-          itemNumber: Number(updates.itemNumber || currentData.itemNumber) || 1,
-          onlineUrl: updates.onlineUrl !== undefined ? updates.onlineUrl : currentData.onlineUrl || '',
+          title: cleanUpdates.mediaTitle || currentData.mediaTitle,
+          teacherName: cleanUpdates.teacherName || currentData.teacherName,
+          subjectGroup: cleanUpdates.subjectGroup || currentData.subjectGroup || SUBJECT_GROUPS[0],
+          gradeLevel: cleanUpdates.gradeLevel || currentData.gradeLevel,
+          subjectName: cleanUpdates.usageDetails || currentData.usageDetails || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+          thumbnailUrl: sanitizedCover,
+          description: `กลุ่มสาระ: ${cleanUpdates.subjectGroup || currentData.subjectGroup || '-'} | นำไปใช้: ${cleanUpdates.usageDetails || currentData.usageDetails || '-'} | ประเภท: ${cleanUpdates.mediaType || currentData.mediaType || '-'}${cleanUpdates.productionType || currentData.productionType ? ` (${cleanUpdates.productionType || currentData.productionType})` : ''}`,
+          mediaType: cleanUpdates.mediaType || currentData.mediaType,
+          productionType: cleanUpdates.productionType || currentData.productionType,
+          itemNumber: Number(cleanUpdates.itemNumber || currentData.itemNumber) || 1,
+          onlineUrl: nextOnlineUrl,
           ratingAvg: 5.0,
           ratingCount: 1,
           views: 1,
@@ -1016,21 +1396,91 @@ export async function updateInnovationSubmission(
           createdAt: currentData.submittedAt || new Date().toISOString(),
         };
         await setDoc(mediaRef, newMediaPayload, { merge: true });
+        syncedMediaItem = newMediaPayload;
       }
     } catch {
       // ignore
     }
 
-    // Update local storage cache immediately
+    // Update in-memory & localStorage cache immediately
+    const mergedInnovItem: InnovationSubmission = { ...currentData, ...cleanUpdates, id, updatedAt: payload.updatedAt };
+    let nextInnovList: InnovationSubmission[] = [mergedInnovItem];
+    let nextMediaList: TeacherMediaWork[] = sharedLatestTeacherMedia ? [...sharedLatestTeacherMedia] : getStoredTeacherMedia();
     try {
-      const currentList = getStoredInnovations();
-      const updatedList = currentList.map((item) =>
-        item.id === id ? { ...item, ...updates, updatedAt: new Date().toISOString() } : item
-      );
-      saveStoredInnovations(updatedList);
+      const currentList = sharedLatestInnovations && sharedLatestInnovations.length > 0
+        ? sharedLatestInnovations
+        : getStoredInnovations();
+      nextInnovList = currentList.map((item) => (item.id === id ? { ...item, ...cleanUpdates, updatedAt: payload.updatedAt } : item));
+      saveStoredInnovations(nextInnovList);
+      if (nextMediaList.length > 0) {
+        const mediaDocId = `work_${id}`;
+        nextMediaList = nextMediaList.map((m) =>
+          m.id === mediaDocId
+            ? {
+                ...m,
+                ...(cleanUpdates.mediaTitle ? { title: cleanUpdates.mediaTitle } : {}),
+                ...(hasImageUpdate ? { thumbnailUrl: sanitizedCover } : {}),
+                ...(cleanUpdates.onlineUrl !== undefined ? { onlineUrl: cleanUpdates.onlineUrl } : {}),
+                ...(cleanUpdates.mediaType ? { mediaType: cleanUpdates.mediaType } : {}),
+                ...(cleanUpdates.productionType ? { productionType: cleanUpdates.productionType } : {}),
+                ...(cleanUpdates.gradeLevel ? { gradeLevel: cleanUpdates.gradeLevel } : {}),
+                ...(cleanUpdates.subjectGroup ? { subjectGroup: cleanUpdates.subjectGroup } : {}),
+              }
+            : m
+        );
+        saveStoredTeacherMedia(nextMediaList);
+      }
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
     } catch {}
+
+    // Keep bundles/innovations_index & bundles/media_index 100% up-to-date
+    await Promise.allSettled([
+      upsertBundleEntry(
+        'innovations_index',
+        toInnovationBundleEntry(mergedInnovItem),
+        nextInnovList.map(toInnovationBundleEntry)
+      ),
+      ...(syncedMediaItem
+        ? [
+            upsertBundleEntry(
+              'media_index',
+              toMediaBundleEntry(syncedMediaItem),
+              nextMediaList.map(toMediaBundleEntry)
+            ),
+          ]
+        : []),
+    ]);
+
+    // Keep single-document Admin Overview category breakdowns accurate on edit
+    if (updates.mediaType && updates.mediaType !== currentData.mediaType) {
+      if (currentData.mediaType) {
+        incrementAdminOverviewCounters({ mediaType: currentData.mediaType, mediaTypeDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ mediaType: updates.mediaType, mediaTypeDelta: 1 }).catch(() => {});
+    }
+    if (updates.gradeLevel && updates.gradeLevel !== currentData.gradeLevel) {
+      if (currentData.gradeLevel) {
+        incrementAdminOverviewCounters({ gradeLevel: currentData.gradeLevel, gradeLevelDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ gradeLevel: updates.gradeLevel, gradeLevelDelta: 1 }).catch(() => {});
+    }
+    if (updates.subjectGroup && updates.subjectGroup !== currentData.subjectGroup) {
+      if (currentData.subjectGroup) {
+        incrementAdminOverviewCounters({ subjectGroup: currentData.subjectGroup, subjectGroupDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ subjectGroup: updates.subjectGroup, subjectGroupDelta: 1 }).catch(() => {});
+    }
+    if (updates.productionType && updates.productionType !== currentData.productionType) {
+      incrementAdminOverviewCounters({
+        selfProducedCount:
+          (updates.productionType === 'ครูผลิตสื่อเอง' ? 1 : 0) -
+          (currentData.productionType === 'ครูผลิตสื่อเอง' ? 1 : 0),
+        externalSourceCount:
+          (updates.productionType !== 'ครูผลิตสื่อเอง' ? 1 : 0) -
+          (currentData.productionType !== 'ครูผลิตสื่อเอง' ? 1 : 0),
+      }).catch(() => {});
+    }
 
     return { success: true };
   } catch (err: any) {
@@ -1140,7 +1590,9 @@ export async function deleteInnovationSubmission(
   id: string,
   currentUserEmail: string
 ): Promise<{ success: boolean; error?: string }> {
-  const cachedList = getStoredInnovations();
+  const cachedList = sharedLatestInnovations && sharedLatestInnovations.length > 0
+    ? sharedLatestInnovations
+    : getStoredInnovations();
   const cachedItem = cachedList.find((item) => item.id === id);
 
   try {
@@ -1166,7 +1618,10 @@ export async function deleteInnovationSubmission(
       }
 
       saveStoredInnovations(cachedList.filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
+      const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+        ? sharedLatestTeacherMedia
+        : getStoredTeacherMedia();
+      saveStoredTeacherMedia(baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id));
       if (cachedItem) {
         await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
         if (ownerEmail) {
@@ -1205,17 +1660,56 @@ export async function deleteInnovationSubmission(
       // ignore
     }
 
-    // Delete from local caches immediately
+    // Delete from in-memory & local caches immediately
+    let remainingInnovations = cachedList.filter((item) => item.id !== id);
+    const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    let remainingMedia = baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id);
     try {
-      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
+      saveStoredInnovations(remainingInnovations);
+      saveStoredTeacherMedia(remainingMedia);
     } catch {}
+
+    await Promise.allSettled([
+      removeBundleEntries('innovations_index', [id], remainingInnovations.map(toInnovationBundleEntry)),
+      removeBundleEntries('media_index', [`work_${id}`, id], remainingMedia.map(toMediaBundleEntry)),
+    ]);
 
     // Reset the owner's slot in user_profiles back to pending & decrement counter atomically
     await syncUserProfileSlotOnDelete(ownerEmail, currentData.itemNumber);
     if (ownerEmail) {
       await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
     }
+
+    // Update stats/admin_overview counters incrementally
+    const preDeleteUnified = ownerEmail
+      ? getUnifiedTeacherMediaRecords(
+          { uid: currentData.uid, email: ownerEmail, teacherName: currentData.teacherName },
+          cachedList,
+          sharedLatestTeacherMedia || getStoredTeacherMedia()
+        )
+      : { submittedCount: 0 };
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(currentData.submittedAt);
+    const isSelfProduced = currentData.productionType === 'ครูผลิตสื่อเอง';
+    incrementAdminOverviewCounters({
+      totalTeachersWithSubmissions: preDeleteUnified.submittedCount === 1 ? -1 : 0,
+      totalMediaCount: -1,
+      totalInnovationsCount: -1,
+      totalUnifiedSubmissions: -1,
+      teachersCompleted5Count: preDeleteUnified.submittedCount === 5 ? -1 : 0,
+      mediaType: currentData.mediaType,
+      mediaTypeDelta: -1,
+      gradeLevel: currentData.gradeLevel,
+      gradeLevelDelta: -1,
+      subjectGroup: currentData.subjectGroup,
+      subjectGroupDelta: -1,
+      selfProducedCount: isSelfProduced ? -1 : 0,
+      externalSourceCount: isSelfProduced ? 0 : -1,
+      yearKey,
+      monthKey,
+      yearMediaDelta: -1,
+    }).catch(() => {});
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -1226,8 +1720,11 @@ export async function deleteInnovationSubmission(
       notifyQuotaExceeded();
       console.warn('[Firestore] Quota reached during delete: Removed from local recovery cache.');
       addDeletedMediaIds([id, `work_${id}`]);
-      saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
-      saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
+      saveStoredInnovations(cachedList.filter((item) => item.id !== id));
+      const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+        ? sharedLatestTeacherMedia
+        : getStoredTeacherMedia();
+      saveStoredTeacherMedia(baseMedia.filter((m) => m.id !== `work_${id}` && m.id !== id));
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
       return { success: true };
@@ -1237,10 +1734,12 @@ export async function deleteInnovationSubmission(
   }
 }
 
-// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; protects Firestore read quotas)
+// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; strict 12-hour cache-first)
 const allInnovationsListeners = new Set<(submissions: InnovationSubmission[]) => void>();
 let sharedLatestInnovations: InnovationSubmission[] | null = null;
 let hasFetchedInnovationsThisSession = false;
+let lastInnovationsFetchedAt = 0;
+let isFetchingInnovations = false;
 let inFlightInnovationsFetch: Promise<InnovationSubmission[]> | null = null;
 let innovationsWindowListenerAttached = false;
 
@@ -1266,30 +1765,239 @@ function ensureInnovationsWindowListeners(): void {
   innovationsWindowListenerAttached = true;
 
   const handleChanged = () => {
-    broadcastAllInnovations(getSortedStoredInnovations());
+    const source = sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations.filter((item) => item && item.isDeleted !== true && !isMediaIdBlocked(item.id))
+      : getSortedStoredInnovations();
+    broadcastAllInnovations(source);
+  };
+  const handleUserDeleted = () => {
+    const deletedUsers = getDeletedUserEmails();
+    const base = sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations.filter((item) => !extractMediaEmails(item).every((em) => deletedUsers.has(em) && extractMediaEmails(item).length > 0))
+      : getSortedStoredInnovations();
+    broadcastAllInnovations(base);
   };
   window.addEventListener('acu_innovations_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleChanged);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
+}
+
+let lastEmptyInnovationsServerCheckAt = 0;
+
+export function fromInnovationBundleEntry(entry: BundleIndexEntry): InnovationSubmission {
+  const email = (entry.email || (entry.teacherId?.includes('@') ? entry.teacherId : '')).toLowerCase().trim();
+  const safeThumb = sanitizeMediaThumbnailForFirestore(entry.thumbnailUrl, entry.link);
+  return {
+    id: entry.id,
+    uid: entry.teacherId || '',
+    userId: entry.teacherId || '',
+    email,
+    userEmail: email,
+    submittedByEmail: email,
+    teacherName: entry.teacherName || '',
+    authorName: entry.teacherName || '',
+    subjectGroup: entry.subjectGroup || SUBJECT_GROUPS[0],
+    gradeLevel: entry.gradeLevel || '',
+    itemNumber: Number(entry.itemNumber) || 1,
+    mediaTitle: entry.title || '',
+    mediaType: entry.mediaType || 'สื่ออื่น ๆ',
+    productionType: entry.productionType || 'ครูผลิตสื่อเอง',
+    usageDetails: entry.usageDetails || '',
+    onlineUrl: entry.link || '',
+    imageUrl: safeThumb,
+    coverImageUrl: safeThumb,
+    status: entry.status || 'ส่งเรียบร้อย',
+    submittedAt: entry.createdAt || new Date().toISOString(),
+  };
+}
+
+export function fromMediaBundleEntry(entry: BundleIndexEntry): TeacherMediaWork {
+  const email = (entry.email || (entry.teacherId?.includes('@') ? entry.teacherId : '')).toLowerCase().trim();
+  const safeThumb = sanitizeMediaThumbnailForFirestore(entry.thumbnailUrl, entry.link);
+  return {
+    id: entry.id,
+    uid: entry.teacherId || '',
+    userId: entry.teacherId || '',
+    email,
+    userEmail: email,
+    submittedByEmail: email,
+    title: entry.title || '',
+    teacherName: entry.teacherName || '',
+    authorName: entry.teacherName || '',
+    subjectGroup: entry.subjectGroup || SUBJECT_GROUPS[0],
+    gradeLevel: entry.gradeLevel || '',
+    subjectName: entry.subjectName || entry.usageDetails || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+    thumbnailUrl: safeThumb,
+    description: entry.description || '',
+    mediaType: entry.mediaType || 'สื่ออื่น ๆ',
+    productionType: entry.productionType || 'ครูผลิตสื่อเอง',
+    itemNumber: entry.itemNumber,
+    onlineUrl: entry.link || '',
+    ratingAvg: typeof entry.stars === 'number' ? entry.stars : 5.0,
+    ratingCount: typeof entry.ratingCount === 'number' ? entry.ratingCount : 1,
+    views: typeof entry.views === 'number' ? entry.views : 0,
+    likes: typeof entry.likes === 'number' ? entry.likes : 0,
+    likedBy: Array.isArray(entry.likedBy) ? entry.likedBy : [],
+    userRatings: entry.userRatings,
+    status: entry.status || 'ส่งเรียบร้อย',
+    createdAt: entry.createdAt || new Date().toISOString(),
+  };
+}
+
+export function fromIdeaBundleEntry(entry: BundleIndexEntry): SharedIdeaItem {
+  const email = (entry.email || (entry.teacherId?.includes('@') ? entry.teacherId : '')).trim();
+  const safeThumb = sanitizeMediaThumbnailForFirestore(entry.thumbnailUrl, entry.link);
+  return sanitizeSharedIdeaRecord({
+    id: entry.id,
+    title: entry.title || '',
+    description: entry.description || '',
+    category: entry.category || entry.mediaType || 'official_portal',
+    categoryLabel: entry.categoryLabel || entry.subjectGroup || 'คลังความรู้',
+    url: entry.link || '',
+    ...(safeThumb ? { imageUrl: safeThumb } : {}),
+    tags: Array.isArray(entry.tags) && entry.tags.length > 0 ? entry.tags : ['แบ่งปันโดยครู ACU'],
+    creatorEmail: email,
+    creatorName: entry.teacherName || email || 'ครู ACU',
+    createdAt: entry.createdAt || new Date().toISOString(),
+    ratingAvg: typeof entry.stars === 'number' ? entry.stars : 5.0,
+    ratingCount: typeof entry.ratingCount === 'number' ? entry.ratingCount : 1,
+    userRatings: entry.userRatings,
+  });
 }
 
 /**
- * One-time getDocs fetch for teacher_innovations_submissions (deduplicated per session unless forceRefresh=true)
+ * Hydrate in-memory & localStorage caches immediately after Admin rebuilds bundles.
  */
-export async function refreshAllInnovations(forceRefresh = true): Promise<InnovationSubmission[]> {
-  const localFallback = sharedLatestInnovations || getSortedStoredInnovations();
+export function applyRebuiltBundleData(data: {
+  innovations?: InnovationSubmission[];
+  teacherMedia?: TeacherMediaWork[];
+  sharedIdeas?: SharedIdeaItem[];
+}): void {
+  if (data.innovations && data.innovations.length > 0) {
+    hasFetchedInnovationsThisSession = true;
+    lastInnovationsFetchedAt = Date.now();
+    saveStoredInnovations(data.innovations, { updateFetchedAt: true });
+    broadcastAllInnovations(data.innovations);
+  }
+  if (data.teacherMedia && data.teacherMedia.length > 0) {
+    hasFetchedTeacherMediaThisSession = true;
+    lastTeacherMediaFetchedAt = Date.now();
+    saveStoredTeacherMedia(data.teacherMedia, { updateFetchedAt: true });
+    broadcastTeacherMedia(data.teacherMedia);
+  }
+  if (data.sharedIdeas && data.sharedIdeas.length > 0) {
+    hasFetchedSharedIdeasThisSession = true;
+    lastSharedIdeasFetchedAt = Date.now();
+    saveStoredSharedIdeas(data.sharedIdeas, { updateFetchedAt: true });
+    broadcastSharedIdeas(data.sharedIdeas);
+  }
+}
 
-  if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
+if (typeof window !== 'undefined') {
+  window.addEventListener('acu_bundles_rebuilt', (e: Event) => {
+    const detail = (e as CustomEvent<{
+      innovationEntries?: BundleIndexEntry[];
+      mediaEntries?: BundleIndexEntry[];
+      ideaEntries?: BundleIndexEntry[];
+    }>)?.detail;
+    if (!detail) return;
+    applyRebuiltBundleData({
+      innovations: Array.isArray(detail.innovationEntries)
+        ? detail.innovationEntries.map(fromInnovationBundleEntry)
+        : undefined,
+      teacherMedia: Array.isArray(detail.mediaEntries)
+        ? detail.mediaEntries.map(fromMediaBundleEntry)
+        : undefined,
+      sharedIdeas: Array.isArray(detail.ideaEntries)
+        ? detail.ideaEntries.map(fromIdeaBundleEntry)
+        : undefined,
+    });
+  });
+}
+
+/**
+ * Strict cache-first fetch for innovations using single-document `bundles/innovations_index` (1 Read, 6h cache).
+ * Falls back once to legacy collection query ONLY if bundle document does not exist yet.
+ * Never overwrites valid cached data with empty arrays on error or quota limit.
+ */
+export async function refreshAllInnovations(forceRefresh = false): Promise<InnovationSubmission[]> {
+  const localFallback = sharedLatestInnovations && sharedLatestInnovations.length > 0
+    ? sharedLatestInnovations
+    : getSortedStoredInnovations();
+
+  const isFresh =
+    localFallback.length > 0 &&
+    (hasFetchedInnovationsThisSession || isCacheTimestampFresh(lastInnovationsFetchedAt, INNOVATIONS_FETCHED_AT_KEY));
+
+  if (!forceRefresh && isFresh) {
+    if (!sharedLatestInnovations || sharedLatestInnovations.length === 0) {
+      sharedLatestInnovations = localFallback;
+    }
+    return localFallback;
+  }
+
+  if (
+    !forceRefresh &&
+    lastEmptyInnovationsServerCheckAt > 0 &&
+    Date.now() - lastEmptyInnovationsServerCheckAt < 30000 &&
+    sharedLatestInnovations
+  ) {
     return sharedLatestInnovations;
   }
 
-  if (!forceRefresh && inFlightInnovationsFetch) {
+  if (forceRefresh && getManualRefreshCooldownSeconds('allInnovations') > 0) {
+    if (inFlightInnovationsFetch) {
+      return inFlightInnovationsFetch;
+    }
+    return localFallback;
+  }
+
+  if (inFlightInnovationsFetch) {
     return inFlightInnovationsFetch;
   }
 
+  if (isFetchingInnovations) {
+    return localFallback;
+  }
+
+  if (forceRefresh) {
+    lastManualRefreshMap.allInnovations = Date.now();
+  }
+
+  isFetchingInnovations = true;
   inFlightInnovationsFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
+
+      // 1) Primary fast path: read single bundle document (`bundles/innovations_index` = 1 read)
+      const bundleRes = await readBundleIndexOnce('innovations_index');
+      if (bundleRes.exists) {
+        const fromBundle = bundleRes.items
+          .map(fromInnovationBundleEntry)
+          .filter((item) => !isMediaIdBlocked(item.id) && item.isDeleted !== true && Boolean(item.mediaTitle?.trim()));
+        fromBundle.sort(
+          (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+        );
+
+        if (fromBundle.length > 0) {
+          hasFetchedInnovationsThisSession = true;
+          lastInnovationsFetchedAt = Date.now();
+          lastEmptyInnovationsServerCheckAt = 0;
+          saveStoredInnovations(fromBundle, { updateFetchedAt: true });
+          broadcastAllInnovations(fromBundle);
+          return fromBundle;
+        }
+
+        if (localFallback.length > 0) {
+          broadcastAllInnovations(localFallback);
+          return localFallback;
+        }
+        lastEmptyInnovationsServerCheckAt = Date.now();
+        sharedLatestInnovations = [];
+        return [];
+      }
+
+      // 2) One-time fallback ONLY when bundles/innovations_index has not been built yet
+      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(100));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastAllInnovations(localFallback);
@@ -1307,22 +2015,38 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
       liveList.sort(
         (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
       );
-      hasFetchedInnovationsThisSession = true;
-      if (liveList.length > 0 || localFallback.length === 0) {
-        saveStoredInnovations(liveList);
+
+      if (liveList.length > 0) {
+        hasFetchedInnovationsThisSession = true;
+        lastInnovationsFetchedAt = Date.now();
+        lastEmptyInnovationsServerCheckAt = 0;
+        saveStoredInnovations(liveList, { updateFetchedAt: true });
         broadcastAllInnovations(liveList);
         return liveList;
       }
-      broadcastAllInnovations(localFallback);
-      return localFallback;
+
+      if (!snapshot.metadata?.fromCache) {
+        lastEmptyInnovationsServerCheckAt = Date.now();
+      }
+      if (localFallback.length > 0) {
+        broadcastAllInnovations(localFallback);
+        return localFallback;
+      }
+      if (!sharedLatestInnovations) {
+        sharedLatestInnovations = [];
+      }
+      return sharedLatestInnovations;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllInnovations fallback to local cache:', err);
-      broadcastAllInnovations(localFallback);
+      console.warn('refreshAllInnovations error (using fallback cache):', err);
+      if (localFallback.length > 0) {
+        broadcastAllInnovations(localFallback);
+      }
       return localFallback;
     } finally {
+      isFetchingInnovations = false;
       inFlightInnovationsFetch = null;
     }
   })();
@@ -1336,7 +2060,8 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
 export function subscribeUserInnovations(
   userEmail: string,
   callback: (submissions: InnovationSubmission[]) => void,
-  teacherName?: string
+  teacherName?: string,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   if (!userEmail && !teacherName) {
     callback([]);
@@ -1361,24 +2086,34 @@ export function subscribeUserInnovations(
       .sort((a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime());
   };
 
-  return subscribeAllInnovations((allItems) => {
-    callback(filterUserItems(allItems));
-  });
+  return subscribeAllInnovations(
+    (allItems) => {
+      callback(filterUserItems(allItems));
+    },
+    options
+  );
 }
 
 /**
- * Smart-cached subscription to ALL innovation submissions (serves local cache immediately, fetches once per page load).
+ * Smart-cached subscription to ALL innovation submissions (serves in-memory/localStorage immediately).
+ * Default does NOT auto-fetch Firestore on modal/tab mount unless `{ autoFetch: true }`.
  */
 export function subscribeAllInnovations(
-  callback: (submissions: InnovationSubmission[]) => void
+  callback: (submissions: InnovationSubmission[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   allInnovationsListeners.add(callback);
   ensureInnovationsWindowListeners();
 
-  const initial = sharedLatestInnovations || getSortedStoredInnovations();
+  const initial =
+    sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations
+      : getSortedStoredInnovations();
   callback(initial);
 
-  refreshAllInnovations(false).catch(() => {});
+  if (options?.autoFetch && !options?.skipFetch) {
+    refreshAllInnovations(false).catch(() => {});
+  }
 
   return () => {
     allInnovationsListeners.delete(callback);
@@ -1459,6 +2194,12 @@ export function getStoredFacilities(): FacilitySubmission[] {
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
+        if (parsed.length === 0) {
+          try {
+            localStorage.removeItem(FACILITY_STORAGE_KEY);
+          } catch {}
+          return [];
+        }
         const deletedUsers = getDeletedUserEmails();
         const cleaned = parsed.filter(
           (item: FacilitySubmission) =>
@@ -1469,28 +2210,48 @@ export function getStoredFacilities(): FacilitySubmission[] {
         cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
         return cleaned;
       }
+      try {
+        localStorage.removeItem(FACILITY_STORAGE_KEY);
+      } catch {}
     }
   } catch (err) {
-    console.warn('Failed to read facilities cache:', err);
+    console.warn('Failed to read facilities cache (clearing corrupted entry):', err);
+    try {
+      localStorage.removeItem(FACILITY_STORAGE_KEY);
+    } catch {}
   }
   return [];
 }
 
-export function saveStoredFacilities(list: FacilitySubmission[]): void {
+export function saveStoredFacilities(
+  list: FacilitySubmission[],
+  options?: { updateFetchedAt?: boolean }
+): void {
+  const deletedUsers = getDeletedUserEmails();
+  const cleaned = list.filter(
+    (item) =>
+      item &&
+      item.learningCenter &&
+      !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
+  );
+  cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  sharedLatestFacilities = cleaned;
+
   if (typeof window === 'undefined') return;
-  try {
-    const deletedUsers = getDeletedUserEmails();
-    const cleaned = list.filter(
-      (item) =>
-        item &&
-        item.learningCenter &&
-        !deletedUsers.has((item.userEmail || '').trim().toLowerCase())
-    );
-    cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-    localStorage.setItem(FACILITY_STORAGE_KEY, JSON.stringify(cleaned));
-  } catch (err) {
-    console.warn('Failed to save facilities cache:', err);
+  if (cleaned.length === 0) {
+    try {
+      localStorage.removeItem(FACILITY_STORAGE_KEY);
+      localStorage.removeItem(FACILITY_FETCHED_AT_KEY);
+    } catch {}
+    return;
   }
+  const lightweight = cleaned.map(sanitizeFacilityForStorage);
+  writeLightweightArrayToStorage(
+    FACILITY_STORAGE_KEY,
+    FACILITY_FETCHED_AT_KEY,
+    lightweight,
+    Boolean(options?.updateFetchedAt)
+  );
 }
 
 /**
@@ -1525,7 +2286,9 @@ export async function saveFacilitySubmission(data: {
   };
 
   try {
-    const current = getStoredFacilities();
+    const current = sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities
+      : getStoredFacilities();
     saveStoredFacilities([payload, ...current.filter((item) => item.id !== id)]);
   } catch {}
 
@@ -1536,6 +2299,14 @@ export async function saveFacilitySubmission(data: {
       firebaseProject: 'System Test',
       notifiedAdminEmail: ADMIN_TARGET_EMAIL,
     });
+
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(nowIso);
+    incrementAdminOverviewCounters({
+      totalFacilityLogs: 1,
+      yearKey,
+      monthKey,
+      yearFacilityDelta: 1,
+    }).catch(() => {});
 
     notifyFacilitiesChanged();
     return { success: true, id };
@@ -1577,8 +2348,11 @@ export async function updateFacilitySubmission(
       updatedAt,
     });
 
+    const baseList = sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities
+      : getStoredFacilities();
     saveStoredFacilities(
-      getStoredFacilities().map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
+      baseList.map((f) => (f.id === id ? { ...f, ...updates, updatedAt } : f))
     );
     notifyFacilitiesChanged();
     return { success: true };
@@ -1609,7 +2383,21 @@ export async function deleteFacilitySubmission(
     }
 
     await deleteDoc(docRef);
-    saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+    const baseList = sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities
+      : getStoredFacilities();
+    saveStoredFacilities(baseList.filter((f) => f.id !== id));
+
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(
+      currentData.createdAt || currentData.usageDateTime
+    );
+    incrementAdminOverviewCounters({
+      totalFacilityLogs: -1,
+      yearKey,
+      monthKey,
+      yearFacilityDelta: -1,
+    }).catch(() => {});
+
     notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
@@ -1621,6 +2409,8 @@ export async function deleteFacilitySubmission(
 const allFacilityListeners = new Set<(submissions: FacilitySubmission[]) => void>();
 let sharedLatestFacilities: FacilitySubmission[] | null = null;
 let hasFetchedFacilitiesThisSession = false;
+let lastFacilitiesFetchedAt = 0;
+let isFetchingFacilities = false;
 let inFlightFacilitiesFetch: Promise<FacilitySubmission[]> | null = null;
 let facilitiesWindowListenerAttached = false;
 
@@ -1640,30 +2430,76 @@ function ensureFacilitiesWindowListeners(): void {
   facilitiesWindowListenerAttached = true;
 
   const handleChanged = () => {
-    broadcastAllFacilities(getStoredFacilities());
+    const source = sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities
+      : getStoredFacilities();
+    broadcastAllFacilities(source);
+  };
+  const handleUserDeleted = () => {
+    const deletedUsers = getDeletedUserEmails();
+    const source = sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities.filter((item) => !deletedUsers.has((item.userEmail || '').trim().toLowerCase()))
+      : getStoredFacilities();
+    broadcastAllFacilities(source);
   };
   window.addEventListener('acu_facilities_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleChanged);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
 }
 
-/**
- * One-time getDocs fetch for facility usage records (deduplicated per session unless forceRefresh=true)
- */
-export async function refreshAllFacilities(forceRefresh = true): Promise<FacilitySubmission[]> {
-  const localFallback = sharedLatestFacilities || getStoredFacilities();
+let lastEmptyFacilitiesServerCheckAt = 0;
 
-  if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
+/**
+ * Strict cache-first getDocs fetch for facility usage records (12-hour TTL, 60s manual cooldown).
+ */
+export async function refreshAllFacilities(forceRefresh = false): Promise<FacilitySubmission[]> {
+  const localFallback = sharedLatestFacilities && sharedLatestFacilities.length > 0
+    ? sharedLatestFacilities
+    : getStoredFacilities();
+
+  const isFresh =
+    localFallback.length > 0 &&
+    (hasFetchedFacilitiesThisSession || isCacheTimestampFresh(lastFacilitiesFetchedAt, FACILITY_FETCHED_AT_KEY));
+
+  if (!forceRefresh && isFresh) {
+    if (!sharedLatestFacilities || sharedLatestFacilities.length === 0) {
+      sharedLatestFacilities = localFallback;
+    }
+    return localFallback;
+  }
+
+  if (
+    !forceRefresh &&
+    lastEmptyFacilitiesServerCheckAt > 0 &&
+    Date.now() - lastEmptyFacilitiesServerCheckAt < 30000 &&
+    sharedLatestFacilities
+  ) {
     return sharedLatestFacilities;
   }
 
-  if (!forceRefresh && inFlightFacilitiesFetch) {
+  if (forceRefresh && getManualRefreshCooldownSeconds('facilities') > 0) {
+    if (inFlightFacilitiesFetch) {
+      return inFlightFacilitiesFetch;
+    }
+    return localFallback;
+  }
+
+  if (inFlightFacilitiesFetch) {
     return inFlightFacilitiesFetch;
   }
 
+  if (isFetchingFacilities) {
+    return localFallback;
+  }
+
+  if (forceRefresh) {
+    lastManualRefreshMap.facilities = Date.now();
+  }
+
+  isFetchingFacilities = true;
   inFlightFacilitiesFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
+      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(200));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastAllFacilities(localFallback);
@@ -1678,22 +2514,38 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
         }
       });
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-      hasFetchedFacilitiesThisSession = true;
-      if (list.length > 0 || localFallback.length === 0) {
-        saveStoredFacilities(list);
+
+      if (list.length > 0) {
+        hasFetchedFacilitiesThisSession = true;
+        lastFacilitiesFetchedAt = Date.now();
+        lastEmptyFacilitiesServerCheckAt = 0;
+        saveStoredFacilities(list, { updateFetchedAt: true });
         broadcastAllFacilities(list);
         return list;
       }
-      broadcastAllFacilities(localFallback);
-      return localFallback;
+
+      if (!snapshot.metadata?.fromCache) {
+        lastEmptyFacilitiesServerCheckAt = Date.now();
+      }
+      if (localFallback.length > 0) {
+        broadcastAllFacilities(localFallback);
+        return localFallback;
+      }
+      if (!sharedLatestFacilities) {
+        sharedLatestFacilities = [];
+      }
+      return sharedLatestFacilities;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllFacilities fallback to local cache:', err);
-      broadcastAllFacilities(localFallback);
+      console.warn('refreshAllFacilities error (using local fallback):', err);
+      if (localFallback.length > 0) {
+        broadcastAllFacilities(localFallback);
+      }
       return localFallback;
     } finally {
+      isFetchingFacilities = false;
       inFlightFacilitiesFetch = null;
     }
   })();
@@ -1706,7 +2558,8 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
  */
 export function subscribeUserSubmissions(
   userEmail: string,
-  callback: (submissions: FacilitySubmission[]) => void
+  callback: (submissions: FacilitySubmission[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   if (!userEmail) {
     callback([]);
@@ -1714,27 +2567,37 @@ export function subscribeUserSubmissions(
   }
 
   const normEmail = userEmail.trim().toLowerCase();
-  return subscribeAllSubmissions((all) => {
-    const filtered = all
-      .filter((item) => (item.userEmail || '').trim().toLowerCase() === normEmail)
-      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-    callback(filtered);
-  });
+  return subscribeAllSubmissions(
+    (all) => {
+      const filtered = all
+        .filter((item) => (item.userEmail || '').trim().toLowerCase() === normEmail)
+        .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      callback(filtered);
+    },
+    options
+  );
 }
 
 /**
- * Smart-cached subscription to ALL facility usage records (serves local cache immediately, fetches once per page load)
+ * Smart-cached subscription to ALL facility usage records (serves in-memory/localStorage immediately).
+ * Default does NOT auto-fetch Firestore on modal/tab mount unless `{ autoFetch: true }`.
  */
 export function subscribeAllSubmissions(
-  callback: (submissions: FacilitySubmission[]) => void
+  callback: (submissions: FacilitySubmission[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   allFacilityListeners.add(callback);
   ensureFacilitiesWindowListeners();
 
-  const initial = sharedLatestFacilities || getStoredFacilities();
+  const initial =
+    sharedLatestFacilities && sharedLatestFacilities.length > 0
+      ? sharedLatestFacilities
+      : getStoredFacilities();
   callback(initial);
 
-  refreshAllFacilities(false).catch(() => {});
+  if (options?.autoFetch && !options?.skipFetch) {
+    refreshAllFacilities(false).catch(() => {});
+  }
 
   return () => {
     allFacilityListeners.delete(callback);
@@ -1799,11 +2662,11 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
-const TEACHER_MEDIA_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for fresh view counts
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
 let hasFetchedTeacherMediaThisSession = false;
 let lastTeacherMediaFetchedAt = 0;
+let isFetchingTeacherMedia = false;
 let inFlightTeacherMediaFetch: Promise<TeacherMediaWork[]> | null = null;
 let teacherMediaWindowListenerAttached = false;
 
@@ -1825,7 +2688,7 @@ function getFilteredStoredTeacherMedia(): TeacherMediaWork[] {
       !isMediaIdBlocked(w.id) &&
       w.isDeleted !== true &&
       w.title?.trim().length > 0 &&
-      !extractMediaEmails(w).every((em) => deletedUsers.has(em) && extractMediaEmails(w).length > 0)
+      !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
   );
   cached.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
   return cached;
@@ -1835,34 +2698,113 @@ function ensureTeacherMediaWindowListeners(): void {
   if (typeof window === 'undefined' || teacherMediaWindowListenerAttached) return;
   teacherMediaWindowListenerAttached = true;
   const handleChanged = () => {
-    broadcastTeacherMedia(getFilteredStoredTeacherMedia());
+    const source = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia.filter((w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0)
+      : getFilteredStoredTeacherMedia();
+    broadcastTeacherMedia(source);
+  };
+  const handleUserDeleted = () => {
+    const deletedUsers = getDeletedUserEmails();
+    const source = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia.filter(
+          (w) =>
+            !isMediaIdBlocked(w.id) &&
+            w.isDeleted !== true &&
+            !(extractMediaEmails(w).length > 0 && extractMediaEmails(w).every((em) => deletedUsers.has(em)))
+        )
+      : getFilteredStoredTeacherMedia();
+    broadcastTeacherMedia(source);
   };
   window.addEventListener('acu_teacher_media_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleChanged);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
 }
 
-/**
- * One-time getDocs fetch for teacher_media_repository (2-minute TTL unless forceRefresh=true)
- */
-export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
-  const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
-  const isMediaFresh =
-    hasFetchedTeacherMediaThisSession &&
-    lastTeacherMediaFetchedAt > 0 &&
-    Date.now() - lastTeacherMediaFetchedAt < TEACHER_MEDIA_CACHE_TTL_MS;
+let lastEmptyTeacherMediaServerCheckAt = 0;
 
-  if (!forceRefresh && isMediaFresh && sharedLatestTeacherMedia) {
+/**
+ * Strict cache-first fetch for Teacher Media using single-document `bundles/media_index` (1 Read, 6h cache).
+ * Falls back once to legacy collection query ONLY if bundle document does not exist yet.
+ * Never locks empty caches or overwrites positive state on HTTP 429/errors.
+ */
+export async function refreshTeacherMedia(forceRefresh = false): Promise<TeacherMediaWork[]> {
+  const localFallback = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+    ? sharedLatestTeacherMedia
+    : getFilteredStoredTeacherMedia();
+
+  const isMediaFresh =
+    localFallback.length > 0 &&
+    (hasFetchedTeacherMediaThisSession || isCacheTimestampFresh(lastTeacherMediaFetchedAt, TEACHER_MEDIA_FETCHED_AT_KEY));
+
+  if (!forceRefresh && isMediaFresh) {
+    if (!sharedLatestTeacherMedia || sharedLatestTeacherMedia.length === 0) {
+      sharedLatestTeacherMedia = localFallback;
+    }
+    return localFallback;
+  }
+
+  if (
+    !forceRefresh &&
+    lastEmptyTeacherMediaServerCheckAt > 0 &&
+    Date.now() - lastEmptyTeacherMediaServerCheckAt < 30000 &&
+    sharedLatestTeacherMedia
+  ) {
     return sharedLatestTeacherMedia;
   }
 
-  if (!forceRefresh && inFlightTeacherMediaFetch) {
+  if (forceRefresh && getManualRefreshCooldownSeconds('teacherMedia') > 0) {
+    if (inFlightTeacherMediaFetch) {
+      return inFlightTeacherMediaFetch;
+    }
+    return localFallback;
+  }
+
+  if (inFlightTeacherMediaFetch) {
     return inFlightTeacherMediaFetch;
   }
 
+  if (isFetchingTeacherMedia) {
+    return localFallback;
+  }
+
+  if (forceRefresh) {
+    lastManualRefreshMap.teacherMedia = Date.now();
+  }
+
+  isFetchingTeacherMedia = true;
   inFlightTeacherMediaFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
+
+      // 1) Primary fast path: read single bundle document (`bundles/media_index` = 1 read)
+      const bundleRes = await readBundleIndexOnce('media_index');
+      if (bundleRes.exists) {
+        const fromBundle = bundleRes.items
+          .map(fromMediaBundleEntry)
+          .filter((w) => !isMediaIdBlocked(w.id) && w.isDeleted !== true && w.title?.trim().length > 0);
+        fromBundle.sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+
+        if (fromBundle.length > 0) {
+          hasFetchedTeacherMediaThisSession = true;
+          lastTeacherMediaFetchedAt = Date.now();
+          lastEmptyTeacherMediaServerCheckAt = 0;
+          saveStoredTeacherMedia(fromBundle, { updateFetchedAt: true });
+          broadcastTeacherMedia(fromBundle);
+          return fromBundle;
+        }
+
+        if (localFallback.length > 0) {
+          broadcastTeacherMedia(localFallback);
+          return localFallback;
+        }
+        lastEmptyTeacherMediaServerCheckAt = Date.now();
+        sharedLatestTeacherMedia = [];
+        return [];
+      }
+
+      // 2) One-time fallback ONLY when bundles/media_index has not been built yet
+      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(100));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
         broadcastTeacherMedia(localFallback);
@@ -1880,23 +2822,38 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
       );
 
       realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-      hasFetchedTeacherMediaThisSession = true;
-      lastTeacherMediaFetchedAt = Date.now();
-      if (realWorks.length > 0 || localFallback.length === 0) {
-        saveStoredTeacherMedia(realWorks);
+
+      if (realWorks.length > 0) {
+        hasFetchedTeacherMediaThisSession = true;
+        lastTeacherMediaFetchedAt = Date.now();
+        lastEmptyTeacherMediaServerCheckAt = 0;
+        saveStoredTeacherMedia(realWorks, { updateFetchedAt: true });
         broadcastTeacherMedia(realWorks);
         return realWorks;
       }
-      broadcastTeacherMedia(localFallback);
-      return localFallback;
+
+      if (!snapshot.metadata?.fromCache) {
+        lastEmptyTeacherMediaServerCheckAt = Date.now();
+      }
+      if (localFallback.length > 0) {
+        broadcastTeacherMedia(localFallback);
+        return localFallback;
+      }
+      if (!sharedLatestTeacherMedia) {
+        sharedLatestTeacherMedia = [];
+      }
+      return sharedLatestTeacherMedia;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshTeacherMedia fallback:', err);
-      broadcastTeacherMedia(localFallback);
+      console.warn('refreshTeacherMedia error (using fallback cache):', err);
+      if (localFallback.length > 0) {
+        broadcastTeacherMedia(localFallback);
+      }
       return localFallback;
     } finally {
+      isFetchingTeacherMedia = false;
       inFlightTeacherMediaFetch = null;
     }
   })();
@@ -1905,18 +2862,24 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
 }
 
 /**
- * Smart-cached subscription to Teacher Media Repository (serves localStorage immediately, fetches once per page load).
+ * Smart-cached subscription to Teacher Media Repository (serves in-memory/localStorage immediately).
+ * Default does NOT auto-fetch Firestore on modal/tab mount unless `{ autoFetch: true }`.
  */
 export function subscribeTeacherMedia(
-  callback: (works: TeacherMediaWork[]) => void
+  callback: (works: TeacherMediaWork[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   teacherMediaListeners.add(callback);
   ensureTeacherMediaWindowListeners();
 
-  const initial = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
+  const initial = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+    ? sharedLatestTeacherMedia
+    : getFilteredStoredTeacherMedia();
   callback(initial);
 
-  refreshTeacherMedia(false).catch(() => {});
+  if (options?.autoFetch && !options?.skipFetch) {
+    refreshTeacherMedia(false).catch(() => {});
+  }
 
   return () => {
     teacherMediaListeners.delete(callback);
@@ -1944,10 +2907,60 @@ export async function updateTeacherMedia(
       return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขสื่อของผู้อื่น (สิทธิ์เฉพาะผู้ส่ง หรือ Admin)' };
     }
 
-    await updateDoc(docRef, updates);
-    saveStoredTeacherMedia(
-      getStoredTeacherMedia().map((m) => (m.id === id ? { ...m, ...updates } : m))
+    const nextOnlineUrl = updates.onlineUrl !== undefined ? updates.onlineUrl : currentData.onlineUrl || '';
+    const hasThumbOrLinkUpdate = updates.thumbnailUrl !== undefined || updates.onlineUrl !== undefined;
+    const sanitizedThumb = hasThumbOrLinkUpdate
+      ? sanitizeMediaThumbnailForFirestore(updates.thumbnailUrl ?? currentData.thumbnailUrl, nextOnlineUrl)
+      : sanitizeMediaThumbnailForFirestore(currentData.thumbnailUrl, nextOnlineUrl);
+
+    const cleanUpdates: Partial<TeacherMediaWork> = {
+      ...updates,
+      ...(hasThumbOrLinkUpdate ? { thumbnailUrl: sanitizedThumb } : {}),
+    };
+
+    await updateDoc(docRef, cleanUpdates);
+    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    const updatedMediaItem: TeacherMediaWork = { ...currentData, ...cleanUpdates, id };
+    const nextList = baseList.map((m) => (m.id === id ? { ...m, ...cleanUpdates } : m));
+    saveStoredTeacherMedia(nextList);
+
+    await upsertBundleEntry(
+      'media_index',
+      toMediaBundleEntry(updatedMediaItem),
+      nextList.map(toMediaBundleEntry)
     );
+
+    if (cleanUpdates.mediaType && cleanUpdates.mediaType !== currentData.mediaType) {
+      if (currentData.mediaType) {
+        incrementAdminOverviewCounters({ mediaType: currentData.mediaType, mediaTypeDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ mediaType: cleanUpdates.mediaType, mediaTypeDelta: 1 }).catch(() => {});
+    }
+    if (cleanUpdates.gradeLevel && cleanUpdates.gradeLevel !== currentData.gradeLevel) {
+      if (currentData.gradeLevel) {
+        incrementAdminOverviewCounters({ gradeLevel: currentData.gradeLevel, gradeLevelDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ gradeLevel: cleanUpdates.gradeLevel, gradeLevelDelta: 1 }).catch(() => {});
+    }
+    if (cleanUpdates.subjectGroup && cleanUpdates.subjectGroup !== currentData.subjectGroup) {
+      if (currentData.subjectGroup) {
+        incrementAdminOverviewCounters({ subjectGroup: currentData.subjectGroup, subjectGroupDelta: -1 }).catch(() => {});
+      }
+      incrementAdminOverviewCounters({ subjectGroup: cleanUpdates.subjectGroup, subjectGroupDelta: 1 }).catch(() => {});
+    }
+    if (cleanUpdates.productionType && cleanUpdates.productionType !== currentData.productionType) {
+      incrementAdminOverviewCounters({
+        selfProducedCount:
+          (cleanUpdates.productionType === 'ครูผลิตสื่อเอง' ? 1 : 0) -
+          (currentData.productionType === 'ครูผลิตสื่อเอง' ? 1 : 0),
+        externalSourceCount:
+          (cleanUpdates.productionType !== 'ครูผลิตสื่อเอง' ? 1 : 0) -
+          (currentData.productionType !== 'ครูผลิตสื่อเอง' ? 1 : 0),
+      }).catch(() => {});
+    }
+
     notifyTeacherMediaChanged();
     return { success: true };
   } catch (err: any) {
@@ -1968,7 +2981,9 @@ export async function deleteTeacherMedia(
   try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     const snap = await getDoc(docRef);
-    const cachedList = getStoredTeacherMedia();
+    const cachedList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
     const cachedItem = cachedList.find((m) => m.id === id);
 
     if (!snap.exists()) {
@@ -1980,7 +2995,10 @@ export async function deleteTeacherMedia(
         addDeletedMediaIds([id, strippedId]);
         saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
         if (id.startsWith('work_')) {
-          saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
+          const baseInnos = sharedLatestInnovations && sharedLatestInnovations.length > 0
+            ? sharedLatestInnovations
+            : getStoredInnovations();
+          saveStoredInnovations(baseInnos.filter((inv) => inv.id !== strippedId));
           try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
           try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
         }
@@ -2009,14 +3027,59 @@ export async function deleteTeacherMedia(
     if (id.startsWith('work_')) {
       try { await deleteDoc(doc(db, INNOVATIONS_COLLECTION, strippedId)); } catch {}
       try { await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${strippedId}`)); } catch {}
-      saveStoredInnovations(getStoredInnovations().filter((inv) => inv.id !== strippedId));
+      const baseInnos = sharedLatestInnovations && sharedLatestInnovations.length > 0
+        ? sharedLatestInnovations
+        : getStoredInnovations();
+      saveStoredInnovations(baseInnos.filter((inv) => inv.id !== strippedId));
     }
 
-    saveStoredTeacherMedia(cachedList.filter((m) => m.id !== id));
+    const preDeleteUnified = ownerEmail
+      ? getUnifiedTeacherMediaRecords(
+          { uid: currentData.uid, email: ownerEmail, teacherName: currentData.teacherName },
+          sharedLatestInnovations || getStoredInnovations(),
+          cachedList
+        )
+      : { submittedCount: 0 };
+
+    const nextMediaList = cachedList.filter((m) => m.id !== id);
+    saveStoredTeacherMedia(nextMediaList);
+    const nextInnovList = (sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations
+      : getStoredInnovations()
+    ).filter((inv) => inv.id !== strippedId);
+
+    await Promise.allSettled([
+      removeBundleEntries('media_index', [id], nextMediaList.map(toMediaBundleEntry)),
+      ...(id.startsWith('work_')
+        ? [removeBundleEntries('innovations_index', [strippedId], nextInnovList.map(toInnovationBundleEntry))]
+        : []),
+    ]);
+
     if (ownerEmail) {
       await syncUserProfileSlotOnDelete(ownerEmail, currentData.itemNumber);
       await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
     }
+
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(currentData.createdAt);
+    const isSelfProduced = (currentData.productionType || 'ครูผลิตสื่อเอง') === 'ครูผลิตสื่อเอง';
+    incrementAdminOverviewCounters({
+      totalTeachersWithSubmissions: preDeleteUnified.submittedCount === 1 ? -1 : 0,
+      totalMediaCount: -1,
+      totalInnovationsCount: id.startsWith('work_') ? -1 : 0,
+      totalUnifiedSubmissions: -1,
+      teachersCompleted5Count: preDeleteUnified.submittedCount === 5 ? -1 : 0,
+      mediaType: currentData.mediaType,
+      mediaTypeDelta: -1,
+      gradeLevel: currentData.gradeLevel,
+      gradeLevelDelta: -1,
+      subjectGroup: currentData.subjectGroup,
+      subjectGroupDelta: -1,
+      selfProducedCount: isSelfProduced ? -1 : 0,
+      externalSourceCount: isSelfProduced ? 0 : -1,
+      yearKey,
+      monthKey,
+      yearMediaDelta: -1,
+    }).catch(() => {});
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -2110,13 +3173,22 @@ export async function clearAdminOwnMedia(
       { merge: true }
     );
 
-    // 5. Clean only weerapong1625@acu.ac.th items from localStorage caches
-    saveStoredInnovations(
-      getStoredInnovations().filter((item) => (item.userEmail || '').trim().toLowerCase() !== targetAdmin)
-    );
-    saveStoredTeacherMedia(
-      getStoredTeacherMedia().filter((m) => (m.submittedByEmail || '').trim().toLowerCase() !== targetAdmin)
-    );
+    // 5. Clean only weerapong1625@acu.ac.th items from in-memory, localStorage caches & bundles/*
+    const baseInnovs = sharedLatestInnovations && sharedLatestInnovations.length > 0
+      ? sharedLatestInnovations
+      : getStoredInnovations();
+    const nextInnovs = baseInnovs.filter((item) => (item.userEmail || '').trim().toLowerCase() !== targetAdmin);
+    saveStoredInnovations(nextInnovs);
+    const baseMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    const nextMedia = baseMedia.filter((m) => (m.submittedByEmail || '').trim().toLowerCase() !== targetAdmin);
+    saveStoredTeacherMedia(nextMedia);
+
+    await Promise.allSettled([
+      writeBundleIndex('innovations_index', nextInnovs.map(toInnovationBundleEntry)),
+      writeBundleIndex('media_index', nextMedia.map(toMediaBundleEntry)),
+    ]);
 
     try {
       const cacheKey = `acu_user_full_profile_${targetAdmin}`;
@@ -2178,6 +3250,9 @@ export async function addTeacherMediaDirectly(data: {
     }
   }
 
+  const cleanOnlineUrl = data.onlineUrl?.trim() || '';
+  const safeThumbUrl = sanitizeMediaThumbnailForFirestore(data.thumbnailUrl, cleanOnlineUrl);
+
   const payload: TeacherMediaWork = {
     id,
     uid: resolvedUid,
@@ -2191,12 +3266,12 @@ export async function addTeacherMediaDirectly(data: {
     subjectGroup: data.subjectGroup,
     gradeLevel: data.gradeLevel || data.subjectGroup,
     subjectName: data.subjectName?.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-    thumbnailUrl: data.thumbnailUrl?.trim() || '/ACU N.png',
+    thumbnailUrl: safeThumbUrl,
     description: data.description.trim(),
     mediaType: data.mediaType,
     productionType: 'ครูผลิตสื่อเอง',
     itemNumber: nextSlot,
-    onlineUrl: data.onlineUrl?.trim() || '',
+    onlineUrl: cleanOnlineUrl,
     ratingAvg: 5.0,
     ratingCount: 1,
     views: 1,
@@ -2206,16 +3281,45 @@ export async function addTeacherMediaDirectly(data: {
     createdAt: nowIso,
   };
 
-  // Save immediately to localStorage cache
+  // Save immediately to in-memory & lightweight localStorage cache
+  let nextMediaList: TeacherMediaWork[] = [payload];
   try {
-    const currentMedia = getStoredTeacherMedia();
-    saveStoredTeacherMedia([payload, ...currentMedia.filter((m) => m.id !== id)]);
+    const currentMedia = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    nextMediaList = [payload, ...currentMedia.filter((m) => m.id !== id)];
+    saveStoredTeacherMedia(nextMediaList);
   } catch {}
 
   try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     await setDoc(docRef, payload);
+    await upsertBundleEntry(
+      'media_index',
+      toMediaBundleEntry(payload),
+      nextMediaList.map(toMediaBundleEntry)
+    );
     await adjustUserSubmissionCount(normalizedEmail, 1, resolvedUid);
+
+    const prevTeacherCount = existingUnified.submittedCount;
+    const { yearKey, monthKey } = getSubmissionBangkokYearMonth(nowIso);
+    incrementAdminOverviewCounters({
+      totalTeachersWithSubmissions: prevTeacherCount === 0 ? 1 : 0,
+      totalMediaCount: 1,
+      totalUnifiedSubmissions: 1,
+      teachersCompleted5Count: prevTeacherCount < 5 && prevTeacherCount + 1 >= 5 ? 1 : 0,
+      mediaType: data.mediaType,
+      mediaTypeDelta: 1,
+      gradeLevel: payload.gradeLevel,
+      gradeLevelDelta: 1,
+      subjectGroup: data.subjectGroup,
+      subjectGroupDelta: 1,
+      selfProducedCount: 1,
+      yearKey,
+      monthKey,
+      yearMediaDelta: 1,
+    }).catch(() => {});
+
     notifyTeacherMediaChanged();
     return { success: true, id };
   } catch (err: any) {
@@ -2356,15 +3460,24 @@ export function getStoredSharedIdeas(): SharedIdeaItem[] {
       const raw = localStorage.getItem(SHARED_IDEAS_STORAGE_KEY);
       if (raw) {
         const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
+        if (Array.isArray(parsed) && parsed.length > 0) {
           parsed.forEach((item) => {
             if (item && item.id) {
               mergedMap.set(item.id, sanitizeSharedIdeaRecord(item as SharedIdeaItem));
             }
           });
+        } else {
+          try {
+            localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
+          } catch {}
         }
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Failed to read shared ideas cache (clearing corrupted entry):', err);
+      try {
+        localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
+      } catch {}
+    }
   }
 
   const deletedUsers = getDeletedUserEmails();
@@ -2375,17 +3488,38 @@ export function getStoredSharedIdeas(): SharedIdeaItem[] {
   return list;
 }
 
-export function saveStoredSharedIdeas(list: SharedIdeaItem[]): void {
+export function saveStoredSharedIdeas(
+  list: SharedIdeaItem[],
+  options?: { updateFetchedAt?: boolean }
+): void {
+  const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
+  clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+  const deletedUsers = getDeletedUserEmails();
+  sharedLatestIdeas = clean.filter(
+    (item) => !deletedUsers.has((item.creatorEmail || '').trim().toLowerCase())
+  );
+
   if (typeof window === 'undefined') return;
-  try {
-    const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
-    clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-    localStorage.setItem(SHARED_IDEAS_STORAGE_KEY, JSON.stringify(clean));
-  } catch {}
+  if (clean.length === 0) {
+    try {
+      localStorage.removeItem(SHARED_IDEAS_STORAGE_KEY);
+      localStorage.removeItem(SHARED_IDEAS_FETCHED_AT_KEY);
+    } catch {}
+    return;
+  }
+  const lightweight = clean.map(sanitizeSharedIdeaForStorage);
+  writeLightweightArrayToStorage(
+    SHARED_IDEAS_STORAGE_KEY,
+    SHARED_IDEAS_FETCHED_AT_KEY,
+    lightweight,
+    Boolean(options?.updateFetchedAt)
+  );
 }
 
 export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
-  const current = getStoredSharedIdeas();
+  const current = sharedLatestIdeas && sharedLatestIdeas.length > 0
+    ? sharedLatestIdeas
+    : getStoredSharedIdeas();
   const next = [sanitizeSharedIdeaRecord(idea), ...current.filter((i) => i.id !== idea.id)];
   saveStoredSharedIdeas(next);
   notifySharedIdeasChanged();
@@ -2394,6 +3528,9 @@ export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
 const sharedIdeasListeners = new Set<(ideas: SharedIdeaItem[]) => void>();
 let sharedLatestIdeas: SharedIdeaItem[] | null = null;
 let hasFetchedSharedIdeasThisSession = false;
+let lastSharedIdeasFetchedAt = 0;
+let lastEmptySharedIdeasServerCheckAt = 0;
+let isFetchingSharedIdeas = false;
 let inFlightSharedIdeasFetch: Promise<SharedIdeaItem[]> | null = null;
 let sharedIdeasWindowListenerAttached = false;
 
@@ -2413,30 +3550,109 @@ function ensureSharedIdeasWindowListeners(): void {
   sharedIdeasWindowListenerAttached = true;
 
   const handleChanged = () => {
-    broadcastSharedIdeas(getStoredSharedIdeas());
+    const source = sharedLatestIdeas && sharedLatestIdeas.length > 0
+      ? sharedLatestIdeas
+      : getStoredSharedIdeas();
+    broadcastSharedIdeas(source);
+  };
+  const handleUserDeleted = () => {
+    const deletedUsers = getDeletedUserEmails();
+    const source = sharedLatestIdeas && sharedLatestIdeas.length > 0
+      ? sharedLatestIdeas.filter((item) => !deletedUsers.has((item.creatorEmail || '').trim().toLowerCase()))
+      : getStoredSharedIdeas();
+    broadcastSharedIdeas(source);
   };
   window.addEventListener('acu_shared_ideas_changed', handleChanged);
-  window.addEventListener('acu_user_deleted', handleChanged);
+  window.addEventListener('acu_user_deleted', handleUserDeleted);
 }
 
 /**
- * One-time getDocs fetch for shared_ideas (deduplicated per session unless forceRefresh=true)
+ * Strict cache-first fetch for Shared Ideas using single-document `bundles/ideas_index` (1 Read, 6h cache).
+ * Falls back once to legacy collection query ONLY if bundle document does not exist yet.
  */
-export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIdeaItem[]> {
-  const localFallback = sharedLatestIdeas || getStoredSharedIdeas();
+export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedIdeaItem[]> {
+  const localFallback = sharedLatestIdeas && sharedLatestIdeas.length > 0
+    ? sharedLatestIdeas
+    : getStoredSharedIdeas();
 
-  if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
+  const hasCachedFirestoreIdeas = localFallback.length > DEFAULT_SEED_IDEAS.length;
+  const isFresh =
+    hasCachedFirestoreIdeas &&
+    (hasFetchedSharedIdeasThisSession || isCacheTimestampFresh(lastSharedIdeasFetchedAt, SHARED_IDEAS_FETCHED_AT_KEY));
+
+  if (!forceRefresh && isFresh) {
+    if (!sharedLatestIdeas || sharedLatestIdeas.length === 0) {
+      sharedLatestIdeas = localFallback;
+    }
+    return localFallback;
+  }
+
+  if (
+    !forceRefresh &&
+    lastEmptySharedIdeasServerCheckAt > 0 &&
+    Date.now() - lastEmptySharedIdeasServerCheckAt < 30000 &&
+    sharedLatestIdeas
+  ) {
     return sharedLatestIdeas;
   }
 
-  if (!forceRefresh && inFlightSharedIdeasFetch) {
+  if (forceRefresh && getManualRefreshCooldownSeconds('sharedIdeas') > 0) {
+    if (inFlightSharedIdeasFetch) {
+      return inFlightSharedIdeasFetch;
+    }
+    return localFallback;
+  }
+
+  if (inFlightSharedIdeasFetch) {
     return inFlightSharedIdeasFetch;
   }
 
+  if (isFetchingSharedIdeas) {
+    return localFallback;
+  }
+
+  if (forceRefresh) {
+    lastManualRefreshMap.sharedIdeas = Date.now();
+  }
+
+  isFetchingSharedIdeas = true;
   inFlightSharedIdeasFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
+      const deletedUsers = getDeletedUserEmails();
+
+      // 1) Primary fast path: read single bundle document (`bundles/ideas_index` = 1 read)
+      const bundleRes = await readBundleIndexOnce('ideas_index');
+      if (bundleRes.exists) {
+        const mergedMap = new Map<string, SharedIdeaItem>();
+        DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
+        bundleRes.items.forEach((entry) => {
+          const hydrated = fromIdeaBundleEntry(entry);
+          if (hydrated.id && !deletedUsers.has((hydrated.creatorEmail || '').trim().toLowerCase())) {
+            mergedMap.set(hydrated.id, hydrated);
+          }
+        });
+        const finalFromBundle = Array.from(mergedMap.values()).sort(
+          (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+        );
+        if (bundleRes.items.length > 0) {
+          hasFetchedSharedIdeasThisSession = true;
+          lastSharedIdeasFetchedAt = Date.now();
+          lastEmptySharedIdeasServerCheckAt = 0;
+          saveStoredSharedIdeas(finalFromBundle, { updateFetchedAt: true });
+          broadcastSharedIdeas(finalFromBundle);
+          return finalFromBundle;
+        }
+        if (localFallback.length > DEFAULT_SEED_IDEAS.length) {
+          broadcastSharedIdeas(localFallback);
+          return localFallback;
+        }
+        broadcastSharedIdeas(finalFromBundle);
+        return finalFromBundle;
+      }
+
+      // 2) One-time fallback ONLY when bundles/ideas_index has not been built yet
+      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(100));
       const snapshot = await getDocs(colQuery);
       if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > DEFAULT_SEED_IDEAS.length) {
         broadcastSharedIdeas(localFallback);
@@ -2447,7 +3663,6 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
         liveList.push(sanitizeSharedIdeaRecord({ ...(docSnap.data() as SharedIdeaItem), id: docSnap.id }));
       });
 
-      const deletedUsers = getDeletedUserEmails();
       const mergedMap = new Map<string, SharedIdeaItem>();
       DEFAULT_SEED_IDEAS.forEach((i) => mergedMap.set(i.id, i));
       liveList.forEach((i) => {
@@ -2458,22 +3673,36 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
 
       const finalIdeas = Array.from(mergedMap.values());
       finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-      hasFetchedSharedIdeasThisSession = true;
-      if (liveList.length > 0 || localFallback.length <= DEFAULT_SEED_IDEAS.length) {
-        saveStoredSharedIdeas(finalIdeas);
+
+      if (liveList.length > 0) {
+        hasFetchedSharedIdeasThisSession = true;
+        lastSharedIdeasFetchedAt = Date.now();
+        lastEmptySharedIdeasServerCheckAt = 0;
+        saveStoredSharedIdeas(finalIdeas, { updateFetchedAt: true });
         broadcastSharedIdeas(finalIdeas);
         return finalIdeas;
       }
-      broadcastSharedIdeas(localFallback);
-      return localFallback;
+
+      if (!snapshot.metadata?.fromCache) {
+        lastEmptySharedIdeasServerCheckAt = Date.now();
+      }
+      if (localFallback.length > DEFAULT_SEED_IDEAS.length) {
+        broadcastSharedIdeas(localFallback);
+        return localFallback;
+      }
+      broadcastSharedIdeas(finalIdeas);
+      return finalIdeas;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshSharedIdeas fallback to cache/seed:', err);
-      broadcastSharedIdeas(localFallback);
+      console.warn('refreshSharedIdeas error (using fallback cache/seed):', err);
+      if (localFallback.length > 0) {
+        broadcastSharedIdeas(localFallback);
+      }
       return localFallback;
     } finally {
+      isFetchingSharedIdeas = false;
       inFlightSharedIdeasFetch = null;
     }
   })();
@@ -2482,22 +3711,56 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
 }
 
 /**
- * Smart-cached subscription to Shared Ideas (serves local cache immediately, fetches once per page load)
+ * Smart-cached subscription to Shared Ideas (serves in-memory/localStorage immediately).
+ * Default does NOT auto-fetch Firestore on modal/tab mount unless `{ autoFetch: true }`.
  */
 export function subscribeSharedIdeas(
-  callback: (ideas: SharedIdeaItem[]) => void
+  callback: (ideas: SharedIdeaItem[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   sharedIdeasListeners.add(callback);
   ensureSharedIdeasWindowListeners();
 
-  const initial = sharedLatestIdeas || getStoredSharedIdeas();
+  const initial = sharedLatestIdeas && sharedLatestIdeas.length > 0
+    ? sharedLatestIdeas
+    : getStoredSharedIdeas();
   callback(initial);
 
-  refreshSharedIdeas(false).catch(() => {});
+  if (options?.autoFetch && !options?.skipFetch) {
+    refreshSharedIdeas(false).catch(() => {});
+  }
 
   return () => {
     sharedIdeasListeners.delete(callback);
   };
+}
+
+let inFlightCorePreload: Promise<void> | null = null;
+let hasCompletedCorePreload = false;
+
+/**
+ * Startup-only Cache-First preloader called once from App.tsx after auth settles.
+ * Returns immediately with 0 Firestore reads whenever 12-hour caches are already fresh.
+ */
+export async function preloadCoreCollectionsOnce(): Promise<void> {
+  if (hasCompletedCorePreload) return;
+  if (inFlightCorePreload) return inFlightCorePreload;
+
+  inFlightCorePreload = (async () => {
+    try {
+      await Promise.allSettled([
+        refreshAllInnovations(false),
+        refreshTeacherMedia(false),
+        refreshAllFacilities(false),
+        refreshSharedIdeas(false),
+      ]);
+      hasCompletedCorePreload = true;
+    } finally {
+      inFlightCorePreload = null;
+    }
+  })();
+
+  return inFlightCorePreload;
 }
 
 /**
@@ -2517,6 +3780,8 @@ export async function saveSharedIdea(data: {
   try {
     const id = `idea_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
     const nowIso = new Date().toISOString();
+    const cleanUrl = data.url?.trim() || '';
+    const safeImage = sanitizeMediaThumbnailForFirestore(data.imageUrl, cleanUrl);
 
     const payload: SharedIdeaItem = {
       id,
@@ -2524,8 +3789,8 @@ export async function saveSharedIdea(data: {
       description: data.description.trim(),
       category: data.category,
       categoryLabel: data.categoryLabel,
-      url: data.url?.trim() || '',
-      ...(data.imageUrl?.trim() ? { imageUrl: data.imageUrl.trim() } : {}),
+      url: cleanUrl,
+      ...(safeImage ? { imageUrl: safeImage } : {}),
       tags: data.tags && data.tags.length > 0 ? data.tags : ['ไอเดียใหม่', 'แบ่งปันโดยครู ACU'],
       creatorEmail: data.creatorEmail.trim(),
       creatorName: data.creatorName.trim() || data.creatorEmail,
@@ -2540,6 +3805,14 @@ export async function saveSharedIdea(data: {
     addSharedIdeaToLocalCache(payload);
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, id);
     await setDoc(docRef, payload);
+
+    const currentIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0 ? sharedLatestIdeas : getStoredSharedIdeas();
+    await upsertBundleEntry(
+      'ideas_index',
+      toIdeaBundleEntry(payload),
+      currentIdeas.map(toIdeaBundleEntry)
+    );
+
     return { success: true, id };
   } catch (err: any) {
     console.error('Error saving shared idea:', err);
@@ -2576,12 +3849,20 @@ export async function rateSharedIdea(
         ratingCount: count,
         userRatings,
       });
-      saveStoredSharedIdeas(
-        getStoredSharedIdeas().map((item) =>
-          item.id === ideaId ? { ...item, ratingAvg: avg, ratingCount: count, userRatings } : item
-        )
-      );
+      const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
+        ? sharedLatestIdeas
+        : getStoredSharedIdeas();
+      const updatedItem: SharedIdeaItem = { ...data, id: ideaId, ratingAvg: avg, ratingCount: count, userRatings };
+      const nextIdeas = baseIdeas.map((item) => (item.id === ideaId ? updatedItem : item));
+      saveStoredSharedIdeas(nextIdeas);
       notifySharedIdeasChanged();
+
+      await upsertBundleEntry(
+        'ideas_index',
+        toIdeaBundleEntry(updatedItem),
+        nextIdeas.map(toIdeaBundleEntry)
+      );
+
       return true;
     } else {
       // Seed item being rated for the first time
@@ -2612,6 +3893,14 @@ export async function rateSharedIdea(
       };
       await setDoc(docRef, fullPayload);
       addSharedIdeaToLocalCache(fullPayload);
+
+      const nextIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0 ? sharedLatestIdeas : getStoredSharedIdeas();
+      await upsertBundleEntry(
+        'ideas_index',
+        toIdeaBundleEntry(fullPayload),
+        nextIdeas.map(toIdeaBundleEntry)
+      );
+
       return true;
     }
   } catch (err) {
@@ -2631,11 +3920,16 @@ export async function deleteSharedIdea(
   try {
     const docRef = doc(db, SHARED_IDEAS_COLLECTION, ideaId);
     const snap = await getDoc(docRef);
+    const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
+      ? sharedLatestIdeas
+      : getStoredSharedIdeas();
     if (!snap.exists()) {
       // Might be a local seed, check if admin
       if (currentUserEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase()) {
-        saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+        const nextIdeas = baseIdeas.filter((i) => i.id !== ideaId);
+        saveStoredSharedIdeas(nextIdeas);
         notifySharedIdeasChanged();
+        await removeBundleEntries('ideas_index', [ideaId], nextIdeas.map(toIdeaBundleEntry));
         return { success: true };
       }
       return { success: false, error: 'ไม่พบรายการไอเดียที่ต้องการลบ' };
@@ -2647,8 +3941,10 @@ export async function deleteSharedIdea(
     }
 
     await deleteDoc(docRef);
-    saveStoredSharedIdeas(getStoredSharedIdeas().filter((i) => i.id !== ideaId));
+    const nextIdeas = baseIdeas.filter((i) => i.id !== ideaId);
+    saveStoredSharedIdeas(nextIdeas);
     notifySharedIdeasChanged();
+    await removeBundleEntries('ideas_index', [ideaId], nextIdeas.map(toIdeaBundleEntry));
     return { success: true };
   } catch (err: any) {
     console.error('Error deleting shared idea:', err);
@@ -2677,11 +3973,32 @@ export async function updateSharedIdea(
       return { success: false, error: 'คุณไม่มีสิทธิ์แก้ไขไอเดียของผู้อื่น (เฉพาะผู้สร้างไอเดีย หรือ Admin)' };
     }
 
-    await updateDoc(docRef, updates);
-    saveStoredSharedIdeas(
-      getStoredSharedIdeas().map((i) => (i.id === ideaId ? { ...i, ...updates } : i))
-    );
+    const nextUrl = updates.url !== undefined ? updates.url : currentData.url || '';
+    const hasImgUpdate = updates.imageUrl !== undefined || updates.url !== undefined;
+    const safeImg = hasImgUpdate
+      ? sanitizeMediaThumbnailForFirestore(updates.imageUrl ?? currentData.imageUrl, nextUrl)
+      : sanitizeMediaThumbnailForFirestore(currentData.imageUrl, nextUrl);
+
+    const cleanUpdates: Partial<SharedIdeaItem> = {
+      ...updates,
+      ...(hasImgUpdate ? { imageUrl: safeImg } : {}),
+    };
+
+    await updateDoc(docRef, cleanUpdates);
+    const baseIdeas = sharedLatestIdeas && sharedLatestIdeas.length > 0
+      ? sharedLatestIdeas
+      : getStoredSharedIdeas();
+    const updatedIdea: SharedIdeaItem = { ...currentData, ...cleanUpdates, id: ideaId };
+    const nextIdeas = baseIdeas.map((i) => (i.id === ideaId ? { ...i, ...cleanUpdates } : i));
+    saveStoredSharedIdeas(nextIdeas);
     notifySharedIdeasChanged();
+
+    await upsertBundleEntry(
+      'ideas_index',
+      toIdeaBundleEntry(updatedIdea),
+      nextIdeas.map(toIdeaBundleEntry)
+    );
+
     return { success: true };
   } catch (err: any) {
     console.error('Error updating shared idea:', err);
@@ -2690,30 +4007,42 @@ export async function updateSharedIdea(
 }
 
 /**
- * Increment view count for a teacher's media item immediately in local cache + Firestore increment(1)
+ * Increment view count for a teacher's media item immediately in local cache + Firestore increment(1) + bundle sync
  */
 export async function incrementTeacherMediaViews(mediaId: string): Promise<number> {
   if (!mediaId) return 0;
   let updatedViews = 1;
+  let updatedItem: TeacherMediaWork | null = null;
+  let nextMediaList: TeacherMediaWork[] = [];
 
-  // 1. Update local cache & active subscribers immediately (0ms UI reflection without reload)
+  // 1. Update in-memory cache & active subscribers immediately (0ms UI reflection without reload)
   try {
-    const baseList = sharedLatestTeacherMedia || getStoredTeacherMedia();
-    const nextList = baseList.map((m) => {
+    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    nextMediaList = baseList.map((m) => {
       if (m.id === mediaId) {
         updatedViews = (m.views || 0) + 1;
-        return { ...m, views: updatedViews };
+        updatedItem = { ...m, views: updatedViews };
+        return updatedItem;
       }
       return m;
     });
-    saveStoredTeacherMedia(nextList);
-    broadcastTeacherMedia(nextList);
+    saveStoredTeacherMedia(nextMediaList);
+    broadcastTeacherMedia(nextMediaList);
   } catch {}
 
-  // 2. Atomically increment in Firestore
+  // 2. Atomically increment in Firestore + keep bundles/media_index synced when in memory
   try {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaId);
     await setDoc(docRef, { views: increment(1) }, { merge: true });
+    if (updatedItem && nextMediaList.length > 0) {
+      upsertBundleEntry(
+        'media_index',
+        toMediaBundleEntry(updatedItem),
+        nextMediaList.map(toMediaBundleEntry)
+      ).catch(() => {});
+    }
   } catch (err) {
     if (isQuotaExceededError(err)) {
       notifyQuotaExceeded();
@@ -2735,6 +4064,10 @@ export async function rateTeacherMedia(
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, mediaId);
     const snap = await getDoc(docRef);
 
+    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+
     if (snap.exists()) {
       const data = snap.data() as TeacherMediaWork;
       const userRatings = data.userRatings || {};
@@ -2751,14 +4084,24 @@ export async function rateTeacherMedia(
         userRatings,
         views: increment(1),
       });
-      saveStoredTeacherMedia(
-        getStoredTeacherMedia().map((m) =>
-          m.id === mediaId
-            ? { ...m, ratingAvg: avg, ratingCount: count, userRatings, views: (m.views || 0) + 1 }
-            : m
-        )
-      );
+      const updatedWork: TeacherMediaWork = {
+        ...data,
+        id: mediaId,
+        ratingAvg: avg,
+        ratingCount: count,
+        userRatings,
+        views: (data.views || 0) + 1,
+      };
+      const nextList = baseList.map((m) => (m.id === mediaId ? updatedWork : m));
+      saveStoredTeacherMedia(nextList);
       notifyTeacherMediaChanged();
+
+      await upsertBundleEntry(
+        'media_index',
+        toMediaBundleEntry(updatedWork),
+        nextList.map(toMediaBundleEntry)
+      );
+
       return true;
     } else {
       // Create it from seed or initial
@@ -2773,7 +4116,7 @@ export async function rateTeacherMedia(
           teacherName: 'ครูผู้สอน ACU',
           subjectGroup: 'กลุ่มสาระการเรียนรู้',
           subjectName: 'รายวิชาพื้นฐาน',
-          thumbnailUrl: '/ACU N.png',
+          thumbnailUrl: '',
           description: '',
           mediaType: 'สื่อเทคโนโลยี',
           views: 1,
@@ -2785,9 +4128,16 @@ export async function rateTeacherMedia(
       } as TeacherMediaWork;
 
       await setDoc(docRef, newWork);
-      const existing = getStoredTeacherMedia();
-      saveStoredTeacherMedia([newWork, ...existing.filter((m) => m.id !== mediaId)]);
+      const nextList = [newWork, ...baseList.filter((m) => m.id !== mediaId)];
+      saveStoredTeacherMedia(nextList);
       notifyTeacherMediaChanged();
+
+      await upsertBundleEntry(
+        'media_index',
+        toMediaBundleEntry(newWork),
+        nextList.map(toMediaBundleEntry)
+      );
+
       return true;
     }
   } catch (err) {
@@ -2813,9 +4163,11 @@ export async function toggleLikeTeacherMedia(
     let currentLikes = 0;
     let likedBy: string[] = [];
     let authorEmail: string | undefined;
+    let currentDocData: Partial<TeacherMediaWork> | undefined;
 
     if (snap.exists()) {
       const data = snap.data() as TeacherMediaWork;
+      currentDocData = data;
       currentLikes = typeof data.likes === 'number' ? data.likes : 0;
       likedBy = Array.isArray(data.likedBy) ? data.likedBy : [];
       authorEmail = data.submittedByEmail;
@@ -2844,12 +4196,30 @@ export async function toggleLikeTeacherMedia(
       { merge: true }
     );
 
-    saveStoredTeacherMedia(
-      getStoredTeacherMedia().map((m) =>
-        m.id === mediaId ? { ...m, likes: newLikes, likedBy } : m
-      )
-    );
+    const baseList = sharedLatestTeacherMedia && sharedLatestTeacherMedia.length > 0
+      ? sharedLatestTeacherMedia
+      : getStoredTeacherMedia();
+    let updatedWorkForBundle: TeacherMediaWork | null = null;
+    const nextList = baseList.map((m) => {
+      if (m.id === mediaId) {
+        updatedWorkForBundle = { ...m, likes: newLikes, likedBy };
+        return updatedWorkForBundle;
+      }
+      return m;
+    });
+    if (!updatedWorkForBundle && currentDocData) {
+      updatedWorkForBundle = { ...(currentDocData as TeacherMediaWork), id: mediaId, likes: newLikes, likedBy };
+    }
+    saveStoredTeacherMedia(nextList);
     notifyTeacherMediaChanged();
+
+    if (updatedWorkForBundle) {
+      await upsertBundleEntry(
+        'media_index',
+        toMediaBundleEntry(updatedWorkForBundle),
+        nextList.map(toMediaBundleEntry)
+      );
+    }
 
     // If media has an author email, sync stats.points on their user profile in Firestore
     if (authorEmail && authorEmail.trim()) {

@@ -7,7 +7,14 @@ import {
   query,
   limit,
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
+import {
+  db,
+  isQuotaExceededError,
+  notifyQuotaExceeded,
+  waitForAuthReady,
+  isAuthReady,
+  safeLocalStorageSetItem,
+} from '../firebase';
 import {
   ADMIN_TARGET_EMAIL,
   isValidActiveMediaRecord,
@@ -137,11 +144,49 @@ export interface TeacherPrivilegeAdminItem {
 
 const CLAIMS_COLLECTION = 'reward_privilege_claims';
 const CLAIMS_STORAGE_KEY = 'acu_cached_reward_claims';
+const CLAIMS_FETCHED_AT_KEY = 'acu_cached_reward_claims_fetched_at';
+const SINGLE_CLAIM_FETCHED_AT_KEY = 'acu_single_claim_fetched_at_map';
+const CLAIMS_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours TTL
+const CLAIMS_COOLDOWN_MS = 60 * 1000; // 60 seconds manual refresh cooldown
 
 let sessionClaimsListFetched = false;
+let lastClaimsFetchedAt = 0;
+let lastManualClaimsRefreshAt = 0;
+let isFetchingClaimsList = false;
 let inFlightClaimsListFetch: Promise<Record<string, RewardClaimRecord>> | null = null;
 const sessionSingleClaimFetched = new Set<string>();
 const inFlightSingleClaimFetches = new Map<string, Promise<RewardClaimRecord | null>>();
+
+export function getRewardClaimsCooldownSeconds(): number {
+  if (!lastManualClaimsRefreshAt) return 0;
+  const remaining = CLAIMS_COOLDOWN_MS - (Date.now() - lastManualClaimsRefreshAt);
+  return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
+}
+
+function getSingleClaimFetchedAt(normEmail: string): number {
+  if (typeof window === 'undefined') return 0;
+  try {
+    const raw = localStorage.getItem(SINGLE_CLAIM_FETCHED_AT_KEY);
+    if (!raw) return 0;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      const ts = Number(parsed[normEmail] || 0);
+      return Number.isFinite(ts) ? ts : 0;
+    }
+  } catch {}
+  return 0;
+}
+
+function setSingleClaimFetchedAt(normEmail: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    const raw = localStorage.getItem(SINGLE_CLAIM_FETCHED_AT_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const map = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    map[normEmail] = Date.now();
+    safeLocalStorageSetItem(SINGLE_CLAIM_FETCHED_AT_KEY, JSON.stringify(map));
+  } catch {}
+}
 
 function notifyRewardClaimsChanged(): void {
   try {
@@ -157,7 +202,7 @@ function getStoredRewardClaimsMap(): Record<string, RewardClaimRecord> {
     const raw = localStorage.getItem(CLAIMS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      if (parsed && typeof parsed === 'object') {
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
         const deletedUsers = getDeletedUserEmails();
         const cleaned: Record<string, RewardClaimRecord> = {};
         Object.keys(parsed).forEach((k) => {
@@ -166,18 +211,46 @@ function getStoredRewardClaimsMap(): Record<string, RewardClaimRecord> {
             cleaned[norm] = parsed[k];
           }
         });
+        if (Object.keys(cleaned).length === 0) {
+          try {
+            localStorage.removeItem(CLAIMS_STORAGE_KEY);
+          } catch {}
+        }
         return cleaned;
       }
+      try {
+        localStorage.removeItem(CLAIMS_STORAGE_KEY);
+      } catch {}
     }
-  } catch {}
+  } catch (err) {
+    console.warn('Failed to read reward claims cache (clearing corrupted entry):', err);
+    try {
+      localStorage.removeItem(CLAIMS_STORAGE_KEY);
+    } catch {}
+  }
   return {};
 }
 
-function saveStoredRewardClaimsMap(map: Record<string, RewardClaimRecord>): void {
+function saveStoredRewardClaimsMap(
+  map: Record<string, RewardClaimRecord>,
+  updateFetchedAt = false
+): void {
   if (typeof window === 'undefined') return;
   try {
-    localStorage.setItem(CLAIMS_STORAGE_KEY, JSON.stringify(map));
-  } catch {}
+    if (Object.keys(map).length === 0) {
+      try {
+        localStorage.removeItem(CLAIMS_STORAGE_KEY);
+        localStorage.removeItem(CLAIMS_FETCHED_AT_KEY);
+      } catch {}
+      return;
+    }
+    const ok = safeLocalStorageSetItem(CLAIMS_STORAGE_KEY, JSON.stringify(map));
+    if (ok && updateFetchedAt) {
+      safeLocalStorageSetItem(CLAIMS_FETCHED_AT_KEY, String(Date.now()));
+    }
+  } catch (err) {
+    console.warn('Failed to save reward claims cache (quota safe fallback):', err);
+  }
 }
 
 function upsertStoredRewardClaim(normEmail: string, claim: RewardClaimRecord | null): void {
@@ -188,6 +261,7 @@ function upsertStoredRewardClaim(normEmail: string, claim: RewardClaimRecord | n
     delete current[normEmail];
   }
   saveStoredRewardClaimsMap(current);
+  setSingleClaimFetchedAt(normEmail);
   notifyRewardClaimsChanged();
 }
 
@@ -197,8 +271,12 @@ async function fetchSingleClaimOnce(
 ): Promise<RewardClaimRecord | null> {
   const cachedMap = getStoredRewardClaimsMap();
   const cachedClaim = cachedMap[normEmail] || null;
+  const cachedAt = getSingleClaimFetchedAt(normEmail);
+  const isSingleFresh =
+    sessionSingleClaimFetched.has(normEmail) ||
+    (cachedAt > 0 && Date.now() - cachedAt < CLAIMS_CACHE_TTL_MS);
 
-  if (!forceRefresh && sessionSingleClaimFetched.has(normEmail)) {
+  if (!forceRefresh && isSingleFresh) {
     return cachedClaim;
   }
 
@@ -212,6 +290,7 @@ async function fetchSingleClaimOnce(
       const docRef = doc(db, CLAIMS_COLLECTION, getClaimDocId(normEmail));
       const snap = await getDoc(docRef);
       sessionSingleClaimFetched.add(normEmail);
+      setSingleClaimFetchedAt(normEmail);
       const claim = snap.exists() ? (snap.data() as RewardClaimRecord) : null;
       const latestMap = getStoredRewardClaimsMap();
       if (claim) {
@@ -235,22 +314,52 @@ async function fetchSingleClaimOnce(
   return run;
 }
 
+let lastEmptyClaimsServerCheckAt = 0;
+
 /**
- * One-time getDocs fetch for reward_privilege_claims (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for reward_privilege_claims (12-hour TTL, 60s manual cooldown, explicit mutex)
  */
 export async function refreshRewardClaims(
-  forceRefresh = true
+  forceRefresh = false
 ): Promise<Record<string, RewardClaimRecord>> {
   const localFallback = getStoredRewardClaimsMap();
+  const storedAt =
+    lastClaimsFetchedAt ||
+    (typeof window !== 'undefined' ? Number(localStorage.getItem(CLAIMS_FETCHED_AT_KEY) || 0) : 0);
+  const isFresh =
+    Object.keys(localFallback).length > 0 &&
+    (sessionClaimsListFetched || (storedAt > 0 && Date.now() - storedAt < CLAIMS_CACHE_TTL_MS));
 
-  if (!forceRefresh && sessionClaimsListFetched) {
+  if (!forceRefresh && isFresh) {
     return localFallback;
   }
 
-  if (!forceRefresh && inFlightClaimsListFetch) {
+  if (
+    !forceRefresh &&
+    lastEmptyClaimsServerCheckAt > 0 &&
+    Date.now() - lastEmptyClaimsServerCheckAt < 30000
+  ) {
+    return localFallback;
+  }
+
+  if (forceRefresh && getRewardClaimsCooldownSeconds() > 0) {
+    if (inFlightClaimsListFetch) return inFlightClaimsListFetch;
+    return localFallback;
+  }
+
+  if (inFlightClaimsListFetch) {
     return inFlightClaimsListFetch;
   }
 
+  if (isFetchingClaimsList) {
+    return localFallback;
+  }
+
+  if (forceRefresh) {
+    lastManualClaimsRefreshAt = Date.now();
+  }
+
+  isFetchingClaimsList = true;
   inFlightClaimsListFetch = (async () => {
     try {
       await waitForAuthReady();
@@ -269,19 +378,28 @@ export async function refreshRewardClaims(
           }
         }
       });
-      sessionClaimsListFetched = true;
-      if (Object.keys(map).length > 0 || Object.keys(localFallback).length === 0) {
-        saveStoredRewardClaimsMap(map);
+      if (Object.keys(map).length > 0) {
+        sessionClaimsListFetched = true;
+        lastClaimsFetchedAt = Date.now();
+        lastEmptyClaimsServerCheckAt = 0;
+        saveStoredRewardClaimsMap(map, true);
         notifyRewardClaimsChanged();
         return map;
+      }
+
+      if (!snap.metadata?.fromCache) {
+        lastEmptyClaimsServerCheckAt = Date.now();
       }
       return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
+      } else {
+        console.warn('refreshRewardClaims error (using fallback cache):', err);
       }
       return localFallback;
     } finally {
+      isFetchingClaimsList = false;
       inFlightClaimsListFetch = null;
     }
   })();
@@ -640,7 +758,8 @@ export async function quickShareEducationalResource(data: {
  * Reuses smart-cached streams (zero onSnapshot listeners)
  */
 export function subscribeAllTeachersPrivilegeStatus(
-  onUpdate: (summaries: TeacherPrivilegeAdminItem[]) => void
+  onUpdate: (summaries: TeacherPrivilegeAdminItem[]) => void,
+  options?: { autoFetch?: boolean; skipFetch?: boolean }
 ): () => void {
   let isActive = true;
   let allIdeas: { creatorEmail: string; post: SharedPostItem }[] = [];
@@ -740,6 +859,8 @@ export function subscribeAllTeachersPrivilegeStatus(
     onUpdate(resultList);
   };
 
+  const shouldAutoFetch = Boolean(options?.autoFetch) && !options?.skipFetch;
+
   // 1. Shared ideas (reuses smart-cached stream)
   const unsubIdeas = subscribeSharedIdeas((ideas) => {
     allIdeas = [];
@@ -760,7 +881,7 @@ export function subscribeAllTeachersPrivilegeStatus(
       }
     });
     computeAll();
-  });
+  }, { autoFetch: shouldAutoFetch });
 
   // 2. Innovations (reuses smart-cached stream)
   const unsubInnov = subscribeAllInnovations((innovations) => {
@@ -786,7 +907,7 @@ export function subscribeAllTeachersPrivilegeStatus(
       }
     });
     computeAll();
-  });
+  }, { autoFetch: shouldAutoFetch });
 
   // 3. Facilities (reuses smart-cached stream)
   const unsubFac = subscribeAllSubmissions((facilities) => {
@@ -809,7 +930,7 @@ export function subscribeAllTeachersPrivilegeStatus(
       }
     });
     computeAll();
-  });
+  }, { autoFetch: shouldAutoFetch });
 
   // 4. Teacher Media Repository (reuses smart-cached stream)
   const unsubMedia = subscribeTeacherMedia((works) => {
@@ -833,15 +954,15 @@ export function subscribeAllTeachersPrivilegeStatus(
       }
     });
     computeAll();
-  });
+  }, { autoFetch: shouldAutoFetch });
 
   // 5. User profiles (reuses smart-cached stream)
   const unsubProfiles = subscribeAllUserProfiles((map) => {
     profilesMap = map;
     computeAll();
-  });
+  }, { autoFetch: shouldAutoFetch });
 
-  // 6. Reward claims (cached one-time getDocs per session + local change events)
+  // 6. Reward claims (cached one-time getDocs per 12h + local change events)
   const handleClaimsChanged = () => {
     claimsMap = getStoredRewardClaimsMap();
     computeAll();
@@ -851,13 +972,15 @@ export function subscribeAllTeachersPrivilegeStatus(
     window.addEventListener('acu_user_deleted', handleClaimsChanged);
   }
 
-  refreshRewardClaims(false)
-    .then((map) => {
-      if (!isActive) return;
-      claimsMap = map;
-      computeAll();
-    })
-    .catch(() => {});
+  if (shouldAutoFetch) {
+    refreshRewardClaims(false)
+      .then((map) => {
+        if (!isActive) return;
+        claimsMap = map;
+        computeAll();
+      })
+      .catch(() => {});
+  }
 
   return () => {
     isActive = false;

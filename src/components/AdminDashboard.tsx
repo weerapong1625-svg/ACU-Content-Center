@@ -98,6 +98,7 @@ import {
   refreshAllFacilities,
   refreshTeacherMedia,
   refreshSharedIdeas,
+  getManualRefreshCooldownSeconds,
   syncUserSubmissionCountIfOutOfSync,
   saveCriteriaPoster,
   subscribeCriteriaPoster,
@@ -133,10 +134,11 @@ import {
   LoginLogEntry,
   SiteVisitSummary,
   AdminStatsSummary,
+  getLocalSiteSummary,
   getLocalAdminStatsSummary,
-  fetchAdminStatsSummaryOnce,
+  getLocalLoginLogs,
+  getLoginLogsCooldownSeconds,
   subscribeAllLoginLogs,
-  subscribeSiteSummary,
   fetchSiteSummaryOnce,
   fetchAdminLoginLogsOnce,
   generateLoginLogsTSV,
@@ -145,6 +147,17 @@ import {
   resetAdminLoginLogs,
   getBangkokDateParts
 } from '../services/auditService';
+import {
+  AdminOverviewStats,
+  getLocalAdminOverview,
+  fetchAdminOverviewStatsOnce,
+  syncAdminOverviewSummary,
+  rebuildAllIndexBundles,
+  getAdminOverviewCooldownSeconds,
+  isQuotaFallbackCurrentlyActive,
+  isOverviewNonZero,
+} from '../services/adminOverviewService';
+import { sanitizeMediaThumbnailForFirestore } from '../utils/mediaThumbnailUtils';
 import {
   PopupBannerConfig,
   subscribePopupBanner,
@@ -183,17 +196,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [authReady, setAuthReady] = useState<boolean>(() => isAuthReady());
   const isAdminResolved = authReady && isSuperAdmin;
 
-  // Real-time / smart-cached Firestore data
+  // Real-time / smart-cached Firestore data (1-read pre-aggregated overview primary)
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
   const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
-  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
-  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(null);
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
   const [adminStatsSummary, setAdminStatsSummary] = useState<AdminStatsSummary | null>(() => getLocalAdminStatsSummary());
+  const [adminOverview, setAdminOverview] = useState<AdminOverviewStats | null>(() => getLocalAdminOverview());
+  const [isQuotaFallback, setIsQuotaFallback] = useState<boolean>(
+    () => isQuotaFallbackCurrentlyActive() || Boolean(getLocalAdminOverview()?.fromQuotaFallback)
+  );
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
+  const [isSyncingOverview, setIsSyncingOverview] = useState(false);
+  const [isRebuildingBundles, setIsRebuildingBundles] = useState(false);
+  const [showSyncOverviewConfirmModal, setShowSyncOverviewConfirmModal] = useState(false);
 
   // 0. Special Privileges and 20-Share Rewards Management
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
@@ -277,6 +297,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Copy & export feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+  const [refreshAllCooldownSec, setRefreshAllCooldownSec] = useState<number>(() =>
+    Math.max(
+      getAdminOverviewCooldownSeconds(),
+      getManualRefreshCooldownSeconds('teacherMedia'),
+      getManualRefreshCooldownSeconds('allInnovations')
+    )
+  );
+
+  useEffect(() => {
+    if (refreshAllCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshAllCooldownSec(
+        Math.max(
+          getAdminOverviewCooldownSeconds(),
+          getManualRefreshCooldownSeconds('teacherMedia'),
+          getManualRefreshCooldownSeconds('allInnovations')
+        )
+      );
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshAllCooldownSec]);
 
   // User Management & Email Audit Modals
   const [showUserManagementModal, setShowUserManagementModal] = useState(false);
@@ -400,21 +441,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, []);
 
-  // 1. Subscribe to in-memory/localStorage smart-cached streams immediately (0ms UI render, zero onSnapshot)
+  // 1. Hydrate ONLY from in-memory/localStorage caches immediately (0ms UI render, 0 Firestore reads on mount)
   useEffect(() => {
     setIsLoading(true);
     const unsubInnovations = subscribeAllInnovations((list) => {
       setInnovations(list);
       setIsLoading(false);
-    });
+    }, { skipFetch: true });
 
     const unsubFacilities = subscribeAllSubmissions((list) => {
       setFacilities(list);
-    });
+    }, { skipFetch: true });
 
     const unsubTeacherMedia = subscribeTeacherMedia((works) => {
       setTeacherMedia(works);
-    });
+    }, { skipFetch: true });
 
     const unsubLogo = subscribeSchoolLogo((url: string) => {
       setCurrentLogoUrl(url);
@@ -428,17 +469,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setCurrentPosterUrl(url);
     });
 
-    const unsubLogs = subscribeAllLoginLogs((logs) => {
-      setLoginLogs(logs);
-    });
-
-    const unsubSiteSummary = subscribeSiteSummary((summary) => {
-      setSiteSummary(summary);
-    });
-
     const unsubProfiles = subscribeAllUserProfiles((profiles) => {
       setUserProfilesMap(profiles);
-    });
+    }, { skipFetch: true });
 
     const unsubBanner = subscribePopupBanner((cfg) => {
       if (cfg) {
@@ -450,8 +483,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
     const unsubPrivileges = subscribeAllTeachersPrivilegeStatus((list) => {
       setPrivilegeSummaries(list);
+    }, { skipFetch: true });
+
+    const unsubLoginLogs = subscribeAllLoginLogs((logs) => {
+      setLoginLogs((prev) => (logs.length > 0 || prev.length === 0 ? logs : prev));
     });
 
+    const handleOverviewUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<AdminOverviewStats>)?.detail;
+      if (detail) {
+        setAdminOverview(detail);
+        if (detail.fromQuotaFallback) {
+          setIsQuotaFallback(true);
+        } else {
+          setIsQuotaFallback(false);
+        }
+      }
+    };
+    const handleSiteSummaryUpdated = (e: Event) => {
+      const detail = (e as CustomEvent<SiteVisitSummary>)?.detail;
+      if (detail) {
+        setSiteSummary(detail);
+      }
+    };
     const handleAdminStatsUpdated = (e: Event) => {
       const detail = (e as CustomEvent<AdminStatsSummary>)?.detail;
       if (detail) {
@@ -461,8 +515,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         }
       }
     };
+    const handleQuotaExceeded = () => {
+      setIsQuotaFallback(true);
+    };
+
     if (typeof window !== 'undefined') {
+      window.addEventListener('acu_admin_overview_updated', handleOverviewUpdated);
+      window.addEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
       window.addEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
+      window.addEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
     }
 
     return () => {
@@ -472,42 +533,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubLogo();
       unsubCertLogo();
       unsubPoster();
-      unsubLogs();
-      unsubSiteSummary();
       unsubProfiles();
       unsubBanner();
       unsubPrivileges();
+      unsubLoginLogs();
       if (typeof window !== 'undefined') {
+        window.removeEventListener('acu_admin_overview_updated', handleOverviewUpdated);
+        window.removeEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
         window.removeEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
+        window.removeEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
       }
     };
   }, []);
 
-  // 2. Parallel Admin summary & collection fetch — strictly gated on (authReady && isSuperAdmin)
-  // Re-triggers automatically once isAdminResolved becomes true; uses Promise.allSettled so one failure never blocks others.
+  // 2. Mount: Read ONLY the single pre-aggregated doc `stats/admin_overview` (1 read max / 6h cache) + cached sheets config
   useEffect(() => {
     if (!isAdminResolved) return;
     let active = true;
 
     Promise.allSettled([
-      fetchAdminStatsSummaryOnce(false, userEmail),
+      fetchAdminOverviewStatsOnce(false),
       fetchGoogleSheetsConfig(),
-      refreshAllInnovations(false),
-      refreshTeacherMedia(false),
-      refreshAllFacilities(false),
-      refreshAllUserProfiles(false),
-      refreshSharedIdeas(false),
-      refreshRewardClaims(false),
-    ]).then((results) => {
+    ]).then(([overviewRes, sheetsRes]) => {
       if (!active) return;
-      const statsRes = results[0];
-      if (statsRes.status === 'fulfilled' && statsRes.value) {
-        setAdminStatsSummary(statsRes.value);
-        if (statsRes.value.siteSummary) {
-          setSiteSummary(statsRes.value.siteSummary);
-        }
+      if (overviewRes.status === 'fulfilled' && overviewRes.value) {
+        setAdminOverview(overviewRes.value);
+        setIsQuotaFallback(Boolean(overviewRes.value.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
       }
-      const sheetsRes = results[1];
       if (sheetsRes.status === 'fulfilled' && sheetsRes.value?.sheetUrl) {
         setGoogleSheetsUrl(sheetsRes.value.sheetUrl);
       }
@@ -518,49 +570,55 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, [isAdminResolved, userEmail]);
 
-  // 3. Fetch latest 50 login logs ONLY after (authReady && isSuperAdmin) when Visitors tab opens; refresh summary on Stats tab (3-min TTL)
+  // 3. Tab changes render strictly from memory/localStorage cache (0 collection fetches on tab switch).
+  //    Only 'stats' (1-doc 12h cached summary) or 'visitors' (12h cached limit(30) logs on explicit Admin open) load lazily.
   useEffect(() => {
     if (!isAdminResolved) return;
-    if (activeTab === 'visitors') {
-      setIsRefreshingLogs(true);
-      Promise.allSettled([
-        fetchAdminStatsSummaryOnce(false, userEmail),
-        fetchAdminLoginLogsOnce(false, 50, userEmail),
-      ])
-        .then(([statsRes]) => {
-          if (statsRes.status === 'fulfilled' && statsRes.value) {
-            setAdminStatsSummary(statsRes.value);
-            if (statsRes.value.siteSummary) {
-              setSiteSummary(statsRes.value.siteSummary);
-            }
-          }
-        })
-        .finally(() => setIsRefreshingLogs(false));
-    } else if (activeTab === 'stats') {
-      fetchAdminStatsSummaryOnce(false, userEmail)
+
+    if (activeTab === 'stats') {
+      fetchAdminOverviewStatsOnce(false)
         .then((res) => {
           if (res) {
-            setAdminStatsSummary(res);
-            if (res.siteSummary) setSiteSummary(res.siteSummary);
+            setAdminOverview(res);
+            setIsQuotaFallback(Boolean(res.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
           }
         })
         .catch(() => {});
+      return;
+    }
+
+    if (activeTab === 'visitors') {
+      setIsRefreshingLogs(true);
+      fetchAdminLoginLogsOnce(false, 30, userEmail)
+        .then((logs) => {
+          if (Array.isArray(logs) && logs.length > 0) {
+            setLoginLogs(logs);
+          }
+        })
+        .finally(() => setIsRefreshingLogs(false));
     }
   }, [activeTab, isAdminResolved, userEmail]);
 
   const handleRefreshLoginLogs = async () => {
     if (!isAdminResolved) return;
+    const remaining = getLoginLogsCooldownSeconds();
+    if (remaining > 0) {
+      showToast(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชประวัติการเข้าชม`);
+      return;
+    }
     setIsRefreshingLogs(true);
     try {
-      const [statsRes] = await Promise.allSettled([
-        fetchAdminStatsSummaryOnce(true, userEmail),
-        fetchAdminLoginLogsOnce(true, 50, userEmail),
+      const [siteRes, logsRes] = await Promise.allSettled([
+        fetchSiteSummaryOnce(true),
+        fetchAdminLoginLogsOnce(true, 30, userEmail),
       ]);
-      if (statsRes.status === 'fulfilled' && statsRes.value) {
-        setAdminStatsSummary(statsRes.value);
-        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
+      if (siteRes.status === 'fulfilled' && siteRes.value) {
+        setSiteSummary(siteRes.value);
       }
-      showToast('อัปเดตสถิติและประวัติการเข้าชม (50 รายการล่าสุด) สำเร็จ');
+      if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
+        setLoginLogs(logsRes.value);
+      }
+      showToast('อัปเดตสถิติและประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
     } finally {
       setIsRefreshingLogs(false);
     }
@@ -568,26 +626,103 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   const handleRefreshAllAdminData = async () => {
     if (!isAdminResolved) return;
+    const remaining = Math.max(
+      getAdminOverviewCooldownSeconds(),
+      getManualRefreshCooldownSeconds('teacherMedia'),
+      getManualRefreshCooldownSeconds('allInnovations'),
+      getManualRefreshCooldownSeconds('facilities'),
+      getManualRefreshCooldownSeconds('sharedIdeas')
+    );
+    if (remaining > 0) {
+      setRefreshAllCooldownSec(remaining);
+      showToast(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชข้อมูลอีกครั้ง`);
+      return;
+    }
     setIsRefreshingAll(true);
     try {
-      const results = await Promise.allSettled([
-        fetchAdminStatsSummaryOnce(true, userEmail),
-        refreshAllInnovations(true),
-        refreshAllFacilities(true),
-        refreshTeacherMedia(true),
-        refreshAllUserProfiles(true),
-        refreshSharedIdeas(true),
-        refreshRewardClaims(true),
-        fetchAdminLoginLogsOnce(true, 50, userEmail),
-      ]);
-      const statsRes = results[0];
-      if (statsRes.status === 'fulfilled' && statsRes.value) {
-        setAdminStatsSummary(statsRes.value);
-        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
+      // Refresh ONLY the single stats/admin_overview doc on 'stats' tab (1 read!)
+      // Or the current active tab's data alongside stats/admin_overview
+      const tasks: Promise<any>[] = [fetchAdminOverviewStatsOnce(true)];
+      if (activeTab === 'visitors') {
+        tasks.push(fetchSiteSummaryOnce(true), fetchAdminLoginLogsOnce(true, 30, userEmail));
+      } else if (activeTab === 'innovations' || activeTab === 'teachers') {
+        tasks.push(refreshAllInnovations(true), refreshTeacherMedia(true), refreshAllUserProfiles(true));
+      } else if (activeTab === 'facilities') {
+        tasks.push(refreshAllFacilities(true));
+      } else if (activeTab === 'certificates') {
+        tasks.push(fetchAdminLoginLogsOnce(true, 30, userEmail), refreshAllUserProfiles(true));
+      } else if (activeTab === 'privileges') {
+        tasks.push(
+          refreshSharedIdeas(true),
+          refreshAllInnovations(true),
+          refreshTeacherMedia(true),
+          refreshAllFacilities(true),
+          refreshAllUserProfiles(true),
+          refreshRewardClaims(true)
+        );
       }
-      showToast('รีเฟรชข้อมูลสถิติล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
+
+      const results = await Promise.allSettled(tasks);
+      setRefreshAllCooldownSec(60);
+      const overviewRes = results[0];
+      if (overviewRes.status === 'fulfilled' && overviewRes.value) {
+        setAdminOverview(overviewRes.value);
+        setIsQuotaFallback(Boolean(overviewRes.value.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
+      }
+      showToast(
+        activeTab === 'stats'
+          ? 'รีเฟรชสถิติโดยรวม (1 Read) จากฐานข้อมูลเรียบร้อยแล้ว'
+          : 'รีเฟรชข้อมูลในแท็บปัจจุบันเรียบร้อยแล้ว'
+      );
     } finally {
       setIsRefreshingAll(false);
+    }
+  };
+
+  const handleConfirmSyncAdminOverview = async () => {
+    if (!isAdminResolved || isSyncingOverview) return;
+    setIsSyncingOverview(true);
+    try {
+      const res = await syncAdminOverviewSummary(userEmail);
+      setShowSyncOverviewConfirmModal(false);
+      if (res.success && res.stats) {
+        setAdminOverview(res.stats);
+        setIsQuotaFallback(false);
+        setRefreshAllCooldownSec(60);
+        showToast('ซิงค์ยอดสรุปจริงเข้าสู่ stats/admin_overview สำเร็จเรียบร้อย');
+      } else {
+        if (res.quotaExceeded) {
+          setIsQuotaFallback(true);
+        }
+        showToast(res.error || 'ไม่สามารถซิงค์ยอดสรุปจริงได้ในขณะนี้');
+      }
+    } finally {
+      setIsSyncingOverview(false);
+    }
+  };
+
+  const handleRebuildIndexBundles = async () => {
+    if (!isAdminResolved || isRebuildingBundles) return;
+    setIsRebuildingBundles(true);
+    try {
+      const res = await rebuildAllIndexBundles(userEmail);
+      if (res.success) {
+        if (res.stats) {
+          setAdminOverview(res.stats);
+        }
+        setIsQuotaFallback(false);
+        setRefreshAllCooldownSec(60);
+        showToast(
+          `สร้างดัชนีข้อมูลรวมใหม่สำเร็จ (สื่อ ${res.mediaCount ?? 0}, นวัตกรรม ${res.innovationsCount ?? 0}, ไอเดีย ${res.ideasCount ?? 0} รายการ)`
+        );
+      } else {
+        if (res.quotaExceeded) {
+          setIsQuotaFallback(true);
+        }
+        showToast(res.error || 'ไม่สามารถสร้างดัชนีข้อมูลรวมใหม่ได้ในขณะนี้');
+      }
+    } finally {
+      setIsRebuildingBundles(false);
     }
   };
 
@@ -655,8 +790,45 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
   }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear, onlyMyAdminInnovations]);
 
-  // Statistics calculation
+  // Statistics calculation (authoritative 1-read stats/admin_overview primary, with local array fallback if not synced yet)
   const stats = useMemo(() => {
+    if (adminOverview && isOverviewNonZero(adminOverview)) {
+      const totalSubmissions = Math.max(
+        adminOverview.totalUnifiedSubmissions ?? 0,
+        adminOverview.totalInnovationsCount || 0,
+        adminOverview.totalMediaCount || 0
+      );
+      const totalTeachers = adminOverview.totalTeachersWithSubmissions || 0;
+      const completed5Count = adminOverview.teachersCompleted5Count || 0;
+      const inProgressCount = Math.max(0, totalTeachers - completed5Count);
+      const totalFacilities = adminOverview.totalFacilityLogs || 0;
+
+      const subjectGroupCounts: Record<string, number> = {};
+      SUBJECT_GROUPS.forEach((sg) => {
+        subjectGroupCounts[sg] = Number(adminOverview.bySubjectGroup?.[sg] || 0);
+      });
+
+      const gradeCounts: Record<string, number> = { ...(adminOverview.byGradeLevel || {}) };
+      const mediaTypeCounts: Record<string, number> = {
+        'สื่อสิ่งพิมพ์': Number(adminOverview.byMediaType?.['สื่อสิ่งพิมพ์'] || 0),
+        'สื่อเทคโนโลยี': Number(adminOverview.byMediaType?.['สื่อเทคโนโลยี'] || 0),
+        'สื่ออื่น ๆ': Number(adminOverview.byMediaType?.['สื่ออื่น ๆ'] || 0),
+      };
+
+      return {
+        totalSubmissions,
+        totalTeachers,
+        completed5Count,
+        inProgressCount,
+        totalFacilities,
+        subjectGroupCounts,
+        gradeCounts,
+        mediaTypeCounts,
+        selfMadeCount: adminOverview.selfProducedCount || 0,
+        sourcedCount: adminOverview.externalSourceCount || 0,
+      };
+    }
+
     const unifiedTotal = teacherSummaries.reduce((sum, t) => sum + t.submittedCount, 0);
     const totalSubmissions = Math.max(innovations.length, unifiedTotal);
     const totalTeachers = teacherSummaries.length;
@@ -714,7 +886,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       selfMadeCount,
       sourcedCount,
     };
-  }, [innovations, teacherSummaries, facilities]);
+  }, [adminOverview, innovations, teacherSummaries, facilities]);
 
   // Handle Logo Upload
   const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1012,6 +1184,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   }, [loginLogs, siteSummary, adminStatsSummary]);
 
   const totalServerVisitorsCount = Math.max(
+    adminOverview?.totalVisitorsCount || 0,
     loginLogs.length,
     siteSummary?.totalVisits || 0,
     adminStatsSummary?.totalLoginLogsCount || 0
@@ -1334,10 +1507,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Yearly Stats calculation (computed instantaneously in memory from loaded media, facilities, logs, & siteSummary)
+  // Yearly Stats calculation (uses 1-read stats/admin_overview primary, merged with loaded arrays when tabs are opened)
   const yearlyStats = useMemo(() => {
     const targetYear = parseInt(selectedYear) || 2026;
     const targetYearStr = String(targetYear);
+    const overviewYear = adminOverview?.yearlyStats?.[targetYearStr];
 
     // Deduplicate innovations + direct teacherMedia entries in memory so every submitted work is counted once
     const mediaSeenKeys = new Set<string>();
@@ -1369,27 +1543,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       return Boolean(parts && parts.year === targetYear);
     });
 
-    const uniqueVisitorEmails = new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size;
+    const uniqueVisitorEmails = Math.max(
+      new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size,
+      overviewYear?.uniqueVisitors || 0
+    );
 
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
-    const summaryMonths = siteSummary?.monthlyVisits?.[targetYearStr] || {};
+    const summaryMonths = siteSummary?.monthlyVisits?.[targetYearStr] || overviewYear?.monthlyVisits || {};
     const monthlyBreakdown = monthNames.map((name, idx) => {
+      const idxKey = String(idx);
       const logsVisits = yearLogs.filter(l => {
         const parts = getBangkokDateParts(l.loginTimestamp);
         return parts ? parts.monthIndex === idx : false;
       }).length;
-      const summaryVisits = Number(summaryMonths[String(idx)] || 0);
-      const visits = Math.max(logsVisits, summaryVisits);
+      const summaryVisits = Number(summaryMonths[idxKey] || 0);
+      const overviewVisits = Number(overviewYear?.monthlyVisits?.[idxKey] || 0);
+      const visits = Math.max(logsVisits, summaryVisits, overviewVisits);
 
-      const mediaCount = yearMediaDates.filter(d => d.getMonth() === idx).length;
-      const facCount = yearFacilities.filter(f => {
+      const loadedMediaCount = yearMediaDates.filter(d => d.getMonth() === idx).length;
+      const overviewMediaCount = Number(overviewYear?.monthlyMedia?.[idxKey] || 0);
+      const mediaCount = Math.max(loadedMediaCount, overviewMediaCount);
+
+      const loadedFacCount = yearFacilities.filter(f => {
         const d = new Date(f.createdAt || f.usageDateTime);
         return !isNaN(d.getTime()) && d.getMonth() === idx;
       }).length;
+      const overviewFacCount = Number(overviewYear?.monthlyFacilities?.[idxKey] || 0);
+      const facCount = Math.max(loadedFacCount, overviewFacCount);
 
       return {
         monthName: name,
@@ -1418,6 +1602,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
     });
     const totalAccountsCount = Math.max(
+      adminOverview?.totalUsersCount || 0,
       allSystemAccounts.size,
       adminStatsSummary?.totalUserProfilesCount || 0
     );
@@ -1425,12 +1610,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     const monthlyVisitsSum = monthlyBreakdown.reduce((sum, m) => sum + m.visits, 0);
     const activeSiteSummary = siteSummary || adminStatsSummary?.siteSummary;
     const summaryYearTotal = Number(activeSiteSummary?.yearlyVisits?.[targetYearStr] || 0);
+    const overviewYearTotal = Number(overviewYear?.totalVisits || 0);
     const serverTotalIfCurrentYear =
-      targetYear === CURRENT_CALENDAR_YEAR ? (adminStatsSummary?.totalLoginLogsCount || 0) : 0;
+      targetYear === CURRENT_CALENDAR_YEAR
+        ? Math.max(adminOverview?.totalVisitorsCount || 0, adminStatsSummary?.totalLoginLogsCount || 0)
+        : 0;
     const totalVisits = Math.max(
       yearLogs.length,
       monthlyVisitsSum,
       summaryYearTotal,
+      overviewYearTotal,
       serverTotalIfCurrentYear
     );
 
@@ -1439,16 +1628,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       totalVisits,
       uniqueVisitors: uniqueVisitorEmails,
       totalAccounts: totalAccountsCount,
-      totalMedia: yearMediaDates.length,
-      totalFacilities: yearFacilities.length,
+      totalMedia: Math.max(yearMediaDates.length, Number(overviewYear?.totalMedia || 0)),
+      totalFacilities: Math.max(yearFacilities.length, Number(overviewYear?.totalFacilities || 0)),
       monthlyBreakdown,
     };
-  }, [innovations, teacherMedia, facilities, loginLogs, siteSummary, adminStatsSummary, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
+  }, [adminOverview, innovations, teacherMedia, facilities, loginLogs, siteSummary, adminStatsSummary, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
     if (!editingInnovation) return;
     setIsSavingInnovationEdit(true);
+    const cleanCoverUrl = sanitizeMediaThumbnailForFirestore(
+      editingInnovation.coverImageUrl || editingInnovation.imageUrl,
+      editingInnovation.onlineUrl
+    );
     const res = await updateInnovationSubmission(
       editingInnovation.id,
       {
@@ -1461,8 +1654,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         mediaTitle: editingInnovation.mediaTitle,
         usageDetails: editingInnovation.usageDetails,
         onlineUrl: editingInnovation.onlineUrl,
-        imageUrl: editingInnovation.imageUrl,
-        coverImageUrl: editingInnovation.coverImageUrl,
+        imageUrl: cleanCoverUrl,
+        coverImageUrl: cleanCoverUrl,
       },
       userEmail
     );
@@ -1834,12 +2027,36 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <button
               type="button"
               onClick={handleRefreshAllAdminData}
-              disabled={isRefreshingAll || !isAdminResolved}
+              disabled={isRefreshingAll || !isAdminResolved || refreshAllCooldownSec > 0}
               className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="ดึงข้อมูลสถิติและรายการทั้งหมดล่าสุดจากฐานข้อมูล (ข้ามแคช 3 นาที)"
+              title={refreshAllCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshAllCooldownSec} วินาที` : 'ดึงข้อมูลสรุปสถิติล่าสุด (1 Read)'}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              <span>รีเฟรชข้อมูลสถิติ</span>
+              <span>{refreshAllCooldownSec > 0 ? `รีเฟรชข้อมูลสถิติ (${refreshAllCooldownSec}s)` : 'รีเฟรชข้อมูลสถิติ'}</span>
+            </button>
+
+            <button
+              type="button"
+              id="btn-sync-admin-overview"
+              onClick={() => setShowSyncOverviewConfirmModal(true)}
+              disabled={isSyncingOverview || isRebuildingBundles || !isAdminResolved}
+              className="px-3.5 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/35 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="คำนวณและซิงค์ยอดสรุปจริงทั้งหมดลงในเอกสาร stats/admin_overview (ทำเฉพาะเมื่อต้องการกระทบยอด)"
+            >
+              <Database className={`w-3.5 h-3.5 text-amber-400 ${isSyncingOverview ? 'animate-pulse' : ''}`} />
+              <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ซิงค์ยอดสรุปจริง'}</span>
+            </button>
+
+            <button
+              type="button"
+              id="btn-rebuild-index-bundles"
+              onClick={handleRebuildIndexBundles}
+              disabled={isRebuildingBundles || isSyncingOverview || !isAdminResolved}
+              className="px-3.5 py-1.5 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="สร้างเอกสารดัชนีรวม bundles/* ใหม่ทั้งหมด (ตัด Base64 ออก ประหยัดโควต้าอ่านและพื้นที่)"
+            >
+              <Layers className={`w-3.5 h-3.5 text-indigo-400 ${isRebuildingBundles ? 'animate-spin' : ''}`} />
+              <span>{isRebuildingBundles ? 'กำลังสร้างดัชนี...' : 'สร้างดัชนีข้อมูลรวมใหม่ (Rebuild Index Bundle)'}</span>
             </button>
 
             <button
@@ -1924,7 +2141,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length})</span>
+            <span>
+              ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length > 0 ? innovations.length : (adminOverview?.totalInnovationsCount || 0)})
+            </span>
           </button>
 
           <button
@@ -1937,7 +2156,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>สรุปรายชื่อครู ({teacherSummaries.length})</span>
+            <span>
+              สรุปรายชื่อครู ({teacherSummaries.length > 0 ? teacherSummaries.length : (adminOverview?.totalTeachersWithSubmissions || 0)})
+            </span>
           </button>
 
           <button
@@ -1950,7 +2171,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <School className="w-3.5 h-3.5" />
-            <span>บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length})</span>
+            <span>
+              บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length > 0 ? facilities.length : (adminOverview?.totalFacilityLogs || 0)})
+            </span>
           </button>
 
           <button
@@ -1971,13 +2194,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 flex-grow">
         
+        {/* Subtle HTTP 429 Quota Fallback Banner (keeps displaying last valid cached stats) */}
+        {(isQuotaFallback || adminOverview?.fromQuotaFallback) && (
+          <div className="mb-4 px-4 py-2.5 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+              <span>แสดงข้อมูลจากแคชล่าสุดเนื่องจากโควต้าอ่านข้อมูลวันนี้เต็ม</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setIsQuotaFallback(false)}
+              className="text-amber-300/80 hover:text-amber-100 p-1 rounded-lg transition-colors cursor-pointer"
+              title="ซ่อนข้อความแจ้งเตือน"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
+
         {/* =========================================================================
             TAB 1: สถิติและภาพรวมเว็บไซต์ (Stats & Overview)
            ========================================================================= */}
         {activeTab === 'stats' && (
           <div className="space-y-6">
 
-            {/* Section Bar with On-Demand Refresh Stats Button */}
+            {/* Section Bar with On-Demand Refresh Stats Button (1-Read Pre-Aggregated + 6h Cache) */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
               <div>
                 <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
@@ -1985,27 +2226,65 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <span>สถิติโดยรวมและสรุปข้อมูลประจำปี</span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  โหลดข้อมูลแบบขนานพร้อมแคช 3 นาที (อัปเดตล่าสุด:{' '}
-                  {adminStatsSummary?.fetchedAt
-                    ? new Date(adminStatsSummary.fetchedAt).toLocaleTimeString('th-TH', {
+                  ใช้สรุปรวม 1 เอกสาร (แคช 6 ชั่วโมง • อัปเดตล่าสุด:{' '}
+                  {adminOverview?.updatedAt
+                    ? new Date(adminOverview.updatedAt).toLocaleString('th-TH', {
+                        day: '2-digit',
+                        month: 'short',
                         hour: '2-digit',
                         minute: '2-digit',
-                        second: '2-digit',
                       })
-                    : 'กำลังซิงค์...'}
+                    : adminOverview?.fetchedAt
+                      ? new Date(adminOverview.fetchedAt).toLocaleTimeString('th-TH', {
+                          hour: '2-digit',
+                          minute: '2-digit',
+                          second: '2-digit',
+                        })
+                      : 'พร้อมใช้งาน'}
                   )
                 </p>
+                {adminOverview?.needsInitialSync && (
+                  <p className="text-[11px] text-amber-300 mt-1">
+                    ยังไม่มีเอกสารสรุปยอดในฐานข้อมูล กดปุ่ม &quot;ซิงค์ยอดสรุปจริง&quot; 1 ครั้งเพื่อสร้างสรุปข้อมูล
+                  </p>
+                )}
               </div>
-              <button
-                type="button"
-                id="btn-refresh-admin-stats-overall"
-                onClick={handleRefreshAllAdminData}
-                disabled={isRefreshingAll || !isAdminResolved}
-                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-                <span>{isRefreshingAll ? 'กำลังอัปเดตสถิติ...' : 'รีเฟรชข้อมูลสถิติ'}</span>
-              </button>
+              <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowSyncOverviewConfirmModal(true)}
+                  disabled={isSyncingOverview || isRebuildingBundles || !isAdminResolved}
+                  className="px-3.5 py-2 rounded-xl bg-amber-600/20 hover:bg-amber-600/35 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Database className={`w-3.5 h-3.5 text-amber-400 ${isSyncingOverview ? 'animate-pulse' : ''}`} />
+                  <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ซิงค์ยอดสรุปจริง'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRebuildIndexBundles}
+                  disabled={isRebuildingBundles || isSyncingOverview || !isAdminResolved}
+                  className="px-3.5 py-2 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <Layers className={`w-3.5 h-3.5 text-indigo-400 ${isRebuildingBundles ? 'animate-spin' : ''}`} />
+                  <span>{isRebuildingBundles ? 'กำลังสร้างดัชนี...' : 'สร้างดัชนีข้อมูลรวมใหม่ (Rebuild Index Bundle)'}</span>
+                </button>
+                <button
+                  type="button"
+                  id="btn-refresh-admin-stats-overall"
+                  onClick={handleRefreshAllAdminData}
+                  disabled={isRefreshingAll || !isAdminResolved || refreshAllCooldownSec > 0}
+                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isRefreshingAll
+                      ? 'กำลังอัปเดตสถิติ...'
+                      : refreshAllCooldownSec > 0
+                        ? `รีเฟรชข้อมูลสถิติ (${refreshAllCooldownSec}s)`
+                        : 'รีเฟรชข้อมูลสถิติ'}
+                  </span>
+                </button>
+              </div>
             </div>
             
             {/* 4 Hero Metric Cards */}
@@ -2379,10 +2658,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   onClick={handleRefreshLoginLogs}
                   disabled={isRefreshingLogs || !isAdminResolved}
                   className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 50 รายการจากฐานข้อมูล"
+                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
-                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (50 ล่าสุด)'}</span>
+                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (30 ล่าสุด)'}</span>
                 </button>
 
                 <button
@@ -2471,7 +2750,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ใช้งานไม่ซ้ำ (Unique)</span>
                 <p className="text-xl font-bold text-teal-400 mt-0.5">{visitorTabKpis.uniqueUsers} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
-                <span className="text-[10px] text-slate-500">จากรายการล่าสุด 50 รายการ</span>
+                <span className="text-[10px] text-slate-500">จากรายการล่าสุด 30 รายการ</span>
               </div>
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ดูแลระบบ (Admin)</span>
@@ -5051,12 +5330,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">ลิงก์ภาพปกชิ้นงาน (Cover Image URL)</label>
+                <label className="block text-slate-300 font-semibold mb-1">ลิงก์ภาพปกชิ้นงานภายนอก (Cover Image URL - รองรับ https:// หรือดึงจาก YouTube)</label>
                 <input
                   type="url"
                   value={editingInnovation.coverImageUrl || ''}
                   onChange={(e) => setEditingInnovation({ ...editingInnovation, coverImageUrl: e.target.value })}
-                  placeholder="https://... หรือ Data URL"
+                  placeholder="https://... (เว้นว่างไว้หากใช้ไอคอนหรือปก YouTube อัตโนมัติ)"
                   className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-xs"
                 />
               </div>
@@ -5291,6 +5570,63 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               >
                 <Trash2 className="w-4 h-4" />
                 <span>{isDeletingFacility ? 'กำลังลบ...' : 'ยืนยันลบบันทึก'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =========================================================================
+          One-Time Admin Overview Sync Confirmation Modal ("ซิงค์ยอดสรุปจริง")
+         ========================================================================= */}
+      {showSyncOverviewConfirmModal && (
+        <div
+          className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => !isSyncingOverview && setShowSyncOverviewConfirmModal(false)}
+        >
+          <div
+            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center justify-center flex-shrink-0">
+                <Database className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">ยืนยันการซิงค์ยอดสรุปจริง (stats/admin_overview)</h3>
+                <p className="text-xs text-slate-400">คำนวณยอดสะสมจริงจากฐานข้อมูลทุกคอลเล็กชันเพียงครั้งเดียว</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
+              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                <span>ระบบจะรวบรวมยอดจริงและบันทึกเป็นเอกสารสรุปเดียว</span>
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
+                <li>นับยอดครู สื่อ 5 ชิ้น คลังสื่อ แหล่งเรียนรู้ บัญชีผู้ใช้ และผู้เข้าชมทั้งหมด</li>
+                <li>หลังจากซิงค์แล้ว การเปิดหน้าสถิติ Admin จะใช้โควต้าอ่านเพียง <strong>1 Read</strong> ต่อรอบแคช 6 ชั่วโมง</li>
+                <li>หากโควต้าการอ่านวันนี้เต็ม ระบบจะยกเลิกการเขียนทับและคงค่าแคชเดิมไว้อย่างปลอดภัย</li>
+              </ul>
+            </div>
+
+            <div className="pt-2 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                disabled={isSyncingOverview}
+                onClick={() => setShowSyncOverviewConfirmModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmSyncAdminOverview}
+                disabled={isSyncingOverview}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md"
+              >
+                <Database className={`w-3.5 h-3.5 ${isSyncingOverview ? 'animate-spin' : ''}`} />
+                <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ยืนยันซิงค์ยอดสรุปจริง'}</span>
               </button>
             </div>
           </div>

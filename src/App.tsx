@@ -18,17 +18,20 @@ import {
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
 import { signOut, onAuthStateChanged } from 'firebase/auth';
-import { auth } from './firebase';
+import { auth, safeLocalStorageSetItem } from './firebase';
 import {
   getBangkokDateParts,
   logUserLogin,
   flushPendingLoginLogs,
+  fetchSiteSummaryOnce,
 } from './services/auditService';
 import {
   clearSessionAvatarSyncMemo,
   getCachedUserProfile,
+  refreshAllUserProfiles,
   syncUserAvatarOnAuthOrLogin,
 } from './services/userProfileService';
+import { preloadCoreCollectionsOnce } from './services/submissionService';
 import { sanitizeAvatarUrl } from './utils/avatarUtils';
 
 export default function App() {
@@ -65,7 +68,7 @@ export default function App() {
       }
       if (email) {
         // Refresh active timestamp on valid existing session
-        localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
+        safeLocalStorageSetItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
       }
       return email;
     } catch {
@@ -99,11 +102,14 @@ export default function App() {
     };
   }, []);
 
-  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated once auth resolves
+  // Startup-only cache-first hydration once auth resolves (0 Firestore reads if 12h caches are fresh)
   React.useEffect(() => {
     if (!loggedInUser || !isAuthResolved) return;
     syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser, false).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
+    preloadCoreCollectionsOnce().catch(() => {});
+    fetchSiteSummaryOnce(false).catch(() => {});
+    refreshAllUserProfiles(false).catch(() => {});
   }, [loggedInUser, isAuthResolved]);
 
   // Unified single-point visit recorder to guarantee consistent logging across devices
@@ -127,13 +133,13 @@ export default function App() {
             sessionStorage.setItem(sessionKey, '1');
             return;
           }
-          localStorage.setItem(deviceStampKey, String(now));
+          safeLocalStorageSetItem(deviceStampKey, String(now));
         } catch {
           // ignore storage errors
         }
       } else {
         try {
-          localStorage.setItem(deviceStampKey, String(now));
+          safeLocalStorageSetItem(deviceStampKey, String(now));
         } catch {
           // ignore
         }
@@ -198,8 +204,8 @@ export default function App() {
     setLoggedInUser(normalized);
     setSessionTimedOut(false);
     try {
-      localStorage.setItem('acu_current_user_email', normalized);
-      localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
+      safeLocalStorageSetItem('acu_current_user_email', normalized);
+      safeLocalStorageSetItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
     } catch {
       // ignore
     }
