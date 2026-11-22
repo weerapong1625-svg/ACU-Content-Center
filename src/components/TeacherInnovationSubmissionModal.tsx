@@ -97,6 +97,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   // Status & List states
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [submittedId, setSubmittedId] = useState('');
   const [allSubmissions, setAllSubmissions] = useState<InnovationSubmission[]>([]);
@@ -214,6 +215,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     if (!teacherName.trim()) {
       alert('กรุณากรอก ชื่อ - สกุล');
@@ -235,74 +237,75 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     const sanitizedCoverUrl = sanitizeMediaThumbnailForFirestore(imagePreview, onlineUrl.trim());
 
     setIsSubmitting(true);
+    try {
+      if (editingId) {
+        // Perform Update
+        const res = await updateInnovationSubmission(
+          editingId,
+          {
+            teacherName: teacherName.trim(),
+            subjectGroup,
+            gradeLevel,
+            itemNumber,
+            mediaTitle: mediaTitle.trim(),
+            mediaType,
+            productionType,
+            usageDetails: usageDetails.trim(),
+            onlineUrl: onlineUrl.trim(),
+            imageUrl: sanitizedCoverUrl,
+            coverImageUrl: sanitizedCoverUrl,
+          },
+          userEmail
+        );
 
-    if (editingId) {
-      // Perform Update
-      const res = await updateInnovationSubmission(
-        editingId,
-        {
-          teacherName: teacherName.trim(),
-          subjectGroup,
-          gradeLevel,
-          itemNumber,
-          mediaTitle: mediaTitle.trim(),
-          mediaType,
-          productionType,
-          usageDetails: usageDetails.trim(),
-          onlineUrl: onlineUrl.trim(),
-          imageUrl: sanitizedCoverUrl,
-          coverImageUrl: sanitizedCoverUrl,
-        },
-        userEmail
-      );
+        if (res.success) {
+          setActionNotice(`บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber} เรียบร้อยแล้ว`);
+          setEditingId(null);
+          setMediaTitle('');
+          setUsageDetails('');
+          setOnlineUrl('');
+          setImagePreview('');
+          setActiveTab('status');
+          setTimeout(() => setActionNotice(null), 3000);
+        } else {
+          alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+        }
+        return;
+      }
 
-      setIsSubmitting(false);
+      // Perform Create
+      const res = await saveInnovationSubmission({
+        teacherName: teacherName.trim(),
+        subjectGroup,
+        gradeLevel,
+        itemNumber,
+        mediaTitle: mediaTitle.trim(),
+        mediaType,
+        productionType,
+        usageDetails: usageDetails.trim(),
+        onlineUrl: onlineUrl.trim(),
+        imageUrl: sanitizedCoverUrl || undefined,
+        userEmail,
+      });
 
       if (res.success) {
-        setActionNotice(`บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber} เรียบร้อยแล้ว`);
-        setEditingId(null);
+        setSubmittedId(res.id);
+        setSubmitSuccess(true);
+        // Reset some fields for next submission
         setMediaTitle('');
         setUsageDetails('');
         setOnlineUrl('');
         setImagePreview('');
-        setActiveTab('status');
-        setTimeout(() => setActionNotice(null), 3000);
+        if (itemNumber < 5) {
+          setItemNumber((prev) => prev + 1);
+        }
       } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+        alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
       }
-      return;
-    }
-
-    // Perform Create
-    const res = await saveInnovationSubmission({
-      teacherName: teacherName.trim(),
-      subjectGroup,
-      gradeLevel,
-      itemNumber,
-      mediaTitle: mediaTitle.trim(),
-      mediaType,
-      productionType,
-      usageDetails: usageDetails.trim(),
-      onlineUrl: onlineUrl.trim(),
-      imageUrl: sanitizedCoverUrl || undefined,
-      userEmail,
-    });
-
-    setIsSubmitting(false);
-
-    if (res.success) {
-      setSubmittedId(res.id);
-      setSubmitSuccess(true);
-      // Reset some fields for next submission
-      setMediaTitle('');
-      setUsageDetails('');
-      setOnlineUrl('');
-      setImagePreview('');
-      if (itemNumber < 5) {
-        setItemNumber((prev) => prev + 1);
-      }
-    } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    } catch {
+      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -330,15 +333,23 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   };
 
   const handleDeleteSubmission = async (sub: InnovationSubmission) => {
+    if (deletingSubmissionId) return;
     if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${sub.mediaTitle}" (ชิ้นที่ ${sub.itemNumber})?`)) {
       return;
     }
-    const res = await deleteInnovationSubmission(sub.id, userEmail);
-    if (res.success) {
-      setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
-      setTimeout(() => setActionNotice(null), 3000);
-    } else {
-      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+    setDeletingSubmissionId(sub.id);
+    try {
+      const res = await deleteInnovationSubmission(sub.id, userEmail);
+      if (res.success) {
+        setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
+        setTimeout(() => setActionNotice(null), 3000);
+      } else {
+        alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการลบข้อมูล');
+    } finally {
+      setDeletingSubmissionId(null);
     }
   };
 
@@ -1344,27 +1355,38 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                     )}
                                     <button
                                       type="button"
-                                      onClick={() => {
+                                      disabled={Boolean(deletingSubmissionId)}
+                                      onClick={async () => {
                                         if (match) {
                                           handleDeleteSubmission(match);
-                                        } else if (unifiedRec?.mediaWorkId) {
+                                        } else if (unifiedRec?.mediaWorkId && !deletingSubmissionId) {
                                           if (window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${displayTitle}"?`)) {
-                                            deleteTeacherMedia(unifiedRec.mediaWorkId, userEmail).then((res) => {
+                                            setDeletingSubmissionId(unifiedRec.mediaWorkId);
+                                            try {
+                                              const res = await deleteTeacherMedia(unifiedRec.mediaWorkId, userEmail);
                                               if (res.success) {
                                                 setActionNotice(`ลบสื่อ "${displayTitle}" เรียบร้อยแล้ว`);
                                                 setTimeout(() => setActionNotice(null), 3000);
                                               } else {
                                                 alert(res.error || 'ไม่สามารถลบข้อมูลได้');
                                               }
-                                            });
+                                            } catch {
+                                              alert('เกิดข้อผิดพลาดในการลบข้อมูล');
+                                            } finally {
+                                              setDeletingSubmissionId(null);
+                                            }
                                           }
                                         }
                                       }}
-                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 disabled:opacity-50 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
                                       title="ลบสื่อนี้"
                                     >
                                       <Trash2 className="w-3 h-3" />
-                                      <span>ลบ</span>
+                                      <span>
+                                        {(match && deletingSubmissionId === match.id) || (unifiedRec?.mediaWorkId && deletingSubmissionId === unifiedRec.mediaWorkId)
+                                          ? 'กำลังลบ...'
+                                          : 'ลบ'}
+                                      </span>
                                     </button>
                                   </div>
                                 )}
@@ -1519,12 +1541,13 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
                                 <button
                                   type="button"
+                                  disabled={Boolean(deletingSubmissionId)}
                                   onClick={() => handleDeleteSubmission(sub)}
-                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
+                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
                                   title="ลบข้อมูลสื่อ"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
-                                  <span>ลบ</span>
+                                  <span>{deletingSubmissionId === sub.id ? 'กำลังลบ...' : 'ลบ'}</span>
                                 </button>
                               </>
                             )}

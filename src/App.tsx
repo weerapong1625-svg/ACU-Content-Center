@@ -33,8 +33,14 @@ import {
 } from './services/userProfileService';
 import { preloadCoreCollectionsOnce } from './services/submissionService';
 import { sanitizeAvatarUrl } from './utils/avatarUtils';
+import { invalidateAppDataCacheIfVersionMismatch } from './utils/cache';
 
 export default function App() {
+  // Automatic Cache Invalidation: wipe stale localStorage data caches on APP_CACHE_VERSION bump (preserves auth/session)
+  React.useEffect(() => {
+    invalidateAppDataCacheIfVersionMismatch();
+  }, []);
+
   // Check if session has expired prior to mount
   const [sessionTimedOut, setSessionTimedOut] = useState<boolean>(() => {
     try {

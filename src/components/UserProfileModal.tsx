@@ -156,6 +156,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   
   // Status states
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isSavingInnovationItem, setIsSavingInnovationItem] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [showAvatarEditModal, setShowAvatarEditModal] = useState<boolean>(false);
   const [editingInnovationId, setEditingInnovationId] = useState<number | null>(null);
@@ -670,6 +671,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
 
   // Handle Save Personal Information
   const handleSaveProfile = async () => {
+    if (isSaving) return;
     setIsSaving(true);
     setSaveSuccess(false);
 
@@ -729,22 +731,30 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     id: number, 
     fields: Partial<InnovationItem>
   ) => {
-    const updatedInnovations = profile.innovations.map((item) => {
-      if (item.id === id) {
-        return { ...item, ...fields };
-      }
-      return item;
-    });
+    if (isSavingInnovationItem) return;
+    setIsSavingInnovationItem(true);
+    try {
+      const updatedInnovations = profile.innovations.map((item) => {
+        if (item.id === id) {
+          return { ...item, ...fields };
+        }
+        return item;
+      });
 
-    const updatedProfile: FullUserProfile = {
-      ...profile,
-      innovations: updatedInnovations,
-      updatedAt: new Date().toISOString(),
-    };
+      const updatedProfile: FullUserProfile = {
+        ...profile,
+        innovations: updatedInnovations,
+        updatedAt: new Date().toISOString(),
+      };
 
-    setProfile(updatedProfile);
-    await saveFullUserProfile(updatedProfile);
-    setEditingInnovationId(null);
+      setProfile(updatedProfile);
+      await saveFullUserProfile(updatedProfile);
+      setEditingInnovationId(null);
+    } catch (err) {
+      console.error('Failed to update innovation item:', err);
+    } finally {
+      setIsSavingInnovationItem(false);
+    }
   };
 
   // Handle deleting a specific innovation slot item (Admin or profile owner)
@@ -825,6 +835,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   // Handle Visitor Praise and Star Rating Submission
   const handleSubmitPraise = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingPraise) return;
     if (!commentInput.trim() && ratingInput <= 0) return;
 
     setIsSubmittingPraise(true);
@@ -1344,6 +1355,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                 />
                                 <button
                                   type="button"
+                                  disabled={isSavingInnovationItem}
                                   onClick={() => {
                                     const titleEl = document.getElementById(`edit-item-title-${item.id}`) as HTMLInputElement;
                                     const statusEl = document.getElementById(`edit-item-status-${item.id}`) as HTMLSelectElement | null;
@@ -1361,14 +1373,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                       submittedDate: new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }),
                                     });
                                   }}
-                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"
+                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"
                                 >
-                                  บันทึกชิ้นนี้
+                                  {isSavingInnovationItem ? 'กำลังบันทึก...' : 'บันทึกชิ้นนี้'}
                                 </button>
                                 <button
                                   type="button"
+                                  disabled={isSavingInnovationItem}
                                   onClick={() => setEditingInnovationId(null)}
-                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs cursor-pointer transition-colors"
+                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-300 rounded-lg text-xs cursor-pointer transition-colors"
                                 >
                                   ยกเลิก
                                 </button>

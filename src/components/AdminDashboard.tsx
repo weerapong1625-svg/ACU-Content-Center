@@ -927,30 +927,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveLogo = async () => {
-    if (!logoPreview) return;
+    if (!logoPreview || isSavingLogo) return;
     setIsSavingLogo(true);
     setLogoStatusMsg(null);
-    const res = await saveSchoolLogo(logoPreview, SUPER_ADMIN_EMAIL);
-    setIsSavingLogo(false);
-    if (res.success) {
-      setCurrentLogoUrl(logoPreview);
-      setLogoPreview(null);
-      setLogoStatusMsg('บันทึกภาพโลโก้โรงเรียนสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-      showToast('บันทึกโลโก้โรงเรียนเรียบร้อย');
-    } else {
-      setLogoStatusMsg(res.message);
+    try {
+      const res = await saveSchoolLogo(logoPreview, SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setCurrentLogoUrl(logoPreview);
+        setLogoPreview(null);
+        setLogoStatusMsg('บันทึกภาพโลโก้โรงเรียนสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+        showToast('บันทึกโลโก้โรงเรียนเรียบร้อย');
+      } else {
+        setLogoStatusMsg(res.message);
+      }
+    } catch {
+      setLogoStatusMsg('เกิดข้อผิดพลาดในการบันทึกโลโก้โรงเรียน');
+    } finally {
+      setIsSavingLogo(false);
     }
   };
 
   const handleResetLogo = async () => {
+    if (isSavingLogo) return;
     if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นตราดั้งเดิม (ACU N.png) ใช่หรือไม่?')) return;
     setIsSavingLogo(true);
-    const res = await resetSchoolLogo(SUPER_ADMIN_EMAIL);
-    setIsSavingLogo(false);
-    if (res.success) {
-      setLogoPreview(null);
-      setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
-      showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
+    try {
+      const res = await resetSchoolLogo(SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setLogoPreview(null);
+        setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
+        showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
+      }
+    } catch {
+      setLogoStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้');
+    } finally {
+      setIsSavingLogo(false);
     }
   };
 
@@ -1001,32 +1012,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveCertLogo = async () => {
-    if (!certLogoPreview) return;
+    if (!certLogoPreview || isSavingCertLogo) return;
     setIsSavingCertLogo(true);
     setCertLogoStatusMsg(null);
-    const res = await saveCertificateLogo(certLogoPreview, SUPER_ADMIN_EMAIL);
-    setIsSavingCertLogo(false);
-    if (res.success) {
-      setCurrentCertLogoUrl(certLogoPreview);
-      setCertLogoPreview(null);
-      setCertLogoStatusMsg('บันทึกภาพโลโก้บนเกียรติบัตรสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-      showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
-    } else {
-      setCertLogoStatusMsg(res.message);
+    try {
+      const res = await saveCertificateLogo(certLogoPreview, SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setCurrentCertLogoUrl(certLogoPreview);
+        setCertLogoPreview(null);
+        setCertLogoStatusMsg('บันทึกภาพโลโก้บนเกียรติบัตรสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+        showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
+      } else {
+        setCertLogoStatusMsg(res.message);
+      }
+    } catch {
+      setCertLogoStatusMsg('เกิดข้อผิดพลาดในการบันทึกโลโก้เกียรติบัตร');
+    } finally {
+      setIsSavingCertLogo(false);
     }
   };
 
   const handleResetCertLogo = async () => {
+    if (isSavingCertLogo) return;
     if (!confirm('ยืนยันรีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพตราสัญลักษณ์โรงเรียนเริ่มต้น ใช่หรือไม่?')) return;
     setIsSavingCertLogo(true);
-    const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
-    setIsSavingCertLogo(false);
-    if (res.success) {
-      setCertLogoPreview(null);
-      setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
-      showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
-    } else {
-      setCertLogoStatusMsg(res.message);
+    try {
+      const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setCertLogoPreview(null);
+        setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
+        showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
+      } else {
+        setCertLogoStatusMsg(res.message);
+      }
+    } catch {
+      setCertLogoStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้เกียรติบัตร');
+    } finally {
+      setIsSavingCertLogo(false);
     }
   };
 
@@ -1062,30 +1084,41 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSavePoster = async () => {
-    if (!posterPreview) return;
+    if (!posterPreview || isSavingPoster) return;
     setIsSavingPoster(true);
     setPosterStatusMsg(null);
-    const res = await saveCriteriaPoster(posterPreview, SUPER_ADMIN_EMAIL);
-    setIsSavingPoster(false);
-    if (res.success) {
-      setCurrentPosterUrl(posterPreview);
-      setPosterPreview(null);
-      setPosterStatusMsg('บันทึกภาพเกณฑ์/ประเภทสื่อสำเร็จ ภาพเปลี่ยนทันที');
-      showToast('บันทึกภาพเกณฑ์/ประเภทสื่อเรียบร้อย');
-    } else {
-      setPosterStatusMsg(res.message);
+    try {
+      const res = await saveCriteriaPoster(posterPreview, SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        setCurrentPosterUrl(posterPreview);
+        setPosterPreview(null);
+        setPosterStatusMsg('บันทึกภาพเกณฑ์/ประเภทสื่อสำเร็จ ภาพเปลี่ยนทันที');
+        showToast('บันทึกภาพเกณฑ์/ประเภทสื่อเรียบร้อย');
+      } else {
+        setPosterStatusMsg(res.message);
+      }
+    } catch {
+      setPosterStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพเกณฑ์');
+    } finally {
+      setIsSavingPoster(false);
     }
   };
 
   // Handle Google Sheets URL Save
   const handleSaveSheetUrl = async () => {
+    if (isSavingSheetUrl) return;
     setIsSavingSheetUrl(true);
     setSheetUrlMsg(null);
-    const res = await saveGoogleSheetsConfig(googleSheetsUrl, SUPER_ADMIN_EMAIL);
-    setIsSavingSheetUrl(false);
-    setSheetUrlMsg(res.message);
-    if (res.success) {
-      showToast('บันทึกลิงก์ Google Sheets เรียบร้อย');
+    try {
+      const res = await saveGoogleSheetsConfig(googleSheetsUrl, SUPER_ADMIN_EMAIL);
+      setSheetUrlMsg(res.message);
+      if (res.success) {
+        showToast('บันทึกลิงก์ Google Sheets เรียบร้อย');
+      }
+    } catch {
+      setSheetUrlMsg('เกิดข้อผิดพลาดในการบันทึกลิงก์');
+    } finally {
+      setIsSavingSheetUrl(false);
     }
   };
 
@@ -1636,91 +1669,111 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
-    if (!editingInnovation) return;
+    if (!editingInnovation || isSavingInnovationEdit) return;
     setIsSavingInnovationEdit(true);
-    const cleanCoverUrl = sanitizeMediaThumbnailForFirestore(
-      editingInnovation.coverImageUrl || editingInnovation.imageUrl,
-      editingInnovation.onlineUrl
-    );
-    const res = await updateInnovationSubmission(
-      editingInnovation.id,
-      {
-        teacherName: editingInnovation.teacherName,
-        subjectGroup: editingInnovation.subjectGroup,
-        gradeLevel: editingInnovation.gradeLevel,
-        itemNumber: editingInnovation.itemNumber,
-        mediaType: editingInnovation.mediaType,
-        productionType: editingInnovation.productionType,
-        mediaTitle: editingInnovation.mediaTitle,
-        usageDetails: editingInnovation.usageDetails,
-        onlineUrl: editingInnovation.onlineUrl,
-        imageUrl: cleanCoverUrl,
-        coverImageUrl: cleanCoverUrl,
-      },
-      userEmail
-    );
-    setIsSavingInnovationEdit(false);
-    if (res.success) {
-      showToast('บันทึกการแก้ไขข้อมูลสื่อเรียบร้อยแล้ว');
-      setEditingInnovation(null);
-    } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ');
+    try {
+      const cleanCoverUrl = sanitizeMediaThumbnailForFirestore(
+        editingInnovation.coverImageUrl || editingInnovation.imageUrl,
+        editingInnovation.onlineUrl
+      );
+      const res = await updateInnovationSubmission(
+        editingInnovation.id,
+        {
+          teacherName: editingInnovation.teacherName,
+          subjectGroup: editingInnovation.subjectGroup,
+          gradeLevel: editingInnovation.gradeLevel,
+          itemNumber: editingInnovation.itemNumber,
+          mediaType: editingInnovation.mediaType,
+          productionType: editingInnovation.productionType,
+          mediaTitle: editingInnovation.mediaTitle,
+          usageDetails: editingInnovation.usageDetails,
+          onlineUrl: editingInnovation.onlineUrl,
+          imageUrl: cleanCoverUrl,
+          coverImageUrl: cleanCoverUrl,
+        },
+        userEmail
+      );
+      if (res.success) {
+        showToast('บันทึกการแก้ไขข้อมูลสื่อเรียบร้อยแล้ว');
+        setEditingInnovation(null);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการแก้ไขสื่อ');
+    } finally {
+      setIsSavingInnovationEdit(false);
     }
   };
 
   // Handle Innovation Delete
   const handleDeleteInnovation = async () => {
-    if (!deletingInnovationId) return;
+    if (!deletingInnovationId || isDeletingInnovation) return;
     setIsDeletingInnovation(true);
-    const res = await deleteInnovationSubmission(deletingInnovationId, userEmail);
-    setIsDeletingInnovation(false);
-    if (res.success) {
-      showToast('ลบข้อมูลสื่อออกจากระบบสำเร็จ');
-      setDeletingInnovationId(null);
-      setDeletingInnovationTitle('');
-    } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
+    try {
+      const res = await deleteInnovationSubmission(deletingInnovationId, userEmail);
+      if (res.success) {
+        showToast('ลบข้อมูลสื่อออกจากระบบสำเร็จ');
+        setDeletingInnovationId(null);
+        setDeletingInnovationTitle('');
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการลบสื่อ');
+    } finally {
+      setIsDeletingInnovation(false);
     }
   };
 
   // Handle Facility Edit Save
   const handleSaveFacilityEdit = async () => {
-    if (!editingFacility) return;
+    if (!editingFacility || isSavingFacilityEdit) return;
     setIsSavingFacilityEdit(true);
-    const res = await updateFacilitySubmission(
-      editingFacility.id,
-      {
-        teacherName: editingFacility.teacherName,
-        subjectGroup: editingFacility.subjectGroup,
-        learningCenter: editingFacility.learningCenter,
-        periods: editingFacility.periods,
-        usageDateTime: editingFacility.usageDateTime,
-        feedback: editingFacility.feedback,
-        imageUrl: editingFacility.imageUrl,
-      },
-      userEmail
-    );
-    setIsSavingFacilityEdit(false);
-    if (res.success) {
-      showToast('บันทึกการแก้ไขข้อมูลแหล่งเรียนรู้เรียบร้อย');
-      setEditingFacility(null);
-    } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
+    try {
+      const res = await updateFacilitySubmission(
+        editingFacility.id,
+        {
+          teacherName: editingFacility.teacherName,
+          subjectGroup: editingFacility.subjectGroup,
+          learningCenter: editingFacility.learningCenter,
+          periods: editingFacility.periods,
+          usageDateTime: editingFacility.usageDateTime,
+          feedback: editingFacility.feedback,
+          imageUrl: editingFacility.imageUrl,
+        },
+        userEmail
+      );
+      if (res.success) {
+        showToast('บันทึกการแก้ไขข้อมูลแหล่งเรียนรู้เรียบร้อย');
+        setEditingFacility(null);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
+    } finally {
+      setIsSavingFacilityEdit(false);
     }
   };
 
   // Handle Facility Delete
   const handleDeleteFacility = async () => {
-    if (!deletingFacilityId) return;
+    if (!deletingFacilityId || isDeletingFacility) return;
     setIsDeletingFacility(true);
-    const res = await deleteFacilitySubmission(deletingFacilityId, userEmail);
-    setIsDeletingFacility(false);
-    if (res.success) {
-      showToast('ลบข้อมูลบันทึกแหล่งเรียนรู้ออกจากระบบสำเร็จ');
-      setDeletingFacilityId(null);
-      setDeletingFacilityTitle('');
-    } else {
-      alert(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
+    try {
+      const res = await deleteFacilitySubmission(deletingFacilityId, userEmail);
+      if (res.success) {
+        showToast('ลบข้อมูลบันทึกแหล่งเรียนรู้ออกจากระบบสำเร็จ');
+        setDeletingFacilityId(null);
+        setDeletingFacilityTitle('');
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
+    } finally {
+      setIsDeletingFacility(false);
     }
   };
 
@@ -1782,44 +1835,56 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveBanners = async () => {
+    if (isSavingBanner) return;
     setIsSavingBanner(true);
     setBannerStatusMsg(null);
-    const success = await savePopupBannerConfig({
-      bannerImageUrl: banner1Preview || bannerConfig.bannerImageUrl,
-      bannerImageUrl2: banner2Preview || bannerConfig.bannerImageUrl2,
-      title: banner1Title || bannerConfig.title,
-      title2: banner2Title || bannerConfig.title2,
-      updatedBy: userEmail,
-    });
-    setIsSavingBanner(false);
-    if (success) {
-      setBannerStatusMsg('บันทึกภาพป๊อปอัปประชาสัมพันธ์หน้าแรกสำเร็จ อัปเดตทันที');
-      showToast('บันทึกภาพป๊อปอัปหน้าแรกเรียบร้อย');
-      setBanner1Preview(null);
-      setBanner2Preview(null);
-    } else {
+    try {
+      const success = await savePopupBannerConfig({
+        bannerImageUrl: banner1Preview || bannerConfig.bannerImageUrl,
+        bannerImageUrl2: banner2Preview || bannerConfig.bannerImageUrl2,
+        title: banner1Title || bannerConfig.title,
+        title2: banner2Title || bannerConfig.title2,
+        updatedBy: userEmail,
+      });
+      if (success) {
+        setBannerStatusMsg('บันทึกภาพป๊อปอัปประชาสัมพันธ์หน้าแรกสำเร็จ อัปเดตทันที');
+        showToast('บันทึกภาพป๊อปอัปหน้าแรกเรียบร้อย');
+        setBanner1Preview(null);
+        setBanner2Preview(null);
+      } else {
+        setBannerStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป');
+      }
+    } catch {
       setBannerStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป');
+    } finally {
+      setIsSavingBanner(false);
     }
   };
 
   const handleResetBanners = async () => {
+    if (isSavingBanner) return;
     if (!confirm('ต้องการรีเซ็ตภาพป๊อปอัปประชาสัมพันธ์กลับเป็นค่าเริ่มต้นใช่หรือไม่?')) return;
     setIsSavingBanner(true);
-    const success = await savePopupBannerConfig({
-      bannerImageUrl: DEFAULT_BANNER_IMAGE,
-      bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
-      title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
-      title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
-      updatedBy: userEmail,
-    });
-    setIsSavingBanner(false);
-    if (success) {
-      setBanner1Preview(null);
-      setBanner2Preview(null);
-      setBanner1Title('พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี');
-      setBanner2Title('พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
-      setBannerStatusMsg('รีเซ็ตภาพป๊อปอัปกลับเป็นค่าเริ่มต้นเรียบร้อย');
-      showToast('รีเซ็ตภาพป๊อปอัปเรียบร้อย');
+    try {
+      const success = await savePopupBannerConfig({
+        bannerImageUrl: DEFAULT_BANNER_IMAGE,
+        bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
+        title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
+        title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
+        updatedBy: userEmail,
+      });
+      if (success) {
+        setBanner1Preview(null);
+        setBanner2Preview(null);
+        setBanner1Title('พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี');
+        setBanner2Title('พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
+        setBannerStatusMsg('รีเซ็ตภาพป๊อปอัปกลับเป็นค่าเริ่มต้นเรียบร้อย');
+        showToast('รีเซ็ตภาพป๊อปอัปเรียบร้อย');
+      }
+    } catch {
+      setBannerStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตภาพป๊อปอัป');
+    } finally {
+      setIsSavingBanner(false);
     }
   };
 
