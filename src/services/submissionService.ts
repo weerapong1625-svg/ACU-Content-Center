@@ -233,6 +233,37 @@ export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
 export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
 
+export const COLLECTION_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL
+const INNOVATIONS_FETCHED_AT_KEY = 'acu_cached_innovations_submissions_fetched_at';
+const TEACHER_MEDIA_FETCHED_AT_KEY = 'acu_cached_teacher_media_fetched_at';
+const FACILITY_FETCHED_AT_KEY = 'acu_cached_facility_submissions_fetched_at';
+const SHARED_IDEAS_FETCHED_AT_KEY = 'acu_cached_shared_ideas_fetched_at';
+
+function hasFreshLocalCache(dataKey: string, tsKey: string, ttlMs = COLLECTION_CACHE_TTL_MS): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const rawData = localStorage.getItem(dataKey);
+    const rawTs = localStorage.getItem(tsKey);
+    if (rawData === null || !rawTs) return false;
+    const fetchedAt = Number(rawTs);
+    if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) return false;
+    if (Date.now() - fetchedAt >= ttlMs) return false;
+    JSON.parse(rawData);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function markLocalCacheTimestamp(tsKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(tsKey, String(Date.now()));
+  } catch {
+    // ignore storage errors
+  }
+}
+
 /**
  * Legacy hardcoded seed IDs that previously caused false "submitted" status
  * for weerapong1625@acu.ac.th — stripped cleanly without touching other users' data.
@@ -684,12 +715,14 @@ export function getStoredInnovations(): InnovationSubmission[] {
 /**
  * Save innovations to localStorage cache
  */
-export function saveStoredInnovations(list: InnovationSubmission[]): void {
+export function saveStoredInnovations(list: InnovationSubmission[]): boolean {
   try {
     const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
     localStorage.setItem(INNOVATIONS_STORAGE_KEY, JSON.stringify(cleaned));
+    return true;
   } catch (err) {
     console.warn('Failed to save innovations cache:', err);
+    return false;
   }
 }
 
@@ -720,12 +753,14 @@ export function getStoredTeacherMedia(): TeacherMediaWork[] {
 /**
  * Save teacher media to localStorage cache
  */
-export function saveStoredTeacherMedia(list: TeacherMediaWork[]): void {
+export function saveStoredTeacherMedia(list: TeacherMediaWork[]): boolean {
   try {
     const cleaned = list.filter((item) => item && !isMediaIdBlocked(item.id));
     localStorage.setItem(TEACHER_MEDIA_STORAGE_KEY, JSON.stringify(cleaned));
+    return true;
   } catch (err) {
     console.warn('Failed to save teacher media cache:', err);
+    return false;
   }
 }
 
@@ -1273,10 +1308,18 @@ function ensureInnovationsWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for teacher_innovations_submissions (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for teacher_innovations_submissions (6-hour localStorage TTL unless forceRefresh=true)
  */
-export async function refreshAllInnovations(forceRefresh = true): Promise<InnovationSubmission[]> {
-  const localFallback = sharedLatestInnovations || getSortedStoredInnovations();
+export async function refreshAllInnovations(forceRefresh = false): Promise<InnovationSubmission[]> {
+  const localFallback = getSortedStoredInnovations();
+  const effectiveFallback = localFallback.length > 0 ? localFallback : (sharedLatestInnovations || []);
+
+  if (!forceRefresh && hasFreshLocalCache(INNOVATIONS_STORAGE_KEY, INNOVATIONS_FETCHED_AT_KEY)) {
+    const freshList = getSortedStoredInnovations();
+    sharedLatestInnovations = freshList;
+    hasFetchedInnovationsThisSession = true;
+    return freshList;
+  }
 
   if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
     return sharedLatestInnovations;
@@ -1291,9 +1334,9 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
       await waitForAuthReady();
       const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
       const snapshot = await getDocs(colQuery);
-      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
-        broadcastAllInnovations(localFallback);
-        return localFallback;
+      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && effectiveFallback.length > 0) {
+        broadcastAllInnovations(effectiveFallback);
+        return effectiveFallback;
       }
       const liveList: InnovationSubmission[] = [];
       snapshot.forEach((docSnap) => {
@@ -1308,20 +1351,23 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
         (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
       );
       hasFetchedInnovationsThisSession = true;
-      if (liveList.length > 0 || localFallback.length === 0) {
-        saveStoredInnovations(liveList);
+      if (liveList.length > 0 || effectiveFallback.length === 0) {
+        if (saveStoredInnovations(liveList)) {
+          markLocalCacheTimestamp(INNOVATIONS_FETCHED_AT_KEY);
+        }
         broadcastAllInnovations(liveList);
         return liveList;
       }
-      broadcastAllInnovations(localFallback);
-      return localFallback;
+      markLocalCacheTimestamp(INNOVATIONS_FETCHED_AT_KEY);
+      broadcastAllInnovations(effectiveFallback);
+      return effectiveFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllInnovations fallback to local cache:', err);
-      broadcastAllInnovations(localFallback);
-      return localFallback;
+      console.warn('[Firestore] refreshAllInnovations failed, falling back to localStorage:', err);
+      broadcastAllInnovations(effectiveFallback);
+      return effectiveFallback;
     } finally {
       inFlightInnovationsFetch = null;
     }
@@ -1476,8 +1522,8 @@ export function getStoredFacilities(): FacilitySubmission[] {
   return [];
 }
 
-export function saveStoredFacilities(list: FacilitySubmission[]): void {
-  if (typeof window === 'undefined') return;
+export function saveStoredFacilities(list: FacilitySubmission[]): boolean {
+  if (typeof window === 'undefined') return false;
   try {
     const deletedUsers = getDeletedUserEmails();
     const cleaned = list.filter(
@@ -1488,8 +1534,10 @@ export function saveStoredFacilities(list: FacilitySubmission[]): void {
     );
     cleaned.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     localStorage.setItem(FACILITY_STORAGE_KEY, JSON.stringify(cleaned));
+    return true;
   } catch (err) {
     console.warn('Failed to save facilities cache:', err);
+    return false;
   }
 }
 
@@ -1647,10 +1695,18 @@ function ensureFacilitiesWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for facility usage records (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for facility usage records (6-hour localStorage TTL unless forceRefresh=true)
  */
-export async function refreshAllFacilities(forceRefresh = true): Promise<FacilitySubmission[]> {
-  const localFallback = sharedLatestFacilities || getStoredFacilities();
+export async function refreshAllFacilities(forceRefresh = false): Promise<FacilitySubmission[]> {
+  const localStored = getStoredFacilities();
+  const localFallback = localStored.length > 0 ? localStored : (sharedLatestFacilities || []);
+
+  if (!forceRefresh && hasFreshLocalCache(FACILITY_STORAGE_KEY, FACILITY_FETCHED_AT_KEY)) {
+    const freshList = getStoredFacilities();
+    sharedLatestFacilities = freshList;
+    hasFetchedFacilitiesThisSession = true;
+    return freshList;
+  }
 
   if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
     return sharedLatestFacilities;
@@ -1680,17 +1736,20 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedFacilitiesThisSession = true;
       if (list.length > 0 || localFallback.length === 0) {
-        saveStoredFacilities(list);
+        if (saveStoredFacilities(list)) {
+          markLocalCacheTimestamp(FACILITY_FETCHED_AT_KEY);
+        }
         broadcastAllFacilities(list);
         return list;
       }
+      markLocalCacheTimestamp(FACILITY_FETCHED_AT_KEY);
       broadcastAllFacilities(localFallback);
       return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllFacilities fallback to local cache:', err);
+      console.warn('[Firestore] refreshAllFacilities failed, falling back to localStorage:', err);
       broadcastAllFacilities(localFallback);
       return localFallback;
     } finally {
@@ -1799,7 +1858,7 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
-const TEACHER_MEDIA_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for fresh view counts
+const TEACHER_MEDIA_CACHE_TTL_MS = COLLECTION_CACHE_TTL_MS; // 6 hours TTL
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
 let hasFetchedTeacherMediaThisSession = false;
@@ -1842,16 +1901,25 @@ function ensureTeacherMediaWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for teacher_media_repository (2-minute TTL unless forceRefresh=true)
+ * One-time getDocs fetch for teacher_media_repository (6-hour localStorage TTL unless forceRefresh=true)
  */
-export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
-  const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
-  const isMediaFresh =
+export async function refreshTeacherMedia(forceRefresh = false): Promise<TeacherMediaWork[]> {
+  const localStored = getFilteredStoredTeacherMedia();
+  const localFallback = localStored.length > 0 ? localStored : (sharedLatestTeacherMedia || []);
+
+  if (!forceRefresh && hasFreshLocalCache(TEACHER_MEDIA_STORAGE_KEY, TEACHER_MEDIA_FETCHED_AT_KEY, TEACHER_MEDIA_CACHE_TTL_MS)) {
+    const freshList = getFilteredStoredTeacherMedia();
+    sharedLatestTeacherMedia = freshList;
+    hasFetchedTeacherMediaThisSession = true;
+    return freshList;
+  }
+
+  const isMediaFreshInMemory =
     hasFetchedTeacherMediaThisSession &&
     lastTeacherMediaFetchedAt > 0 &&
     Date.now() - lastTeacherMediaFetchedAt < TEACHER_MEDIA_CACHE_TTL_MS;
 
-  if (!forceRefresh && isMediaFresh && sharedLatestTeacherMedia) {
+  if (!forceRefresh && isMediaFreshInMemory && sharedLatestTeacherMedia) {
     return sharedLatestTeacherMedia;
   }
 
@@ -1883,17 +1951,20 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
       hasFetchedTeacherMediaThisSession = true;
       lastTeacherMediaFetchedAt = Date.now();
       if (realWorks.length > 0 || localFallback.length === 0) {
-        saveStoredTeacherMedia(realWorks);
+        if (saveStoredTeacherMedia(realWorks)) {
+          markLocalCacheTimestamp(TEACHER_MEDIA_FETCHED_AT_KEY);
+        }
         broadcastTeacherMedia(realWorks);
         return realWorks;
       }
+      markLocalCacheTimestamp(TEACHER_MEDIA_FETCHED_AT_KEY);
       broadcastTeacherMedia(localFallback);
       return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshTeacherMedia fallback:', err);
+      console.warn('[Firestore] refreshTeacherMedia failed, falling back to localStorage:', err);
       broadcastTeacherMedia(localFallback);
       return localFallback;
     } finally {
@@ -2375,13 +2446,16 @@ export function getStoredSharedIdeas(): SharedIdeaItem[] {
   return list;
 }
 
-export function saveStoredSharedIdeas(list: SharedIdeaItem[]): void {
-  if (typeof window === 'undefined') return;
+export function saveStoredSharedIdeas(list: SharedIdeaItem[]): boolean {
+  if (typeof window === 'undefined') return false;
   try {
     const clean = list.map((item) => sanitizeSharedIdeaRecord(item));
     clean.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
     localStorage.setItem(SHARED_IDEAS_STORAGE_KEY, JSON.stringify(clean));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function addSharedIdeaToLocalCache(idea: SharedIdeaItem): void {
@@ -2420,10 +2494,18 @@ function ensureSharedIdeasWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for shared_ideas (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for shared_ideas (6-hour localStorage TTL unless forceRefresh=true)
  */
-export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIdeaItem[]> {
-  const localFallback = sharedLatestIdeas || getStoredSharedIdeas();
+export async function refreshSharedIdeas(forceRefresh = false): Promise<SharedIdeaItem[]> {
+  const localFallback = getStoredSharedIdeas();
+  const effectiveFallback = localFallback.length > 0 ? localFallback : (sharedLatestIdeas || []);
+
+  if (!forceRefresh && hasFreshLocalCache(SHARED_IDEAS_STORAGE_KEY, SHARED_IDEAS_FETCHED_AT_KEY)) {
+    const freshIdeas = getStoredSharedIdeas();
+    sharedLatestIdeas = freshIdeas;
+    hasFetchedSharedIdeasThisSession = true;
+    return freshIdeas;
+  }
 
   if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
     return sharedLatestIdeas;
@@ -2455,16 +2537,18 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
       const finalIdeas = Array.from(mergedMap.values());
       finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedSharedIdeasThisSession = true;
-      saveStoredSharedIdeas(finalIdeas);
+      if (saveStoredSharedIdeas(finalIdeas)) {
+        markLocalCacheTimestamp(SHARED_IDEAS_FETCHED_AT_KEY);
+      }
       broadcastSharedIdeas(finalIdeas);
       return finalIdeas;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshSharedIdeas fallback to cache/seed:', err);
-      broadcastSharedIdeas(localFallback);
-      return localFallback;
+      console.warn('[Firestore] refreshSharedIdeas failed, falling back to localStorage:', err);
+      broadcastSharedIdeas(effectiveFallback);
+      return effectiveFallback;
     } finally {
       inFlightSharedIdeasFetch = null;
     }

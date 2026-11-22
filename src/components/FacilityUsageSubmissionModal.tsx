@@ -32,8 +32,9 @@ import {
   updateFacilitySubmission,
   deleteFacilitySubmission,
   subscribeUserSubmissions, 
-  subscribeAllSubmissions, 
+  subscribeAllSubmissions,
   refreshAllFacilities,
+  getManualRefreshCooldownSeconds,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify
@@ -77,10 +78,14 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
 
   // Status & Submit State
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
+    getManualRefreshCooldownSeconds('facilities')
+  );
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -108,10 +113,26 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (refreshCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('facilities'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshCooldownSec]);
+
   const handleRefresh = async () => {
+    const remaining = getManualRefreshCooldownSeconds('facilities');
+    if (remaining > 0) {
+      setRefreshCooldownSec(remaining);
+      setActionNotice(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชอีกครั้ง`);
+      setTimeout(() => setActionNotice(null), 2500);
+      return;
+    }
     setIsRefreshing(true);
     try {
       await refreshAllFacilities(true);
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('facilities') || 60);
       setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
       setTimeout(() => setActionNotice(null), 2500);
     } finally {
@@ -171,6 +192,7 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   // Handle Form Submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
 
     if (!teacherName.trim()) {
       alert('กรุณากรอก ชื่อ - สกุล (ครูผู้สอน)');
@@ -185,58 +207,60 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     setIsSubmitting(true);
     setSubmitSuccessMsg(null);
 
-    if (editingId) {
-      const result = await updateFacilitySubmission(
-        editingId,
-        {
-          teacherName: teacherName.trim(),
-          subjectGroup,
-          learningCenter,
-          periods: selectedPeriods,
-          usageDateTime,
-          feedback: feedback.trim(),
-          imageUrl: imagePreview || undefined,
-        },
-        userEmail
-      );
+    try {
+      if (editingId) {
+        const result = await updateFacilitySubmission(
+          editingId,
+          {
+            teacherName: teacherName.trim(),
+            subjectGroup,
+            learningCenter,
+            periods: selectedPeriods,
+            usageDateTime,
+            feedback: feedback.trim(),
+            imageUrl: imagePreview || undefined,
+          },
+          userEmail
+        );
 
-      setIsSubmitting(false);
+        if (result.success) {
+          setActionNotice(`บันทึกการแก้ไขข้อมูลการใช้ ${learningCenter} เรียบร้อยแล้ว`);
+          setEditingId(null);
+          setFeedback('');
+          setImagePreview(null);
+          setActiveTab('status');
+          setTimeout(() => setActionNotice(null), 3000);
+        } else {
+          alert(result.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+        }
+        return;
+      }
+
+      const result = await saveFacilitySubmission({
+        teacherName: teacherName.trim(),
+        subjectGroup,
+        learningCenter,
+        periods: selectedPeriods,
+        usageDateTime,
+        feedback: feedback.trim(),
+        imageUrl: imagePreview || undefined,
+        userEmail,
+      });
 
       if (result.success) {
-        setActionNotice(`บันทึกการแก้ไขข้อมูลการใช้ ${learningCenter} เรียบร้อยแล้ว`);
-        setEditingId(null);
+        setSubmitSuccessMsg(`บันทึกข้อมูลการใช้ ${learningCenter} ลงระบบเรียบร้อยแล้ว (รหัส: ${result.id})`);
         setFeedback('');
         setImagePreview(null);
-        setActiveTab('status');
-        setTimeout(() => setActionNotice(null), 3000);
+        setTimeout(() => {
+          setActiveTab('status');
+        }, 1500);
       } else {
-        alert(result.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
+        alert(result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
       }
-      return;
-    }
-
-    const result = await saveFacilitySubmission({
-      teacherName: teacherName.trim(),
-      subjectGroup,
-      learningCenter,
-      periods: selectedPeriods,
-      usageDateTime,
-      feedback: feedback.trim(),
-      imageUrl: imagePreview || undefined,
-      userEmail,
-    });
-
-    setIsSubmitting(false);
-
-    if (result.success) {
-      setSubmitSuccessMsg(`บันทึกข้อมูลการใช้ ${learningCenter} ลงระบบเรียบร้อยแล้ว (รหัส: ${result.id})`);
-      setFeedback('');
-      setImagePreview(null);
-      setTimeout(() => {
-        setActiveTab('status');
-      }, 1500);
-    } else {
-      alert(result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    } catch {
+      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -259,15 +283,23 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   };
 
   const handleDelete = async (sub: FacilitySubmission) => {
+    if (deletingId) return;
     if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบบันทึกการใช้ "${sub.learningCenter}" (${sub.usageDateTime.replace('T', ' ')})?`)) {
       return;
     }
-    const res = await deleteFacilitySubmission(sub.id, userEmail);
-    if (res.success) {
-      setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
-      setTimeout(() => setActionNotice(null), 3000);
-    } else {
-      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+    setDeletingId(sub.id);
+    try {
+      const res = await deleteFacilitySubmission(sub.id, userEmail);
+      if (res.success) {
+        setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
+        setTimeout(() => setActionNotice(null), 3000);
+      } else {
+        alert(res.error || 'ไม่สามารถลบข้อมูลได้');
+      }
+    } catch {
+      alert('เกิดข้อผิดพลาดในการลบข้อมูล');
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -359,12 +391,14 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing}
+              disabled={isRefreshing || refreshCooldownSec > 0}
               className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
+              title={refreshCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshCooldownSec} วินาที` : 'รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className="hidden sm:inline">
+                {refreshCooldownSec > 0 ? `รีเฟรช (${refreshCooldownSec}s)` : 'รีเฟรช'}
+              </span>
             </button>
             <button
               type="button"
@@ -819,12 +853,13 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
 
                           <button
                             type="button"
+                            disabled={Boolean(deletingId)}
                             onClick={() => handleDelete(sub)}
-                            className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
+                            className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium cursor-pointer"
                             title="ลบข้อมูล"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            <span>ลบ</span>
+                            <span>{deletingId === sub.id ? 'กำลังลบ...' : 'ลบ'}</span>
                           </button>
                         </>
                       )}
@@ -945,8 +980,9 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                             </button>
                             <button
                               type="button"
+                              disabled={Boolean(deletingId)}
                               onClick={() => handleDelete(row)}
-                              className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
+                              className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 cursor-pointer"
                               title="Admin: ลบบันทึกนี้"
                             >
                               <Trash2 className="w-3 h-3" />

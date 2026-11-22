@@ -203,7 +203,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, true).catch(() => {});
+    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, false).catch(() => {});
     recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 

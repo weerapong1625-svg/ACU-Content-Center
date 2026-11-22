@@ -31,8 +31,9 @@ export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
+export const LOGIN_LOGS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for login_logs getDocs
 export const SITE_SUMMARY_CACHE_KEY = 'acu_site_summary_cache';
-export const VISITOR_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for visitor & summary counts
+export const VISITOR_CACHE_TTL_MS = 2 * 60 * 1000; // 2 minutes TTL for lightweight site_summary counter
 
 export interface SiteVisitSummary {
   totalVisits: number;
@@ -339,6 +340,7 @@ export async function fetchSiteSummaryOnce(forceRefresh = false): Promise<SiteVi
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
+      console.warn('[Firestore] fetchSiteSummaryOnce failed, falling back to localStorage:', err);
       return cached;
     } finally {
       inFlightSiteSummaryFetch = null;
@@ -1111,10 +1113,15 @@ export async function fetchAdminLoginLogsOnce(
   const storedFetchedAt =
     lastLoginLogsFetchedAt ||
     (typeof window !== 'undefined' ? Number(localStorage.getItem(LOGIN_LOGS_FETCHED_AT_KEY) || 0) : 0);
-  const isLogsCacheFresh = storedFetchedAt > 0 && Date.now() - storedFetchedAt < VISITOR_CACHE_TTL_MS;
+  const hasStoredLogs =
+    typeof window !== 'undefined' && localStorage.getItem(LOGIN_LOGS_STORAGE_KEY) !== null;
+  const isLogsCacheFresh =
+    storedFetchedAt > 0 && Date.now() - storedFetchedAt < LOGIN_LOGS_CACHE_TTL_MS;
 
-  if (!forceRefresh && hasFetchedLoginLogsFromServer && isLogsCacheFresh && sharedLatestLogs) {
-    return sharedLatestLogs;
+  if (!forceRefresh && isLogsCacheFresh && (hasStoredLogs || (hasFetchedLoginLogsFromServer && sharedLatestLogs))) {
+    hasFetchedLoginLogsFromServer = true;
+    broadcastLogsToListeners(localFallback);
+    return localFallback;
   }
 
   if (!forceRefresh && inFlightLoginLogsFetch) {
@@ -1172,7 +1179,7 @@ export async function fetchAdminLoginLogsOnce(
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('Login logs one-time fetch fallback (using cached logs):', err);
+      console.warn('[Firestore] fetchAdminLoginLogsOnce failed, falling back to localStorage:', err);
       broadcastLogsToListeners(localFallback);
       return localFallback;
     } finally {
@@ -1320,16 +1327,35 @@ export async function saveUserProfile(profile: UserProfileData): Promise<boolean
  * Fetch user profile from Firestore
  */
 export async function fetchUserProfile(email: string): Promise<UserProfileData | null> {
+  const normEmail = (email || '').toLowerCase().trim();
+  if (!normEmail) return null;
+  const localProfileKey = `acu_user_full_profile_${normEmail}`;
+  let cachedFallback: UserProfileData | null = null;
   try {
-    const safeDocId = encodeURIComponent(email.toLowerCase().trim());
+    const raw = localStorage.getItem(localProfileKey);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.email) {
+        cachedFallback = {
+          email: parsed.email,
+          displayName: parsed.displayName || parsed.fullName || normEmail.split('@')[0],
+          avatarUrl: parsed.avatarUrl || parsed.photoURL || '',
+          updatedAt: parsed.updatedAt,
+        };
+      }
+    }
+  } catch {}
+
+  try {
+    const safeDocId = encodeURIComponent(normEmail);
     const profileRef = doc(db, 'user_profiles', safeDocId);
     const snapshot = await getDoc(profileRef);
     if (snapshot.exists()) {
       return snapshot.data() as UserProfileData;
     }
-    return null;
+    return cachedFallback;
   } catch (err) {
-    console.error('Failed to fetch user profile from Firestore:', err);
-    return null;
+    console.warn('[Firestore] fetchUserProfile failed, falling back to localStorage:', err);
+    return cachedFallback;
   }
 }

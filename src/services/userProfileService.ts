@@ -266,7 +266,8 @@ function setStoredAvatarUrl(email: string, avatarUrl: string): void {
 
 // Guard concurrent / redundant login syncs and cache single users/{uid} + user_profiles/{safeDocId} reads
 const USERS_UID_CACHE_PREFIX = 'acu_users_uid_cache_';
-const PROFILE_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const PROFILE_DOC_CACHE_PREFIX = 'acu_profile_doc_cache_';
+const PROFILE_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL
 const inFlightAvatarSyncs = new Map<string, Promise<FullUserProfile | null>>();
 const lastAvatarSyncTime = new Map<string, number>();
 const sessionUsersDocCache = new Map<string, {
@@ -284,7 +285,10 @@ const inFlightUsersDocFetch = new Map<string, Promise<{
 const sessionProfileDocCache = new Map<string, Record<string, any> | null>();
 const inFlightProfileDocFetch = new Map<string, Promise<Record<string, any> | null>>();
 
-function getLocalUsersUidCache(uid: string): {
+function getLocalUsersUidCache(
+  uid: string,
+  allowExpired = false
+): {
   uid: string;
   data: Record<string, any> | null;
   photoURL: string;
@@ -296,7 +300,11 @@ function getLocalUsersUidCache(uid: string): {
     const raw = localStorage.getItem(`${USERS_UID_CACHE_PREFIX}${uid}`);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.cachedAt === 'number' && Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS) {
+    if (
+      parsed &&
+      typeof parsed.cachedAt === 'number' &&
+      (allowExpired || Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS)
+    ) {
       return parsed;
     }
   } catch {}
@@ -315,6 +323,33 @@ function setLocalUsersUidCache(
   if (typeof window === 'undefined' || !uid) return;
   try {
     localStorage.setItem(`${USERS_UID_CACHE_PREFIX}${uid}`, JSON.stringify({ ...entry, cachedAt: Date.now() }));
+  } catch {}
+}
+
+function getLocalProfileDocCache(
+  safeDocId: string,
+  allowExpired = false
+): { data: Record<string, any> | null; cachedAt: number } | null {
+  if (typeof window === 'undefined' || !safeDocId) return null;
+  try {
+    const raw = localStorage.getItem(`${PROFILE_DOC_CACHE_PREFIX}${safeDocId}`);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (
+      parsed &&
+      typeof parsed.cachedAt === 'number' &&
+      (allowExpired || Date.now() - parsed.cachedAt < PROFILE_CACHE_TTL_MS)
+    ) {
+      return parsed;
+    }
+  } catch {}
+  return null;
+}
+
+function setLocalProfileDocCache(safeDocId: string, data: Record<string, any> | null): void {
+  if (typeof window === 'undefined' || !safeDocId) return;
+  try {
+    localStorage.setItem(`${PROFILE_DOC_CACHE_PREFIX}${safeDocId}`, JSON.stringify({ data, cachedAt: Date.now() }));
   } catch {}
 }
 
@@ -364,6 +399,17 @@ async function readSingleUserDocByUid(
     if (sessionUsersDocCache.has(cleanUid)) {
       return sessionUsersDocCache.get(cleanUid)!;
     }
+    const freshLocal = getLocalUsersUidCache(cleanUid, false);
+    if (freshLocal) {
+      const cachedResult = {
+        uid: freshLocal.uid,
+        data: freshLocal.data,
+        photoURL: freshLocal.photoURL || '',
+        hasDeadBlob: Boolean(freshLocal.hasDeadBlob),
+      };
+      sessionUsersDocCache.set(cleanUid, cachedResult);
+      return cachedResult;
+    }
     if (inFlightUsersDocFetch.has(cleanUid)) {
       return inFlightUsersDocFetch.get(cleanUid)!;
     }
@@ -392,9 +438,10 @@ async function readSingleUserDocByUid(
       sessionUsersDocCache.set(cleanUid, emptyResult);
       setLocalUsersUidCache(cleanUid, emptyResult);
       return emptyResult;
-    } catch {
-      // Strictly isolated: silently fall back on permission-denied / quota / network errors
-      const localFallback = getLocalUsersUidCache(cleanUid);
+    } catch (err) {
+      console.warn('[Firestore] readSingleUserDocByUid failed, falling back to localStorage:', err);
+      // Strictly isolated: silently fall back on permission-denied / quota / network errors (even if expired)
+      const localFallback = getLocalUsersUidCache(cleanUid, true);
       if (localFallback) {
         return {
           uid: localFallback.uid,
@@ -414,18 +461,25 @@ async function readSingleUserDocByUid(
 }
 
 /**
- * Deduplicated single-document read on `user_profiles/{safeDocId}` (at most once per session unless forced)
+ * Deduplicated single-document read on `user_profiles/{safeDocId}` (6-hour localStorage TTL unless forced)
  */
 async function readSingleProfileDocOnce(
   safeDocId: string,
   forceRefresh = false
 ): Promise<Record<string, any> | null> {
   if (!safeDocId) return null;
-  if (!forceRefresh && sessionProfileDocCache.has(safeDocId)) {
-    return sessionProfileDocCache.get(safeDocId) ?? null;
-  }
-  if (!forceRefresh && inFlightProfileDocFetch.has(safeDocId)) {
-    return inFlightProfileDocFetch.get(safeDocId)!;
+  if (!forceRefresh) {
+    if (sessionProfileDocCache.has(safeDocId)) {
+      return sessionProfileDocCache.get(safeDocId) ?? null;
+    }
+    const freshLocal = getLocalProfileDocCache(safeDocId, false);
+    if (freshLocal) {
+      sessionProfileDocCache.set(safeDocId, freshLocal.data ?? null);
+      return freshLocal.data ?? null;
+    }
+    if (inFlightProfileDocFetch.has(safeDocId)) {
+      return inFlightProfileDocFetch.get(safeDocId)!;
+    }
   }
 
   const p = (async () => {
@@ -434,9 +488,12 @@ async function readSingleProfileDocOnce(
       const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
       const data = profileSnap.exists() ? profileSnap.data() : null;
       sessionProfileDocCache.set(safeDocId, data);
+      setLocalProfileDocCache(safeDocId, data);
       return data;
-    } catch {
-      return sessionProfileDocCache.get(safeDocId) ?? null;
+    } catch (err) {
+      console.warn('[Firestore] readSingleProfileDocOnce failed, falling back to localStorage:', err);
+      const expiredLocal = getLocalProfileDocCache(safeDocId, true);
+      return sessionProfileDocCache.get(safeDocId) ?? expiredLocal?.data ?? null;
     } finally {
       inFlightProfileDocFetch.delete(safeDocId);
     }
@@ -521,7 +578,9 @@ export async function saveUserPhotoToFirestore(
   await writeSingleUserDocByUid(resolvedUid, photoPayload);
 
   const prevProfCache = sessionProfileDocCache.get(safeDocId);
-  sessionProfileDocCache.set(safeDocId, { ...(prevProfCache || {}), ...photoPayload });
+  const mergedProfCache = { ...(prevProfCache || {}), ...photoPayload };
+  sessionProfileDocCache.set(safeDocId, mergedProfCache);
+  setLocalProfileDocCache(safeDocId, mergedProfCache);
 
   try {
     await setDoc(doc(db, 'user_profiles', safeDocId), photoPayload, { merge: true });
@@ -1153,6 +1212,7 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
   try {
     const safeDocId = getSafeDocId(normEmail);
     sessionProfileDocCache.set(safeDocId, payload);
+    setLocalProfileDocCache(safeDocId, payload);
     const profileRef = doc(db, 'user_profiles', safeDocId);
     await setDoc(profileRef, payload, { merge: true });
     return true;
@@ -1437,12 +1497,30 @@ export async function adjustUserSubmissionCount(
 
 // Smart-cached pool for `user_profiles` only (no collection-wide `users` query, no onSnapshot)
 const ALL_USER_PROFILES_CACHE_KEY = 'acu_cached_all_user_profiles_map';
+const ALL_USER_PROFILES_FETCHED_AT_KEY = 'acu_cached_all_user_profiles_fetched_at';
+const ALL_USER_PROFILES_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
 let hasFetchedAllUserProfilesThisSession = false;
 let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
 let userProfilesWindowListenersAttached = false;
+
+function hasFreshAllUserProfilesCache(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const raw = localStorage.getItem(ALL_USER_PROFILES_CACHE_KEY);
+    const rawTs = localStorage.getItem(ALL_USER_PROFILES_FETCHED_AT_KEY);
+    if (raw === null || !rawTs) return false;
+    const fetchedAt = Number(rawTs);
+    if (!Number.isFinite(fetchedAt) || fetchedAt <= 0) return false;
+    if (Date.now() - fetchedAt >= ALL_USER_PROFILES_TTL_MS) return false;
+    const parsed = JSON.parse(raw);
+    return Boolean(parsed && typeof parsed === 'object');
+  } catch {
+    return false;
+  }
+}
 
 function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   if (typeof window === 'undefined') return {};
@@ -1458,11 +1536,14 @@ function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   return {};
 }
 
-function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): void {
-  if (typeof window === 'undefined') return;
+function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): boolean {
+  if (typeof window === 'undefined') return false;
   try {
     localStorage.setItem(ALL_USER_PROFILES_CACHE_KEY, JSON.stringify(map));
-  } catch {}
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function rebuildAndBroadcastMergedProfiles(): Record<string, FullUserProfile> {
@@ -1551,13 +1632,20 @@ function ensureUserProfilesWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for `user_profiles` (deduplicated per page load unless forceRefresh=true)
+ * One-time getDocs fetch for `user_profiles` (6-hour localStorage TTL unless forceRefresh=true)
  */
-export async function refreshAllUserProfiles(forceRefresh = true): Promise<Record<string, FullUserProfile>> {
-  const localFallback = sharedUserProfilesMap || {
+export async function refreshAllUserProfiles(forceRefresh = false): Promise<Record<string, FullUserProfile>> {
+  const storedMap = {
     ...getStoredAllUserProfilesMap(),
     ...getAllLocalUserProfilesMap(),
   };
+  const localFallback = Object.keys(storedMap).length > 0 ? storedMap : (sharedUserProfilesMap || {});
+
+  if (!forceRefresh && hasFreshAllUserProfilesCache()) {
+    sharedUserProfilesMap = storedMap;
+    hasFetchedAllUserProfilesThisSession = true;
+    return storedMap;
+  }
 
   if (!forceRefresh && hasFetchedAllUserProfilesThisSession && sharedUserProfilesMap) {
     return sharedUserProfilesMap;
@@ -1593,14 +1681,24 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
       if (Object.keys(nextProfileDocs).length > 0 || Object.keys(localFallback).length === 0) {
         latestProfileDocsByEmail = nextProfileDocs;
         hasFetchedAllUserProfilesThisSession = true;
-        return rebuildAndBroadcastMergedProfiles();
+        const rebuilt = rebuildAndBroadcastMergedProfiles();
+        try {
+          if (localStorage.getItem(ALL_USER_PROFILES_CACHE_KEY) !== null) {
+            localStorage.setItem(ALL_USER_PROFILES_FETCHED_AT_KEY, String(Date.now()));
+          }
+        } catch {}
+        return rebuilt;
       }
+      try {
+        localStorage.setItem(ALL_USER_PROFILES_FETCHED_AT_KEY, String(Date.now()));
+      } catch {}
       broadcastUserProfiles(localFallback);
       return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
+      console.warn('[Firestore] refreshAllUserProfiles failed, falling back to localStorage:', err);
       broadcastUserProfiles(localFallback);
       return localFallback;
     } finally {
