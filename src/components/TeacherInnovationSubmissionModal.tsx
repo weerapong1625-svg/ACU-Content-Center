@@ -1,10 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   X, 
   Send, 
   CheckCircle2, 
   FileSpreadsheet, 
   Clock, 
+  Upload, 
   Image as ImageIcon, 
   Sparkles, 
   ExternalLink,
@@ -18,12 +19,7 @@ import {
   Trash2,
   AlertCircle,
   Search,
-  RefreshCw,
-  Youtube,
-  FileText,
-  Palette,
-  HardDrive,
-  Globe
+  RefreshCw
 } from 'lucide-react';
 import { 
   GRADE_LEVELS, 
@@ -51,13 +47,6 @@ import {
   getUnifiedTeacherMediaRecords
 } from '../services/submissionService';
 import { resolveUserUid } from '../services/userProfileService';
-import {
-  detectMediaLinkCategory,
-  getYouTubeThumbnailUrl,
-  isDataOrBlobUri,
-  resolveDisplayThumbnailUrl,
-  sanitizeMediaThumbnailForFirestore,
-} from '../utils/mediaThumbnailUtils';
 
 interface TeacherInnovationSubmissionModalProps {
   userEmail: string;
@@ -84,7 +73,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [productionType, setProductionType] = useState<string>(PRODUCTION_TYPES[0]);
   const [usageDetails, setUsageDetails] = useState('');
   const [onlineUrl, setOnlineUrl] = useState('');
-  const [imagePreview, setImagePreview] = useState<string>('');
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
 
   // Filter state for viewing by Subject Group & Status search
   const [selectedGroupFilter, setSelectedGroupFilter] = useState<string>('all');
@@ -97,7 +86,6 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
   // Status & List states
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [deletingSubmissionId, setDeletingSubmissionId] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState(false);
   const [submittedId, setSubmittedId] = useState('');
   const [allSubmissions, setAllSubmissions] = useState<InnovationSubmission[]>([]);
@@ -112,6 +100,8 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
   const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Subscribe once via shared multiplexed streams (zero extra Firestore reads; never tear down on editingId change)
   useEffect(() => {
@@ -213,9 +203,45 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     return 1;
   }, [unifiedUserMedia.slots]);
 
+  // Handle image upload & compression
+  const handleImageChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('กรุณาเลือกไฟล์รูปภาพเท่านั้น');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        const MAX_WIDTH = 900;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > MAX_WIDTH) {
+          height = Math.round((height * MAX_WIDTH) / width);
+          width = MAX_WIDTH;
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          setImagePreview(canvas.toDataURL('image/jpeg', 0.8));
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
 
     if (!teacherName.trim()) {
       alert('กรุณากรอก ชื่อ - สกุล');
@@ -229,83 +255,75 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
       alert('กรุณากรอก ระบุการนำสื่อไปใช้อย่างไร 1)วิชา 2)หน่วยการเรียนรู้');
       return;
     }
-    if (isDataOrBlobUri(imagePreview)) {
-      alert('ไม่รองรับรูปภาพแบบ Base64 หรือ blob: เพื่อประหยัดพื้นที่ฐานข้อมูล กรุณาใช้ลิงก์ https:// หรือปล่อยว่างให้ระบบดึงปกจาก YouTube / ไอคอนอัตโนมัติ');
-      return;
-    }
-
-    const sanitizedCoverUrl = sanitizeMediaThumbnailForFirestore(imagePreview, onlineUrl.trim());
 
     setIsSubmitting(true);
-    try {
-      if (editingId) {
-        // Perform Update
-        const res = await updateInnovationSubmission(
-          editingId,
-          {
-            teacherName: teacherName.trim(),
-            subjectGroup,
-            gradeLevel,
-            itemNumber,
-            mediaTitle: mediaTitle.trim(),
-            mediaType,
-            productionType,
-            usageDetails: usageDetails.trim(),
-            onlineUrl: onlineUrl.trim(),
-            imageUrl: sanitizedCoverUrl,
-            coverImageUrl: sanitizedCoverUrl,
-          },
-          userEmail
-        );
 
-        if (res.success) {
-          setActionNotice(`บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber} เรียบร้อยแล้ว`);
-          setEditingId(null);
-          setMediaTitle('');
-          setUsageDetails('');
-          setOnlineUrl('');
-          setImagePreview('');
-          setActiveTab('status');
-          setTimeout(() => setActionNotice(null), 3000);
-        } else {
-          alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
-        }
-        return;
-      }
+    if (editingId) {
+      // Perform Update
+      const res = await updateInnovationSubmission(
+        editingId,
+        {
+          teacherName: teacherName.trim(),
+          subjectGroup,
+          gradeLevel,
+          itemNumber,
+          mediaTitle: mediaTitle.trim(),
+          mediaType,
+          productionType,
+          usageDetails: usageDetails.trim(),
+          onlineUrl: onlineUrl.trim(),
+          imageUrl: imagePreview || undefined,
+        },
+        userEmail
+      );
 
-      // Perform Create
-      const res = await saveInnovationSubmission({
-        teacherName: teacherName.trim(),
-        subjectGroup,
-        gradeLevel,
-        itemNumber,
-        mediaTitle: mediaTitle.trim(),
-        mediaType,
-        productionType,
-        usageDetails: usageDetails.trim(),
-        onlineUrl: onlineUrl.trim(),
-        imageUrl: sanitizedCoverUrl || undefined,
-        userEmail,
-      });
+      setIsSubmitting(false);
 
       if (res.success) {
-        setSubmittedId(res.id);
-        setSubmitSuccess(true);
-        // Reset some fields for next submission
+        setActionNotice(`บันทึกการแก้ไขสื่อชิ้นที่ ${itemNumber} เรียบร้อยแล้ว`);
+        setEditingId(null);
         setMediaTitle('');
         setUsageDetails('');
         setOnlineUrl('');
-        setImagePreview('');
-        if (itemNumber < 5) {
-          setItemNumber((prev) => prev + 1);
-        }
+        setImagePreview(null);
+        setActiveTab('status');
+        setTimeout(() => setActionNotice(null), 3000);
       } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
       }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
-    } finally {
-      setIsSubmitting(false);
+      return;
+    }
+
+    // Perform Create
+    const res = await saveInnovationSubmission({
+      teacherName: teacherName.trim(),
+      subjectGroup,
+      gradeLevel,
+      itemNumber,
+      mediaTitle: mediaTitle.trim(),
+      mediaType,
+      productionType,
+      usageDetails: usageDetails.trim(),
+      onlineUrl: onlineUrl.trim(),
+      imageUrl: imagePreview || undefined,
+      userEmail,
+    });
+
+    setIsSubmitting(false);
+
+    if (res.success) {
+      setSubmittedId(res.id);
+      setSubmitSuccess(true);
+      // Reset some fields for next submission
+      setMediaTitle('');
+      setUsageDetails('');
+      setOnlineUrl('');
+      setImagePreview(null);
+      if (itemNumber < 5) {
+        setItemNumber((prev) => prev + 1);
+      }
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
     }
   };
 
@@ -320,7 +338,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     setProductionType(sub.productionType);
     setUsageDetails(sub.usageDetails);
     setOnlineUrl(sub.onlineUrl || '');
-    setImagePreview(sanitizeMediaThumbnailForFirestore(sub.imageUrl || sub.coverImageUrl, sub.onlineUrl));
+    setImagePreview(sub.imageUrl || null);
     setActiveTab('form');
   };
 
@@ -329,27 +347,19 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     setMediaTitle('');
     setUsageDetails('');
     setOnlineUrl('');
-    setImagePreview('');
+    setImagePreview(null);
   };
 
   const handleDeleteSubmission = async (sub: InnovationSubmission) => {
-    if (deletingSubmissionId) return;
     if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${sub.mediaTitle}" (ชิ้นที่ ${sub.itemNumber})?`)) {
       return;
     }
-    setDeletingSubmissionId(sub.id);
-    try {
-      const res = await deleteInnovationSubmission(sub.id, userEmail);
-      if (res.success) {
-        setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
-        setTimeout(() => setActionNotice(null), 3000);
-      } else {
-        alert(res.error || 'ไม่สามารถลบข้อมูลได้');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการลบข้อมูล');
-    } finally {
-      setDeletingSubmissionId(null);
+    const res = await deleteInnovationSubmission(sub.id, userEmail);
+    if (res.success) {
+      setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
+      setTimeout(() => setActionNotice(null), 3000);
+    } else {
+      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
     }
   };
 
@@ -837,95 +847,75 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                   />
                 </div>
 
-                {/* 9. ภาพปกชิ้นงานอัตโนมัติ (YouTube / ไอคอน / External URL) */}
-                {(() => {
-                  const autoYtThumb = getYouTubeThumbnailUrl(onlineUrl);
-                  const resolvedPreview = resolveDisplayThumbnailUrl(imagePreview, onlineUrl);
-                  const linkCat = detectMediaLinkCategory(onlineUrl, mediaType);
-                  const renderCategoryIcon = () => {
-                    switch (linkCat.key) {
-                      case 'youtube':
-                        return <Youtube className="w-7 h-7 text-rose-400" />;
-                      case 'gdrive':
-                        return <HardDrive className="w-7 h-7 text-emerald-400" />;
-                      case 'canva':
-                        return <Palette className="w-7 h-7 text-cyan-400" />;
-                      case 'pdf':
-                      case 'print':
-                        return <FileText className="w-7 h-7 text-amber-400" />;
-                      case 'tech':
-                        return <Globe className="w-7 h-7 text-blue-400" />;
-                      default:
-                        return <Layers className="w-7 h-7 text-indigo-400" />;
-                    }
-                  };
+                {/* 9. ภาพปกชิ้นงาน (Cover Image) */}
+                <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/80">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div>
+                      <label className="block text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
+                        <ImageIcon className="w-4 h-4 text-blue-400" />
+                        <span>ภาพปกชิ้นงาน (Cover Image)</span>
+                      </label>
+                      <p className="text-[11px] text-slate-400">
+                        ภาพนี้จะนำไปแสดงเป็นภาพปกในหน้า "คลังสื่อคุณครูผลิตเอง" หน้าโปรไฟล์ และหน้าแสดงสื่อทั้งหมด
+                      </p>
+                    </div>
+                    {imagePreview && (
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                        มีภาพปกแล้ว
+                      </span>
+                    )}
+                  </div>
 
-                  return (
-                    <div className="p-4 rounded-2xl bg-slate-800/60 border border-slate-700/80 space-y-3">
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div>
-                          <label className="block text-xs sm:text-sm font-bold text-white flex items-center gap-1.5">
-                            <ImageIcon className="w-4 h-4 text-blue-400" />
-                            <span>ภาพปกชิ้นงาน (ประหยัดพื้นที่ฐานข้อมูลอัตโนมัติ)</span>
-                          </label>
-                          <p className="text-[11px] text-slate-400">
-                            วางลิงก์ YouTube เพื่อดึงภาพปกอัตโนมัติ หรือแสดงไอคอนหมวดหมู่สื่อสำหรับ Google Drive / Canva / PDF
-                          </p>
-                        </div>
-                        {autoYtThumb && (
-                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/30 font-semibold">
-                            ดึงปก YouTube อัตโนมัติ
-                          </span>
-                        )}
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleImageChange}
+                    className="hidden"
+                  />
+
+                  {imagePreview ? (
+                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
+                      <div className="relative rounded-2xl overflow-hidden border-2 border-blue-500/60 shadow-lg group w-44 h-28 bg-slate-900 flex-shrink-0">
+                        <img
+                          src={imagePreview}
+                          alt="Cover Preview"
+                          className="w-full h-full object-cover"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => setImagePreview(null)}
+                          className="absolute top-2 right-2 w-6 h-6 rounded-full bg-rose-600/90 hover:bg-rose-500 text-white flex items-center justify-center transition-colors shadow-md"
+                          title="ลบภาพปก"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
                       </div>
-
-                      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3">
-                        <div className="relative rounded-2xl overflow-hidden border border-slate-700 shadow-lg w-44 h-24 bg-slate-900 flex-shrink-0 flex items-center justify-center">
-                          {resolvedPreview ? (
-                            <img
-                              src={resolvedPreview}
-                              alt="Cover Preview"
-                              className="w-full h-full object-cover"
-                            />
-                          ) : (
-                            <div className="flex flex-col items-center justify-center gap-1 text-center px-2">
-                              {renderCategoryIcon()}
-                              <span className="text-[10px] font-semibold text-slate-300">{linkCat.label}</span>
-                            </div>
-                          )}
-                        </div>
-
-                        <div className="flex-1 w-full space-y-2">
-                          <label className="block text-[11px] text-slate-300 font-medium">
-                            ลิงก์รูปภาพปกภายนอก (ไม่บังคับ — เฉพาะลิงก์ https:// เท่านั้น)
-                          </label>
-                          <div className="flex gap-2">
-                            <input
-                              type="url"
-                              value={imagePreview}
-                              onChange={(e) => setImagePreview(e.target.value)}
-                              placeholder="https://... (เว้นว่างไว้หากใช้ปก YouTube หรือไอคอนอัตโนมัติ)"
-                              className="flex-1 px-3 py-2 rounded-xl bg-slate-900/80 border border-slate-700 focus:border-blue-500 text-xs text-white placeholder-slate-500 outline-none"
-                            />
-                            {imagePreview && (
-                              <button
-                                type="button"
-                                onClick={() => setImagePreview('')}
-                                className="px-2.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs"
-                                title="ล้างลิงก์ภาพปก"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                          <p className="text-[10px] text-slate-400">
-                            ระบบงดบันทึกไฟล์ภาพ Base64 ลงในคลังสื่อ เพื่อรองรับผลงานคุณครูหลายพันรายการได้อย่างรวดเร็วและไม่เต็มโควต้า 1GB
-                          </p>
-                        </div>
+                      <div className="space-y-2">
+                        <button
+                          type="button"
+                          onClick={() => fileInputRef.current?.click()}
+                          className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-slate-700"
+                        >
+                          <Upload className="w-3.5 h-3.5 text-blue-400" />
+                          <span>เปลี่ยนรูปภาพปกใหม่</span>
+                        </button>
+                        <p className="text-[10px] text-slate-400">
+                          ระบบจะปรับสเกลขนาดและจัดเก็บเป็นภาพปกผลงานใน Firestore อัตโนมัติ
+                        </p>
                       </div>
                     </div>
-                  );
-                })()}
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="w-full px-5 py-4 rounded-xl border border-dashed border-slate-600 hover:border-blue-400 bg-slate-900/40 hover:bg-slate-800/60 text-xs sm:text-sm text-slate-300 flex flex-col sm:flex-row items-center justify-center gap-2 transition-all cursor-pointer"
+                    >
+                      <Upload className="w-5 h-5 text-blue-400 flex-shrink-0" />
+                      <span>คลิกเพื่ออัปโหลดภาพปกชิ้นงาน (JPG, PNG)...</span>
+                    </button>
+                  )}
+                </div>
 
                 {/* Form Action Buttons */}
                 <div className="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
@@ -1216,35 +1206,13 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                       const isSubmitted = Boolean(match || (unifiedSlot && unifiedSlot.title));
                       const displayTitle = match?.mediaTitle || unifiedSlot?.title || '';
                       const displayMediaType = match?.mediaType || unifiedSlot?.category || 'สื่อการสอน';
+                      const displayImageUrl = match?.imageUrl || unifiedSlot?.coverImageUrl || '';
                       const displayOnlineUrl = match?.onlineUrl || unifiedSlot?.linkUrl || '';
-                      const displayImageUrl = resolveDisplayThumbnailUrl(
-                        match?.imageUrl || match?.coverImageUrl || unifiedSlot?.coverImageUrl,
-                        displayOnlineUrl
-                      );
-                      const slotLinkCat = detectMediaLinkCategory(displayOnlineUrl, displayMediaType);
                       const displaySubjectGroup = match?.subjectGroup || unifiedRec?.subjectGroup || '-';
                       const displayDateText = match?.submittedAt
                         ? new Date(match.submittedAt).toLocaleDateString('th-TH')
                         : (unifiedSlot?.submittedDate || 'ส่งแล้ว');
                       const ownerEmailForAction = match?.userEmail || unifiedRec?.ownerEmail || '';
-
-                      const renderSlotCategoryIcon = () => {
-                        switch (slotLinkCat.key) {
-                          case 'youtube':
-                            return <Youtube className="w-6 h-6 text-rose-400" />;
-                          case 'gdrive':
-                            return <HardDrive className="w-6 h-6 text-emerald-400" />;
-                          case 'canva':
-                            return <Palette className="w-6 h-6 text-cyan-400" />;
-                          case 'pdf':
-                          case 'print':
-                            return <FileText className="w-6 h-6 text-amber-400" />;
-                          case 'tech':
-                            return <Globe className="w-6 h-6 text-blue-400" />;
-                          default:
-                            return <Layers className="w-6 h-6 text-indigo-400" />;
-                        }
-                      };
 
                       return (
                         <div
@@ -1274,7 +1242,7 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                               )}
                             </div>
 
-                            {/* Card Body: Thumbnail or Category Icon */}
+                            {/* Card Body: Thumbnail or Icon */}
                             {isSubmitted ? (
                               <div className="space-y-2">
                                 {displayImageUrl ? (
@@ -1292,9 +1260,8 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                     </div>
                                   </div>
                                 ) : (
-                                  <div className="w-full h-16 rounded-xl bg-slate-900/80 border border-slate-700/80 flex flex-col items-center justify-center gap-0.5 relative">
-                                    {renderSlotCategoryIcon()}
-                                    <span className="text-[9px] font-semibold text-slate-300">{slotLinkCat.label}</span>
+                                  <div className="w-full h-16 rounded-xl bg-blue-950/40 border border-blue-500/30 flex items-center justify-center text-blue-300">
+                                    <Layers className="w-6 h-6" />
                                   </div>
                                 )}
                                 <div>
@@ -1355,38 +1322,27 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                                     )}
                                     <button
                                       type="button"
-                                      disabled={Boolean(deletingSubmissionId)}
-                                      onClick={async () => {
+                                      onClick={() => {
                                         if (match) {
                                           handleDeleteSubmission(match);
-                                        } else if (unifiedRec?.mediaWorkId && !deletingSubmissionId) {
+                                        } else if (unifiedRec?.mediaWorkId) {
                                           if (window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบข้อมูลสื่อ "${displayTitle}"?`)) {
-                                            setDeletingSubmissionId(unifiedRec.mediaWorkId);
-                                            try {
-                                              const res = await deleteTeacherMedia(unifiedRec.mediaWorkId, userEmail);
+                                            deleteTeacherMedia(unifiedRec.mediaWorkId, userEmail).then((res) => {
                                               if (res.success) {
                                                 setActionNotice(`ลบสื่อ "${displayTitle}" เรียบร้อยแล้ว`);
                                                 setTimeout(() => setActionNotice(null), 3000);
                                               } else {
                                                 alert(res.error || 'ไม่สามารถลบข้อมูลได้');
                                               }
-                                            } catch {
-                                              alert('เกิดข้อผิดพลาดในการลบข้อมูล');
-                                            } finally {
-                                              setDeletingSubmissionId(null);
-                                            }
+                                            });
                                           }
                                         }
                                       }}
-                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 disabled:opacity-50 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
+                                      className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/35 text-rose-300 border border-rose-500/40 text-[11px] font-bold flex items-center gap-1 transition-colors cursor-pointer"
                                       title="ลบสื่อนี้"
                                     >
                                       <Trash2 className="w-3 h-3" />
-                                      <span>
-                                        {(match && deletingSubmissionId === match.id) || (unifiedRec?.mediaWorkId && deletingSubmissionId === unifiedRec.mediaWorkId)
-                                          ? 'กำลังลบ...'
-                                          : 'ลบ'}
-                                      </span>
+                                      <span>ลบ</span>
                                     </button>
                                   </div>
                                 )}
@@ -1541,13 +1497,12 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
 
                                 <button
                                   type="button"
-                                  disabled={Boolean(deletingSubmissionId)}
                                   onClick={() => handleDeleteSubmission(sub)}
-                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
+                                  className="px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-bold cursor-pointer"
                                   title="ลบข้อมูลสื่อ"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
-                                  <span>{deletingSubmissionId === sub.id ? 'กำลังลบ...' : 'ลบ'}</span>
+                                  <span>ลบ</span>
                                 </button>
                               </>
                             )}

@@ -126,56 +126,44 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   };
 
   const handleSaveLogo = async () => {
-    if (!newImagePreview || isSaving) return;
+    if (!newImagePreview) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setStatusMessage(null);
     setErrorMessage(null);
 
-    try {
-      // 1. Immediately reflect visually for zero latency
-      setLogoUrl(newImagePreview);
+    // 1. Immediately reflect visually for zero latency
+    setLogoUrl(newImagePreview);
 
-      const res = await saveSchoolLogo(newImagePreview, emailToUse);
-      if (res.success) {
-        setLogoUrl(newImagePreview);
-        setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-        setTimeout(() => {
-          setIsAdminModalOpen(false);
-          setNewImagePreview(null);
-          setStatusMessage(null);
-        }, 900);
-      } else {
-        setErrorMessage(res.message);
-      }
-    } catch {
-      setErrorMessage('เกิดข้อผิดพลาดในการบันทึกโลโก้');
-    } finally {
-      setIsSaving(false);
+    const res = await saveSchoolLogo(newImagePreview, emailToUse);
+    setIsSaving(false);
+    if (res.success) {
+      setLogoUrl(newImagePreview);
+      setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+      setTimeout(() => {
+        setIsAdminModalOpen(false);
+        setNewImagePreview(null);
+        setStatusMessage(null);
+      }, 900);
+    } else {
+      setErrorMessage(res.message);
     }
   };
 
   const handleResetConfirm = async () => {
-    if (isSaving) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setErrorMessage(null);
-    try {
-      setLogoUrl(DEFAULT_LOGO_IMAGE);
-      const res = await resetSchoolLogo(emailToUse);
-      if (res.success) {
-        setConfirmResetOpen(false);
-        setNewImagePreview(null);
-        setIsAdminModalOpen(false);
-      } else {
-        setConfirmResetOpen(false);
-        setErrorMessage(res.message);
-      }
-    } catch {
+    setLogoUrl(DEFAULT_LOGO_IMAGE);
+    const res = await resetSchoolLogo(emailToUse);
+    setIsSaving(false);
+    if (res.success) {
       setConfirmResetOpen(false);
-      setErrorMessage('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้');
-    } finally {
-      setIsSaving(false);
+      setNewImagePreview(null);
+      setIsAdminModalOpen(false);
+    } else {
+      setConfirmResetOpen(false);
+      setErrorMessage(res.message);
     }
   };
 

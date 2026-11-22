@@ -134,11 +134,10 @@ import {
   LoginLogEntry,
   SiteVisitSummary,
   AdminStatsSummary,
-  getLocalSiteSummary,
   getLocalAdminStatsSummary,
-  getLocalLoginLogs,
-  getLoginLogsCooldownSeconds,
+  fetchAdminStatsSummaryOnce,
   subscribeAllLoginLogs,
+  subscribeSiteSummary,
   fetchSiteSummaryOnce,
   fetchAdminLoginLogsOnce,
   generateLoginLogsTSV,
@@ -147,17 +146,6 @@ import {
   resetAdminLoginLogs,
   getBangkokDateParts
 } from '../services/auditService';
-import {
-  AdminOverviewStats,
-  getLocalAdminOverview,
-  fetchAdminOverviewStatsOnce,
-  syncAdminOverviewSummary,
-  rebuildAllIndexBundles,
-  getAdminOverviewCooldownSeconds,
-  isQuotaFallbackCurrentlyActive,
-  isOverviewNonZero,
-} from '../services/adminOverviewService';
-import { sanitizeMediaThumbnailForFirestore } from '../utils/mediaThumbnailUtils';
 import {
   PopupBannerConfig,
   subscribePopupBanner,
@@ -196,24 +184,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [authReady, setAuthReady] = useState<boolean>(() => isAuthReady());
   const isAdminResolved = authReady && isSuperAdmin;
 
-  // Real-time / smart-cached Firestore data (1-read pre-aggregated overview primary)
+  // Real-time / smart-cached Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
   const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
-  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
-  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(null);
   const [adminStatsSummary, setAdminStatsSummary] = useState<AdminStatsSummary | null>(() => getLocalAdminStatsSummary());
-  const [adminOverview, setAdminOverview] = useState<AdminOverviewStats | null>(() => getLocalAdminOverview());
-  const [isQuotaFallback, setIsQuotaFallback] = useState<boolean>(
-    () => isQuotaFallbackCurrentlyActive() || Boolean(getLocalAdminOverview()?.fromQuotaFallback)
-  );
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
-  const [isSyncingOverview, setIsSyncingOverview] = useState(false);
-  const [isRebuildingBundles, setIsRebuildingBundles] = useState(false);
-  const [showSyncOverviewConfirmModal, setShowSyncOverviewConfirmModal] = useState(false);
 
   // 0. Special Privileges and 20-Share Rewards Management
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
@@ -298,22 +279,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Copy & export feedback
   const [toastMsg, setToastMsg] = useState<string | null>(null);
   const [refreshAllCooldownSec, setRefreshAllCooldownSec] = useState<number>(() =>
-    Math.max(
-      getAdminOverviewCooldownSeconds(),
-      getManualRefreshCooldownSeconds('teacherMedia'),
-      getManualRefreshCooldownSeconds('allInnovations')
-    )
+    Math.max(getManualRefreshCooldownSeconds('teacherMedia'), getManualRefreshCooldownSeconds('allInnovations'))
   );
 
   useEffect(() => {
     if (refreshAllCooldownSec <= 0) return;
     const timer = setInterval(() => {
       setRefreshAllCooldownSec(
-        Math.max(
-          getAdminOverviewCooldownSeconds(),
-          getManualRefreshCooldownSeconds('teacherMedia'),
-          getManualRefreshCooldownSeconds('allInnovations')
-        )
+        Math.max(getManualRefreshCooldownSeconds('teacherMedia'), getManualRefreshCooldownSeconds('allInnovations'))
       );
     }, 1000);
     return () => clearInterval(timer);
@@ -441,21 +414,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, []);
 
-  // 1. Hydrate ONLY from in-memory/localStorage caches immediately (0ms UI render, 0 Firestore reads on mount)
+  // 1. Subscribe to in-memory/localStorage smart-cached streams immediately (0ms UI render, zero onSnapshot)
   useEffect(() => {
     setIsLoading(true);
     const unsubInnovations = subscribeAllInnovations((list) => {
       setInnovations(list);
       setIsLoading(false);
-    }, { skipFetch: true });
+    });
 
     const unsubFacilities = subscribeAllSubmissions((list) => {
       setFacilities(list);
-    }, { skipFetch: true });
+    });
 
     const unsubTeacherMedia = subscribeTeacherMedia((works) => {
       setTeacherMedia(works);
-    }, { skipFetch: true });
+    });
 
     const unsubLogo = subscribeSchoolLogo((url: string) => {
       setCurrentLogoUrl(url);
@@ -469,9 +442,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setCurrentPosterUrl(url);
     });
 
+    const unsubLogs = subscribeAllLoginLogs((logs) => {
+      setLoginLogs(logs);
+    });
+
+    const unsubSiteSummary = subscribeSiteSummary((summary) => {
+      setSiteSummary(summary);
+    });
+
     const unsubProfiles = subscribeAllUserProfiles((profiles) => {
       setUserProfilesMap(profiles);
-    }, { skipFetch: true });
+    });
 
     const unsubBanner = subscribePopupBanner((cfg) => {
       if (cfg) {
@@ -483,29 +464,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
     const unsubPrivileges = subscribeAllTeachersPrivilegeStatus((list) => {
       setPrivilegeSummaries(list);
-    }, { skipFetch: true });
-
-    const unsubLoginLogs = subscribeAllLoginLogs((logs) => {
-      setLoginLogs((prev) => (logs.length > 0 || prev.length === 0 ? logs : prev));
     });
 
-    const handleOverviewUpdated = (e: Event) => {
-      const detail = (e as CustomEvent<AdminOverviewStats>)?.detail;
-      if (detail) {
-        setAdminOverview(detail);
-        if (detail.fromQuotaFallback) {
-          setIsQuotaFallback(true);
-        } else {
-          setIsQuotaFallback(false);
-        }
-      }
-    };
-    const handleSiteSummaryUpdated = (e: Event) => {
-      const detail = (e as CustomEvent<SiteVisitSummary>)?.detail;
-      if (detail) {
-        setSiteSummary(detail);
-      }
-    };
     const handleAdminStatsUpdated = (e: Event) => {
       const detail = (e as CustomEvent<AdminStatsSummary>)?.detail;
       if (detail) {
@@ -515,15 +475,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         }
       }
     };
-    const handleQuotaExceeded = () => {
-      setIsQuotaFallback(true);
-    };
-
     if (typeof window !== 'undefined') {
-      window.addEventListener('acu_admin_overview_updated', handleOverviewUpdated);
-      window.addEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
       window.addEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
-      window.addEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
     }
 
     return () => {
@@ -533,33 +486,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubLogo();
       unsubCertLogo();
       unsubPoster();
+      unsubLogs();
+      unsubSiteSummary();
       unsubProfiles();
       unsubBanner();
       unsubPrivileges();
-      unsubLoginLogs();
       if (typeof window !== 'undefined') {
-        window.removeEventListener('acu_admin_overview_updated', handleOverviewUpdated);
-        window.removeEventListener('acu_site_summary_updated', handleSiteSummaryUpdated);
         window.removeEventListener('acu_admin_stats_updated', handleAdminStatsUpdated);
-        window.removeEventListener('acu_firestore_quota_exceeded', handleQuotaExceeded);
       }
     };
   }, []);
 
-  // 2. Mount: Read ONLY the single pre-aggregated doc `stats/admin_overview` (1 read max / 6h cache) + cached sheets config
+  // 2. Parallel Admin summary & collection fetch — strictly gated on (authReady && isSuperAdmin)
+  // Re-triggers automatically once isAdminResolved becomes true; uses Promise.allSettled so one failure never blocks others.
   useEffect(() => {
     if (!isAdminResolved) return;
     let active = true;
 
     Promise.allSettled([
-      fetchAdminOverviewStatsOnce(false),
+      fetchAdminStatsSummaryOnce(false, userEmail),
       fetchGoogleSheetsConfig(),
-    ]).then(([overviewRes, sheetsRes]) => {
+      refreshAllInnovations(false),
+      refreshTeacherMedia(false),
+      refreshAllFacilities(false),
+      refreshAllUserProfiles(false),
+      refreshSharedIdeas(false),
+      refreshRewardClaims(false),
+    ]).then((results) => {
       if (!active) return;
-      if (overviewRes.status === 'fulfilled' && overviewRes.value) {
-        setAdminOverview(overviewRes.value);
-        setIsQuotaFallback(Boolean(overviewRes.value.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
+      const statsRes = results[0];
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) {
+          setSiteSummary(statsRes.value.siteSummary);
+        }
       }
+      const sheetsRes = results[1];
       if (sheetsRes.status === 'fulfilled' && sheetsRes.value?.sheetUrl) {
         setGoogleSheetsUrl(sheetsRes.value.sheetUrl);
       }
@@ -570,55 +532,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     };
   }, [isAdminResolved, userEmail]);
 
-  // 3. Tab changes render strictly from memory/localStorage cache (0 collection fetches on tab switch).
-  //    Only 'stats' (1-doc 12h cached summary) or 'visitors' (12h cached limit(30) logs on explicit Admin open) load lazily.
+  // 3. Fetch latest 50 login logs ONLY after (authReady && isSuperAdmin) when Visitors tab opens; refresh summary on Stats tab (3-min TTL)
   useEffect(() => {
     if (!isAdminResolved) return;
-
-    if (activeTab === 'stats') {
-      fetchAdminOverviewStatsOnce(false)
-        .then((res) => {
-          if (res) {
-            setAdminOverview(res);
-            setIsQuotaFallback(Boolean(res.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
-          }
-        })
-        .catch(() => {});
-      return;
-    }
-
     if (activeTab === 'visitors') {
       setIsRefreshingLogs(true);
-      fetchAdminLoginLogsOnce(false, 30, userEmail)
-        .then((logs) => {
-          if (Array.isArray(logs) && logs.length > 0) {
-            setLoginLogs(logs);
+      Promise.allSettled([
+        fetchAdminStatsSummaryOnce(false, userEmail),
+        fetchAdminLoginLogsOnce(false, 50, userEmail),
+      ])
+        .then(([statsRes]) => {
+          if (statsRes.status === 'fulfilled' && statsRes.value) {
+            setAdminStatsSummary(statsRes.value);
+            if (statsRes.value.siteSummary) {
+              setSiteSummary(statsRes.value.siteSummary);
+            }
           }
         })
         .finally(() => setIsRefreshingLogs(false));
+    } else if (activeTab === 'stats') {
+      fetchAdminStatsSummaryOnce(false, userEmail)
+        .then((res) => {
+          if (res) {
+            setAdminStatsSummary(res);
+            if (res.siteSummary) setSiteSummary(res.siteSummary);
+          }
+        })
+        .catch(() => {});
     }
   }, [activeTab, isAdminResolved, userEmail]);
 
   const handleRefreshLoginLogs = async () => {
     if (!isAdminResolved) return;
-    const remaining = getLoginLogsCooldownSeconds();
-    if (remaining > 0) {
-      showToast(`กรุณารออีก ${remaining} วินาทีก่อนรีเฟรชประวัติการเข้าชม`);
-      return;
-    }
     setIsRefreshingLogs(true);
     try {
-      const [siteRes, logsRes] = await Promise.allSettled([
-        fetchSiteSummaryOnce(true),
-        fetchAdminLoginLogsOnce(true, 30, userEmail),
+      const [statsRes] = await Promise.allSettled([
+        fetchAdminStatsSummaryOnce(true, userEmail),
+        fetchAdminLoginLogsOnce(true, 50, userEmail),
       ]);
-      if (siteRes.status === 'fulfilled' && siteRes.value) {
-        setSiteSummary(siteRes.value);
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
       }
-      if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
-        setLoginLogs(logsRes.value);
-      }
-      showToast('อัปเดตสถิติและประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
+      showToast('อัปเดตสถิติและประวัติการเข้าชม (50 รายการล่าสุด) สำเร็จ');
     } finally {
       setIsRefreshingLogs(false);
     }
@@ -627,7 +583,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const handleRefreshAllAdminData = async () => {
     if (!isAdminResolved) return;
     const remaining = Math.max(
-      getAdminOverviewCooldownSeconds(),
       getManualRefreshCooldownSeconds('teacherMedia'),
       getManualRefreshCooldownSeconds('allInnovations'),
       getManualRefreshCooldownSeconds('facilities'),
@@ -640,89 +595,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
     setIsRefreshingAll(true);
     try {
-      // Refresh ONLY the single stats/admin_overview doc on 'stats' tab (1 read!)
-      // Or the current active tab's data alongside stats/admin_overview
-      const tasks: Promise<any>[] = [fetchAdminOverviewStatsOnce(true)];
-      if (activeTab === 'visitors') {
-        tasks.push(fetchSiteSummaryOnce(true), fetchAdminLoginLogsOnce(true, 30, userEmail));
-      } else if (activeTab === 'innovations' || activeTab === 'teachers') {
-        tasks.push(refreshAllInnovations(true), refreshTeacherMedia(true), refreshAllUserProfiles(true));
-      } else if (activeTab === 'facilities') {
-        tasks.push(refreshAllFacilities(true));
-      } else if (activeTab === 'certificates') {
-        tasks.push(fetchAdminLoginLogsOnce(true, 30, userEmail), refreshAllUserProfiles(true));
-      } else if (activeTab === 'privileges') {
-        tasks.push(
-          refreshSharedIdeas(true),
-          refreshAllInnovations(true),
-          refreshTeacherMedia(true),
-          refreshAllFacilities(true),
-          refreshAllUserProfiles(true),
-          refreshRewardClaims(true)
-        );
-      }
-
-      const results = await Promise.allSettled(tasks);
+      const results = await Promise.allSettled([
+        fetchAdminStatsSummaryOnce(true, userEmail),
+        refreshAllInnovations(true),
+        refreshAllFacilities(true),
+        refreshTeacherMedia(true),
+        refreshAllUserProfiles(true),
+        refreshSharedIdeas(true),
+        refreshRewardClaims(true),
+        fetchAdminLoginLogsOnce(true, 50, userEmail),
+      ]);
       setRefreshAllCooldownSec(60);
-      const overviewRes = results[0];
-      if (overviewRes.status === 'fulfilled' && overviewRes.value) {
-        setAdminOverview(overviewRes.value);
-        setIsQuotaFallback(Boolean(overviewRes.value.fromQuotaFallback) || isQuotaFallbackCurrentlyActive());
+      const statsRes = results[0];
+      if (statsRes.status === 'fulfilled' && statsRes.value) {
+        setAdminStatsSummary(statsRes.value);
+        if (statsRes.value.siteSummary) setSiteSummary(statsRes.value.siteSummary);
       }
-      showToast(
-        activeTab === 'stats'
-          ? 'รีเฟรชสถิติโดยรวม (1 Read) จากฐานข้อมูลเรียบร้อยแล้ว'
-          : 'รีเฟรชข้อมูลในแท็บปัจจุบันเรียบร้อยแล้ว'
-      );
+      showToast('รีเฟรชข้อมูลสถิติล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
     } finally {
       setIsRefreshingAll(false);
-    }
-  };
-
-  const handleConfirmSyncAdminOverview = async () => {
-    if (!isAdminResolved || isSyncingOverview) return;
-    setIsSyncingOverview(true);
-    try {
-      const res = await syncAdminOverviewSummary(userEmail);
-      setShowSyncOverviewConfirmModal(false);
-      if (res.success && res.stats) {
-        setAdminOverview(res.stats);
-        setIsQuotaFallback(false);
-        setRefreshAllCooldownSec(60);
-        showToast('ซิงค์ยอดสรุปจริงเข้าสู่ stats/admin_overview สำเร็จเรียบร้อย');
-      } else {
-        if (res.quotaExceeded) {
-          setIsQuotaFallback(true);
-        }
-        showToast(res.error || 'ไม่สามารถซิงค์ยอดสรุปจริงได้ในขณะนี้');
-      }
-    } finally {
-      setIsSyncingOverview(false);
-    }
-  };
-
-  const handleRebuildIndexBundles = async () => {
-    if (!isAdminResolved || isRebuildingBundles) return;
-    setIsRebuildingBundles(true);
-    try {
-      const res = await rebuildAllIndexBundles(userEmail);
-      if (res.success) {
-        if (res.stats) {
-          setAdminOverview(res.stats);
-        }
-        setIsQuotaFallback(false);
-        setRefreshAllCooldownSec(60);
-        showToast(
-          `สร้างดัชนีข้อมูลรวมใหม่สำเร็จ (สื่อ ${res.mediaCount ?? 0}, นวัตกรรม ${res.innovationsCount ?? 0}, ไอเดีย ${res.ideasCount ?? 0} รายการ)`
-        );
-      } else {
-        if (res.quotaExceeded) {
-          setIsQuotaFallback(true);
-        }
-        showToast(res.error || 'ไม่สามารถสร้างดัชนีข้อมูลรวมใหม่ได้ในขณะนี้');
-      }
-    } finally {
-      setIsRebuildingBundles(false);
     }
   };
 
@@ -790,45 +681,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
   }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear, onlyMyAdminInnovations]);
 
-  // Statistics calculation (authoritative 1-read stats/admin_overview primary, with local array fallback if not synced yet)
+  // Statistics calculation
   const stats = useMemo(() => {
-    if (adminOverview && isOverviewNonZero(adminOverview)) {
-      const totalSubmissions = Math.max(
-        adminOverview.totalUnifiedSubmissions ?? 0,
-        adminOverview.totalInnovationsCount || 0,
-        adminOverview.totalMediaCount || 0
-      );
-      const totalTeachers = adminOverview.totalTeachersWithSubmissions || 0;
-      const completed5Count = adminOverview.teachersCompleted5Count || 0;
-      const inProgressCount = Math.max(0, totalTeachers - completed5Count);
-      const totalFacilities = adminOverview.totalFacilityLogs || 0;
-
-      const subjectGroupCounts: Record<string, number> = {};
-      SUBJECT_GROUPS.forEach((sg) => {
-        subjectGroupCounts[sg] = Number(adminOverview.bySubjectGroup?.[sg] || 0);
-      });
-
-      const gradeCounts: Record<string, number> = { ...(adminOverview.byGradeLevel || {}) };
-      const mediaTypeCounts: Record<string, number> = {
-        'สื่อสิ่งพิมพ์': Number(adminOverview.byMediaType?.['สื่อสิ่งพิมพ์'] || 0),
-        'สื่อเทคโนโลยี': Number(adminOverview.byMediaType?.['สื่อเทคโนโลยี'] || 0),
-        'สื่ออื่น ๆ': Number(adminOverview.byMediaType?.['สื่ออื่น ๆ'] || 0),
-      };
-
-      return {
-        totalSubmissions,
-        totalTeachers,
-        completed5Count,
-        inProgressCount,
-        totalFacilities,
-        subjectGroupCounts,
-        gradeCounts,
-        mediaTypeCounts,
-        selfMadeCount: adminOverview.selfProducedCount || 0,
-        sourcedCount: adminOverview.externalSourceCount || 0,
-      };
-    }
-
     const unifiedTotal = teacherSummaries.reduce((sum, t) => sum + t.submittedCount, 0);
     const totalSubmissions = Math.max(innovations.length, unifiedTotal);
     const totalTeachers = teacherSummaries.length;
@@ -886,7 +740,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       selfMadeCount,
       sourcedCount,
     };
-  }, [adminOverview, innovations, teacherSummaries, facilities]);
+  }, [innovations, teacherSummaries, facilities]);
 
   // Handle Logo Upload
   const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -927,41 +781,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveLogo = async () => {
-    if (!logoPreview || isSavingLogo) return;
+    if (!logoPreview) return;
     setIsSavingLogo(true);
     setLogoStatusMsg(null);
-    try {
-      const res = await saveSchoolLogo(logoPreview, SUPER_ADMIN_EMAIL);
-      if (res.success) {
-        setCurrentLogoUrl(logoPreview);
-        setLogoPreview(null);
-        setLogoStatusMsg('บันทึกภาพโลโก้โรงเรียนสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-        showToast('บันทึกโลโก้โรงเรียนเรียบร้อย');
-      } else {
-        setLogoStatusMsg(res.message);
-      }
-    } catch {
-      setLogoStatusMsg('เกิดข้อผิดพลาดในการบันทึกโลโก้โรงเรียน');
-    } finally {
-      setIsSavingLogo(false);
+    const res = await saveSchoolLogo(logoPreview, SUPER_ADMIN_EMAIL);
+    setIsSavingLogo(false);
+    if (res.success) {
+      setCurrentLogoUrl(logoPreview);
+      setLogoPreview(null);
+      setLogoStatusMsg('บันทึกภาพโลโก้โรงเรียนสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+      showToast('บันทึกโลโก้โรงเรียนเรียบร้อย');
+    } else {
+      setLogoStatusMsg(res.message);
     }
   };
 
   const handleResetLogo = async () => {
-    if (isSavingLogo) return;
     if (!confirm('ยืนยันรีเซ็ตโลโก้กลับเป็นตราดั้งเดิม (ACU N.png) ใช่หรือไม่?')) return;
     setIsSavingLogo(true);
-    try {
-      const res = await resetSchoolLogo(SUPER_ADMIN_EMAIL);
-      if (res.success) {
-        setLogoPreview(null);
-        setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
-        showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
-      }
-    } catch {
-      setLogoStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้');
-    } finally {
-      setIsSavingLogo(false);
+    const res = await resetSchoolLogo(SUPER_ADMIN_EMAIL);
+    setIsSavingLogo(false);
+    if (res.success) {
+      setLogoPreview(null);
+      setLogoStatusMsg('รีเซ็ตโลโก้กลับเป็นค่าเดิมเรียบร้อย');
+      showToast('รีเซ็ตโลโก้กลับเป็นค่าเดิมสำเร็จ');
     }
   };
 
@@ -1012,43 +855,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveCertLogo = async () => {
-    if (!certLogoPreview || isSavingCertLogo) return;
+    if (!certLogoPreview) return;
     setIsSavingCertLogo(true);
     setCertLogoStatusMsg(null);
-    try {
-      const res = await saveCertificateLogo(certLogoPreview, SUPER_ADMIN_EMAIL);
-      if (res.success) {
-        setCurrentCertLogoUrl(certLogoPreview);
-        setCertLogoPreview(null);
-        setCertLogoStatusMsg('บันทึกภาพโลโก้บนเกียรติบัตรสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-        showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
-      } else {
-        setCertLogoStatusMsg(res.message);
-      }
-    } catch {
-      setCertLogoStatusMsg('เกิดข้อผิดพลาดในการบันทึกโลโก้เกียรติบัตร');
-    } finally {
-      setIsSavingCertLogo(false);
+    const res = await saveCertificateLogo(certLogoPreview, SUPER_ADMIN_EMAIL);
+    setIsSavingCertLogo(false);
+    if (res.success) {
+      setCurrentCertLogoUrl(certLogoPreview);
+      setCertLogoPreview(null);
+      setCertLogoStatusMsg('บันทึกภาพโลโก้บนเกียรติบัตรสำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+      showToast('บันทึกโลโก้เกียรติบัตรเรียบร้อย');
+    } else {
+      setCertLogoStatusMsg(res.message);
     }
   };
 
   const handleResetCertLogo = async () => {
-    if (isSavingCertLogo) return;
     if (!confirm('ยืนยันรีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นภาพตราสัญลักษณ์โรงเรียนเริ่มต้น ใช่หรือไม่?')) return;
     setIsSavingCertLogo(true);
-    try {
-      const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
-      if (res.success) {
-        setCertLogoPreview(null);
-        setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
-        showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
-      } else {
-        setCertLogoStatusMsg(res.message);
-      }
-    } catch {
-      setCertLogoStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้เกียรติบัตร');
-    } finally {
-      setIsSavingCertLogo(false);
+    const res = await resetCertificateLogo(SUPER_ADMIN_EMAIL);
+    setIsSavingCertLogo(false);
+    if (res.success) {
+      setCertLogoPreview(null);
+      setCertLogoStatusMsg('รีเซ็ตโลโก้บนเกียรติบัตรกลับเป็นค่าเริ่มต้นเรียบร้อย');
+      showToast('รีเซ็ตโลโก้เกียรติบัตรเรียบร้อย');
+    } else {
+      setCertLogoStatusMsg(res.message);
     }
   };
 
@@ -1084,41 +916,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSavePoster = async () => {
-    if (!posterPreview || isSavingPoster) return;
+    if (!posterPreview) return;
     setIsSavingPoster(true);
     setPosterStatusMsg(null);
-    try {
-      const res = await saveCriteriaPoster(posterPreview, SUPER_ADMIN_EMAIL);
-      if (res.success) {
-        setCurrentPosterUrl(posterPreview);
-        setPosterPreview(null);
-        setPosterStatusMsg('บันทึกภาพเกณฑ์/ประเภทสื่อสำเร็จ ภาพเปลี่ยนทันที');
-        showToast('บันทึกภาพเกณฑ์/ประเภทสื่อเรียบร้อย');
-      } else {
-        setPosterStatusMsg(res.message);
-      }
-    } catch {
-      setPosterStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพเกณฑ์');
-    } finally {
-      setIsSavingPoster(false);
+    const res = await saveCriteriaPoster(posterPreview, SUPER_ADMIN_EMAIL);
+    setIsSavingPoster(false);
+    if (res.success) {
+      setCurrentPosterUrl(posterPreview);
+      setPosterPreview(null);
+      setPosterStatusMsg('บันทึกภาพเกณฑ์/ประเภทสื่อสำเร็จ ภาพเปลี่ยนทันที');
+      showToast('บันทึกภาพเกณฑ์/ประเภทสื่อเรียบร้อย');
+    } else {
+      setPosterStatusMsg(res.message);
     }
   };
 
   // Handle Google Sheets URL Save
   const handleSaveSheetUrl = async () => {
-    if (isSavingSheetUrl) return;
     setIsSavingSheetUrl(true);
     setSheetUrlMsg(null);
-    try {
-      const res = await saveGoogleSheetsConfig(googleSheetsUrl, SUPER_ADMIN_EMAIL);
-      setSheetUrlMsg(res.message);
-      if (res.success) {
-        showToast('บันทึกลิงก์ Google Sheets เรียบร้อย');
-      }
-    } catch {
-      setSheetUrlMsg('เกิดข้อผิดพลาดในการบันทึกลิงก์');
-    } finally {
-      setIsSavingSheetUrl(false);
+    const res = await saveGoogleSheetsConfig(googleSheetsUrl, SUPER_ADMIN_EMAIL);
+    setIsSavingSheetUrl(false);
+    setSheetUrlMsg(res.message);
+    if (res.success) {
+      showToast('บันทึกลิงก์ Google Sheets เรียบร้อย');
     }
   };
 
@@ -1217,7 +1038,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   }, [loginLogs, siteSummary, adminStatsSummary]);
 
   const totalServerVisitorsCount = Math.max(
-    adminOverview?.totalVisitorsCount || 0,
     loginLogs.length,
     siteSummary?.totalVisits || 0,
     adminStatsSummary?.totalLoginLogsCount || 0
@@ -1540,11 +1360,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Yearly Stats calculation (uses 1-read stats/admin_overview primary, merged with loaded arrays when tabs are opened)
+  // Yearly Stats calculation (computed instantaneously in memory from loaded media, facilities, logs, & siteSummary)
   const yearlyStats = useMemo(() => {
     const targetYear = parseInt(selectedYear) || 2026;
     const targetYearStr = String(targetYear);
-    const overviewYear = adminOverview?.yearlyStats?.[targetYearStr];
 
     // Deduplicate innovations + direct teacherMedia entries in memory so every submitted work is counted once
     const mediaSeenKeys = new Set<string>();
@@ -1576,37 +1395,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       return Boolean(parts && parts.year === targetYear);
     });
 
-    const uniqueVisitorEmails = Math.max(
-      new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size,
-      overviewYear?.uniqueVisitors || 0
-    );
+    const uniqueVisitorEmails = new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size;
 
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
-    const summaryMonths = siteSummary?.monthlyVisits?.[targetYearStr] || overviewYear?.monthlyVisits || {};
+    const summaryMonths = siteSummary?.monthlyVisits?.[targetYearStr] || {};
     const monthlyBreakdown = monthNames.map((name, idx) => {
-      const idxKey = String(idx);
       const logsVisits = yearLogs.filter(l => {
         const parts = getBangkokDateParts(l.loginTimestamp);
         return parts ? parts.monthIndex === idx : false;
       }).length;
-      const summaryVisits = Number(summaryMonths[idxKey] || 0);
-      const overviewVisits = Number(overviewYear?.monthlyVisits?.[idxKey] || 0);
-      const visits = Math.max(logsVisits, summaryVisits, overviewVisits);
+      const summaryVisits = Number(summaryMonths[String(idx)] || 0);
+      const visits = Math.max(logsVisits, summaryVisits);
 
-      const loadedMediaCount = yearMediaDates.filter(d => d.getMonth() === idx).length;
-      const overviewMediaCount = Number(overviewYear?.monthlyMedia?.[idxKey] || 0);
-      const mediaCount = Math.max(loadedMediaCount, overviewMediaCount);
-
-      const loadedFacCount = yearFacilities.filter(f => {
+      const mediaCount = yearMediaDates.filter(d => d.getMonth() === idx).length;
+      const facCount = yearFacilities.filter(f => {
         const d = new Date(f.createdAt || f.usageDateTime);
         return !isNaN(d.getTime()) && d.getMonth() === idx;
       }).length;
-      const overviewFacCount = Number(overviewYear?.monthlyFacilities?.[idxKey] || 0);
-      const facCount = Math.max(loadedFacCount, overviewFacCount);
 
       return {
         monthName: name,
@@ -1635,7 +1444,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
     });
     const totalAccountsCount = Math.max(
-      adminOverview?.totalUsersCount || 0,
       allSystemAccounts.size,
       adminStatsSummary?.totalUserProfilesCount || 0
     );
@@ -1643,16 +1451,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     const monthlyVisitsSum = monthlyBreakdown.reduce((sum, m) => sum + m.visits, 0);
     const activeSiteSummary = siteSummary || adminStatsSummary?.siteSummary;
     const summaryYearTotal = Number(activeSiteSummary?.yearlyVisits?.[targetYearStr] || 0);
-    const overviewYearTotal = Number(overviewYear?.totalVisits || 0);
     const serverTotalIfCurrentYear =
-      targetYear === CURRENT_CALENDAR_YEAR
-        ? Math.max(adminOverview?.totalVisitorsCount || 0, adminStatsSummary?.totalLoginLogsCount || 0)
-        : 0;
+      targetYear === CURRENT_CALENDAR_YEAR ? (adminStatsSummary?.totalLoginLogsCount || 0) : 0;
     const totalVisits = Math.max(
       yearLogs.length,
       monthlyVisitsSum,
       summaryYearTotal,
-      overviewYearTotal,
       serverTotalIfCurrentYear
     );
 
@@ -1661,119 +1465,95 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       totalVisits,
       uniqueVisitors: uniqueVisitorEmails,
       totalAccounts: totalAccountsCount,
-      totalMedia: Math.max(yearMediaDates.length, Number(overviewYear?.totalMedia || 0)),
-      totalFacilities: Math.max(yearFacilities.length, Number(overviewYear?.totalFacilities || 0)),
+      totalMedia: yearMediaDates.length,
+      totalFacilities: yearFacilities.length,
       monthlyBreakdown,
     };
-  }, [adminOverview, innovations, teacherMedia, facilities, loginLogs, siteSummary, adminStatsSummary, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
+  }, [innovations, teacherMedia, facilities, loginLogs, siteSummary, adminStatsSummary, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
-    if (!editingInnovation || isSavingInnovationEdit) return;
+    if (!editingInnovation) return;
     setIsSavingInnovationEdit(true);
-    try {
-      const cleanCoverUrl = sanitizeMediaThumbnailForFirestore(
-        editingInnovation.coverImageUrl || editingInnovation.imageUrl,
-        editingInnovation.onlineUrl
-      );
-      const res = await updateInnovationSubmission(
-        editingInnovation.id,
-        {
-          teacherName: editingInnovation.teacherName,
-          subjectGroup: editingInnovation.subjectGroup,
-          gradeLevel: editingInnovation.gradeLevel,
-          itemNumber: editingInnovation.itemNumber,
-          mediaType: editingInnovation.mediaType,
-          productionType: editingInnovation.productionType,
-          mediaTitle: editingInnovation.mediaTitle,
-          usageDetails: editingInnovation.usageDetails,
-          onlineUrl: editingInnovation.onlineUrl,
-          imageUrl: cleanCoverUrl,
-          coverImageUrl: cleanCoverUrl,
-        },
-        userEmail
-      );
-      if (res.success) {
-        showToast('บันทึกการแก้ไขข้อมูลสื่อเรียบร้อยแล้ว');
-        setEditingInnovation(null);
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการแก้ไขสื่อ');
-    } finally {
-      setIsSavingInnovationEdit(false);
+    const res = await updateInnovationSubmission(
+      editingInnovation.id,
+      {
+        teacherName: editingInnovation.teacherName,
+        subjectGroup: editingInnovation.subjectGroup,
+        gradeLevel: editingInnovation.gradeLevel,
+        itemNumber: editingInnovation.itemNumber,
+        mediaType: editingInnovation.mediaType,
+        productionType: editingInnovation.productionType,
+        mediaTitle: editingInnovation.mediaTitle,
+        usageDetails: editingInnovation.usageDetails,
+        onlineUrl: editingInnovation.onlineUrl,
+        imageUrl: editingInnovation.imageUrl,
+        coverImageUrl: editingInnovation.coverImageUrl,
+      },
+      userEmail
+    );
+    setIsSavingInnovationEdit(false);
+    if (res.success) {
+      showToast('บันทึกการแก้ไขข้อมูลสื่อเรียบร้อยแล้ว');
+      setEditingInnovation(null);
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขสื่อ');
     }
   };
 
   // Handle Innovation Delete
   const handleDeleteInnovation = async () => {
-    if (!deletingInnovationId || isDeletingInnovation) return;
+    if (!deletingInnovationId) return;
     setIsDeletingInnovation(true);
-    try {
-      const res = await deleteInnovationSubmission(deletingInnovationId, userEmail);
-      if (res.success) {
-        showToast('ลบข้อมูลสื่อออกจากระบบสำเร็จ');
-        setDeletingInnovationId(null);
-        setDeletingInnovationTitle('');
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการลบสื่อ');
-    } finally {
-      setIsDeletingInnovation(false);
+    const res = await deleteInnovationSubmission(deletingInnovationId, userEmail);
+    setIsDeletingInnovation(false);
+    if (res.success) {
+      showToast('ลบข้อมูลสื่อออกจากระบบสำเร็จ');
+      setDeletingInnovationId(null);
+      setDeletingInnovationTitle('');
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการลบสื่อ');
     }
   };
 
   // Handle Facility Edit Save
   const handleSaveFacilityEdit = async () => {
-    if (!editingFacility || isSavingFacilityEdit) return;
+    if (!editingFacility) return;
     setIsSavingFacilityEdit(true);
-    try {
-      const res = await updateFacilitySubmission(
-        editingFacility.id,
-        {
-          teacherName: editingFacility.teacherName,
-          subjectGroup: editingFacility.subjectGroup,
-          learningCenter: editingFacility.learningCenter,
-          periods: editingFacility.periods,
-          usageDateTime: editingFacility.usageDateTime,
-          feedback: editingFacility.feedback,
-          imageUrl: editingFacility.imageUrl,
-        },
-        userEmail
-      );
-      if (res.success) {
-        showToast('บันทึกการแก้ไขข้อมูลแหล่งเรียนรู้เรียบร้อย');
-        setEditingFacility(null);
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
-    } finally {
-      setIsSavingFacilityEdit(false);
+    const res = await updateFacilitySubmission(
+      editingFacility.id,
+      {
+        teacherName: editingFacility.teacherName,
+        subjectGroup: editingFacility.subjectGroup,
+        learningCenter: editingFacility.learningCenter,
+        periods: editingFacility.periods,
+        usageDateTime: editingFacility.usageDateTime,
+        feedback: editingFacility.feedback,
+        imageUrl: editingFacility.imageUrl,
+      },
+      userEmail
+    );
+    setIsSavingFacilityEdit(false);
+    if (res.success) {
+      showToast('บันทึกการแก้ไขข้อมูลแหล่งเรียนรู้เรียบร้อย');
+      setEditingFacility(null);
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการแก้ไขแหล่งเรียนรู้');
     }
   };
 
   // Handle Facility Delete
   const handleDeleteFacility = async () => {
-    if (!deletingFacilityId || isDeletingFacility) return;
+    if (!deletingFacilityId) return;
     setIsDeletingFacility(true);
-    try {
-      const res = await deleteFacilitySubmission(deletingFacilityId, userEmail);
-      if (res.success) {
-        showToast('ลบข้อมูลบันทึกแหล่งเรียนรู้ออกจากระบบสำเร็จ');
-        setDeletingFacilityId(null);
-        setDeletingFacilityTitle('');
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
-    } finally {
-      setIsDeletingFacility(false);
+    const res = await deleteFacilitySubmission(deletingFacilityId, userEmail);
+    setIsDeletingFacility(false);
+    if (res.success) {
+      showToast('ลบข้อมูลบันทึกแหล่งเรียนรู้ออกจากระบบสำเร็จ');
+      setDeletingFacilityId(null);
+      setDeletingFacilityTitle('');
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการลบแหล่งเรียนรู้');
     }
   };
 
@@ -1835,56 +1615,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   };
 
   const handleSaveBanners = async () => {
-    if (isSavingBanner) return;
     setIsSavingBanner(true);
     setBannerStatusMsg(null);
-    try {
-      const success = await savePopupBannerConfig({
-        bannerImageUrl: banner1Preview || bannerConfig.bannerImageUrl,
-        bannerImageUrl2: banner2Preview || bannerConfig.bannerImageUrl2,
-        title: banner1Title || bannerConfig.title,
-        title2: banner2Title || bannerConfig.title2,
-        updatedBy: userEmail,
-      });
-      if (success) {
-        setBannerStatusMsg('บันทึกภาพป๊อปอัปประชาสัมพันธ์หน้าแรกสำเร็จ อัปเดตทันที');
-        showToast('บันทึกภาพป๊อปอัปหน้าแรกเรียบร้อย');
-        setBanner1Preview(null);
-        setBanner2Preview(null);
-      } else {
-        setBannerStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป');
-      }
-    } catch {
+    const success = await savePopupBannerConfig({
+      bannerImageUrl: banner1Preview || bannerConfig.bannerImageUrl,
+      bannerImageUrl2: banner2Preview || bannerConfig.bannerImageUrl2,
+      title: banner1Title || bannerConfig.title,
+      title2: banner2Title || bannerConfig.title2,
+      updatedBy: userEmail,
+    });
+    setIsSavingBanner(false);
+    if (success) {
+      setBannerStatusMsg('บันทึกภาพป๊อปอัปประชาสัมพันธ์หน้าแรกสำเร็จ อัปเดตทันที');
+      showToast('บันทึกภาพป๊อปอัปหน้าแรกเรียบร้อย');
+      setBanner1Preview(null);
+      setBanner2Preview(null);
+    } else {
       setBannerStatusMsg('เกิดข้อผิดพลาดในการบันทึกภาพป๊อปอัป');
-    } finally {
-      setIsSavingBanner(false);
     }
   };
 
   const handleResetBanners = async () => {
-    if (isSavingBanner) return;
     if (!confirm('ต้องการรีเซ็ตภาพป๊อปอัปประชาสัมพันธ์กลับเป็นค่าเริ่มต้นใช่หรือไม่?')) return;
     setIsSavingBanner(true);
-    try {
-      const success = await savePopupBannerConfig({
-        bannerImageUrl: DEFAULT_BANNER_IMAGE,
-        bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
-        title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
-        title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
-        updatedBy: userEmail,
-      });
-      if (success) {
-        setBanner1Preview(null);
-        setBanner2Preview(null);
-        setBanner1Title('พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี');
-        setBanner2Title('พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
-        setBannerStatusMsg('รีเซ็ตภาพป๊อปอัปกลับเป็นค่าเริ่มต้นเรียบร้อย');
-        showToast('รีเซ็ตภาพป๊อปอัปเรียบร้อย');
-      }
-    } catch {
-      setBannerStatusMsg('เกิดข้อผิดพลาดในการรีเซ็ตภาพป๊อปอัป');
-    } finally {
-      setIsSavingBanner(false);
+    const success = await savePopupBannerConfig({
+      bannerImageUrl: DEFAULT_BANNER_IMAGE,
+      bannerImageUrl2: DEFAULT_BANNER_IMAGE_2,
+      title: 'พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี',
+      title2: 'พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)',
+      updatedBy: userEmail,
+    });
+    setIsSavingBanner(false);
+    if (success) {
+      setBanner1Preview(null);
+      setBanner2Preview(null);
+      setBanner1Title('พระราชดำรัส สมเด็จพระกนิษฐาธิราชเจ้า กรมสมเด็จพระเทพรัตนราชสุดาฯ สยามบรมราชกุมารี');
+      setBanner2Title('พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
+      setBannerStatusMsg('รีเซ็ตภาพป๊อปอัปกลับเป็นค่าเริ่มต้นเรียบร้อย');
+      showToast('รีเซ็ตภาพป๊อปอัปเรียบร้อย');
     }
   };
 
@@ -2094,34 +1862,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               onClick={handleRefreshAllAdminData}
               disabled={isRefreshingAll || !isAdminResolved || refreshAllCooldownSec > 0}
               className="px-3.5 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 text-emerald-200 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title={refreshAllCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshAllCooldownSec} วินาที` : 'ดึงข้อมูลสรุปสถิติล่าสุด (1 Read)'}
+              title={refreshAllCooldownSec > 0 ? `รอรีเฟรชได้อีกครั้งใน ${refreshAllCooldownSec} วินาที` : 'ดึงข้อมูลสถิติและรายการทั้งหมดล่าสุดจากฐานข้อมูล'}
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
               <span>{refreshAllCooldownSec > 0 ? `รีเฟรชข้อมูลสถิติ (${refreshAllCooldownSec}s)` : 'รีเฟรชข้อมูลสถิติ'}</span>
-            </button>
-
-            <button
-              type="button"
-              id="btn-sync-admin-overview"
-              onClick={() => setShowSyncOverviewConfirmModal(true)}
-              disabled={isSyncingOverview || isRebuildingBundles || !isAdminResolved}
-              className="px-3.5 py-1.5 rounded-xl bg-amber-600/20 hover:bg-amber-600/35 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="คำนวณและซิงค์ยอดสรุปจริงทั้งหมดลงในเอกสาร stats/admin_overview (ทำเฉพาะเมื่อต้องการกระทบยอด)"
-            >
-              <Database className={`w-3.5 h-3.5 text-amber-400 ${isSyncingOverview ? 'animate-pulse' : ''}`} />
-              <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ซิงค์ยอดสรุปจริง'}</span>
-            </button>
-
-            <button
-              type="button"
-              id="btn-rebuild-index-bundles"
-              onClick={handleRebuildIndexBundles}
-              disabled={isRebuildingBundles || isSyncingOverview || !isAdminResolved}
-              className="px-3.5 py-1.5 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-              title="สร้างเอกสารดัชนีรวม bundles/* ใหม่ทั้งหมด (ตัด Base64 ออก ประหยัดโควต้าอ่านและพื้นที่)"
-            >
-              <Layers className={`w-3.5 h-3.5 text-indigo-400 ${isRebuildingBundles ? 'animate-spin' : ''}`} />
-              <span>{isRebuildingBundles ? 'กำลังสร้างดัชนี...' : 'สร้างดัชนีข้อมูลรวมใหม่ (Rebuild Index Bundle)'}</span>
             </button>
 
             <button
@@ -2206,9 +1950,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>
-              ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length > 0 ? innovations.length : (adminOverview?.totalInnovationsCount || 0)})
-            </span>
+            <span>ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length})</span>
           </button>
 
           <button
@@ -2221,9 +1963,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>
-              สรุปรายชื่อครู ({teacherSummaries.length > 0 ? teacherSummaries.length : (adminOverview?.totalTeachersWithSubmissions || 0)})
-            </span>
+            <span>สรุปรายชื่อครู ({teacherSummaries.length})</span>
           </button>
 
           <button
@@ -2236,9 +1976,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <School className="w-3.5 h-3.5" />
-            <span>
-              บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length > 0 ? facilities.length : (adminOverview?.totalFacilityLogs || 0)})
-            </span>
+            <span>บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length})</span>
           </button>
 
           <button
@@ -2259,31 +1997,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       {/* Main Content Area */}
       <main className="max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-6 flex-grow">
         
-        {/* Subtle HTTP 429 Quota Fallback Banner (keeps displaying last valid cached stats) */}
-        {(isQuotaFallback || adminOverview?.fromQuotaFallback) && (
-          <div className="mb-4 px-4 py-2.5 rounded-2xl bg-amber-950/50 border border-amber-500/40 text-amber-200 text-xs flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 text-amber-400 flex-shrink-0" />
-              <span>แสดงข้อมูลจากแคชล่าสุดเนื่องจากโควต้าอ่านข้อมูลวันนี้เต็ม</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => setIsQuotaFallback(false)}
-              className="text-amber-300/80 hover:text-amber-100 p-1 rounded-lg transition-colors cursor-pointer"
-              title="ซ่อนข้อความแจ้งเตือน"
-            >
-              <X className="w-3.5 h-3.5" />
-            </button>
-          </div>
-        )}
-
         {/* =========================================================================
             TAB 1: สถิติและภาพรวมเว็บไซต์ (Stats & Overview)
            ========================================================================= */}
         {activeTab === 'stats' && (
           <div className="space-y-6">
 
-            {/* Section Bar with On-Demand Refresh Stats Button (1-Read Pre-Aggregated + 6h Cache) */}
+            {/* Section Bar with On-Demand Refresh Stats Button */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 rounded-2xl bg-slate-900/90 border border-slate-800">
               <div>
                 <h2 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
@@ -2291,65 +2011,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   <span>สถิติโดยรวมและสรุปข้อมูลประจำปี</span>
                 </h2>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  ใช้สรุปรวม 1 เอกสาร (แคช 6 ชั่วโมง • อัปเดตล่าสุด:{' '}
-                  {adminOverview?.updatedAt
-                    ? new Date(adminOverview.updatedAt).toLocaleString('th-TH', {
-                        day: '2-digit',
-                        month: 'short',
+                  โหลดข้อมูลแบบขนานพร้อมแคช 3 นาที (อัปเดตล่าสุด:{' '}
+                  {adminStatsSummary?.fetchedAt
+                    ? new Date(adminStatsSummary.fetchedAt).toLocaleTimeString('th-TH', {
                         hour: '2-digit',
                         minute: '2-digit',
+                        second: '2-digit',
                       })
-                    : adminOverview?.fetchedAt
-                      ? new Date(adminOverview.fetchedAt).toLocaleTimeString('th-TH', {
-                          hour: '2-digit',
-                          minute: '2-digit',
-                          second: '2-digit',
-                        })
-                      : 'พร้อมใช้งาน'}
+                    : 'กำลังซิงค์...'}
                   )
                 </p>
-                {adminOverview?.needsInitialSync && (
-                  <p className="text-[11px] text-amber-300 mt-1">
-                    ยังไม่มีเอกสารสรุปยอดในฐานข้อมูล กดปุ่ม &quot;ซิงค์ยอดสรุปจริง&quot; 1 ครั้งเพื่อสร้างสรุปข้อมูล
-                  </p>
-                )}
               </div>
-              <div className="flex items-center gap-2 flex-wrap self-start sm:self-auto">
-                <button
-                  type="button"
-                  onClick={() => setShowSyncOverviewConfirmModal(true)}
-                  disabled={isSyncingOverview || isRebuildingBundles || !isAdminResolved}
-                  className="px-3.5 py-2 rounded-xl bg-amber-600/20 hover:bg-amber-600/35 text-amber-200 border border-amber-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  <Database className={`w-3.5 h-3.5 text-amber-400 ${isSyncingOverview ? 'animate-pulse' : ''}`} />
-                  <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ซิงค์ยอดสรุปจริง'}</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRebuildIndexBundles}
-                  disabled={isRebuildingBundles || isSyncingOverview || !isAdminResolved}
-                  className="px-3.5 py-2 rounded-xl bg-indigo-600/25 hover:bg-indigo-600/40 text-indigo-200 border border-indigo-500/40 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  <Layers className={`w-3.5 h-3.5 text-indigo-400 ${isRebuildingBundles ? 'animate-spin' : ''}`} />
-                  <span>{isRebuildingBundles ? 'กำลังสร้างดัชนี...' : 'สร้างดัชนีข้อมูลรวมใหม่ (Rebuild Index Bundle)'}</span>
-                </button>
-                <button
-                  type="button"
-                  id="btn-refresh-admin-stats-overall"
-                  onClick={handleRefreshAllAdminData}
-                  disabled={isRefreshingAll || !isAdminResolved || refreshAllCooldownSec > 0}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-                  <span>
-                    {isRefreshingAll
-                      ? 'กำลังอัปเดตสถิติ...'
-                      : refreshAllCooldownSec > 0
-                        ? `รีเฟรชข้อมูลสถิติ (${refreshAllCooldownSec}s)`
-                        : 'รีเฟรชข้อมูลสถิติ'}
-                  </span>
-                </button>
-              </div>
+              <button
+                type="button"
+                id="btn-refresh-admin-stats-overall"
+                onClick={handleRefreshAllAdminData}
+                disabled={isRefreshingAll || !isAdminResolved || refreshAllCooldownSec > 0}
+                className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-1.5 shadow-md transition-colors cursor-pointer disabled:opacity-50 self-start sm:self-auto"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingAll ? 'animate-spin' : ''}`} />
+                <span>
+                  {isRefreshingAll
+                    ? 'กำลังอัปเดตสถิติ...'
+                    : refreshAllCooldownSec > 0
+                      ? `รีเฟรชข้อมูลสถิติ (${refreshAllCooldownSec}s)`
+                      : 'รีเฟรชข้อมูลสถิติ'}
+                </span>
+              </button>
             </div>
             
             {/* 4 Hero Metric Cards */}
@@ -2723,10 +2411,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   onClick={handleRefreshLoginLogs}
                   disabled={isRefreshingLogs || !isAdminResolved}
                   className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
-                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
+                  title="ดึงยอดรวมและประวัติการเข้าชมล่าสุด 50 รายการจากฐานข้อมูล"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
-                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (30 ล่าสุด)'}</span>
+                  <span>{isRefreshingLogs ? 'กำลังรีเฟรช...' : 'รีเฟรชข้อมูลสถิติ (50 ล่าสุด)'}</span>
                 </button>
 
                 <button
@@ -2815,7 +2503,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ใช้งานไม่ซ้ำ (Unique)</span>
                 <p className="text-xl font-bold text-teal-400 mt-0.5">{visitorTabKpis.uniqueUsers} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
-                <span className="text-[10px] text-slate-500">จากรายการล่าสุด 30 รายการ</span>
+                <span className="text-[10px] text-slate-500">จากรายการล่าสุด 50 รายการ</span>
               </div>
               <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
                 <span className="text-[11px] text-slate-400">ผู้ดูแลระบบ (Admin)</span>
@@ -5395,12 +5083,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
 
               <div>
-                <label className="block text-slate-300 font-semibold mb-1">ลิงก์ภาพปกชิ้นงานภายนอก (Cover Image URL - รองรับ https:// หรือดึงจาก YouTube)</label>
+                <label className="block text-slate-300 font-semibold mb-1">ลิงก์ภาพปกชิ้นงาน (Cover Image URL)</label>
                 <input
                   type="url"
                   value={editingInnovation.coverImageUrl || ''}
                   onChange={(e) => setEditingInnovation({ ...editingInnovation, coverImageUrl: e.target.value })}
-                  placeholder="https://... (เว้นว่างไว้หากใช้ไอคอนหรือปก YouTube อัตโนมัติ)"
+                  placeholder="https://... หรือ Data URL"
                   className="w-full px-3.5 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono text-xs"
                 />
               </div>
@@ -5635,63 +5323,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               >
                 <Trash2 className="w-4 h-4" />
                 <span>{isDeletingFacility ? 'กำลังลบ...' : 'ยืนยันลบบันทึก'}</span>
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* =========================================================================
-          One-Time Admin Overview Sync Confirmation Modal ("ซิงค์ยอดสรุปจริง")
-         ========================================================================= */}
-      {showSyncOverviewConfirmModal && (
-        <div
-          className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
-          onClick={() => !isSyncingOverview && setShowSyncOverviewConfirmModal(false)}
-        >
-          <div
-            className="relative w-full max-w-lg bg-slate-900 border border-amber-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-2xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center justify-center flex-shrink-0">
-                <Database className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-base font-bold text-white">ยืนยันการซิงค์ยอดสรุปจริง (stats/admin_overview)</h3>
-                <p className="text-xs text-slate-400">คำนวณยอดสะสมจริงจากฐานข้อมูลทุกคอลเล็กชันเพียงครั้งเดียว</p>
-              </div>
-            </div>
-
-            <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
-              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
-                <AlertCircle className="w-4 h-4 text-amber-400" />
-                <span>ระบบจะรวบรวมยอดจริงและบันทึกเป็นเอกสารสรุปเดียว</span>
-              </p>
-              <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
-                <li>นับยอดครู สื่อ 5 ชิ้น คลังสื่อ แหล่งเรียนรู้ บัญชีผู้ใช้ และผู้เข้าชมทั้งหมด</li>
-                <li>หลังจากซิงค์แล้ว การเปิดหน้าสถิติ Admin จะใช้โควต้าอ่านเพียง <strong>1 Read</strong> ต่อรอบแคช 6 ชั่วโมง</li>
-                <li>หากโควต้าการอ่านวันนี้เต็ม ระบบจะยกเลิกการเขียนทับและคงค่าแคชเดิมไว้อย่างปลอดภัย</li>
-              </ul>
-            </div>
-
-            <div className="pt-2 flex items-center justify-end gap-2.5">
-              <button
-                type="button"
-                disabled={isSyncingOverview}
-                onClick={() => setShowSyncOverviewConfirmModal(false)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
-              >
-                ยกเลิก
-              </button>
-              <button
-                type="button"
-                onClick={handleConfirmSyncAdminOverview}
-                disabled={isSyncingOverview}
-                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md"
-              >
-                <Database className={`w-3.5 h-3.5 ${isSyncingOverview ? 'animate-spin' : ''}`} />
-                <span>{isSyncingOverview ? 'กำลังซิงค์ยอด...' : 'ยืนยันซิงค์ยอดสรุปจริง'}</span>
               </button>
             </div>
           </div>

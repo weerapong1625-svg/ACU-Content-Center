@@ -13,9 +13,8 @@ import {
   limit
 } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
-import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady, safeLocalStorageSetItem } from '../firebase';
+import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
-import { incrementAdminOverviewCounters } from './adminOverviewService';
 import {
   isBlobUrl,
   isCustomAvatarUrl,
@@ -24,7 +23,6 @@ import {
   resolveDisplayAvatarUrl,
   getMatchingAuthPhotoUrl,
 } from '../utils/avatarUtils';
-import { sanitizeMediaThumbnailForFirestore } from '../utils/mediaThumbnailUtils';
 
 export interface InnovationItem {
   id: number; // 1 to 5
@@ -160,7 +158,7 @@ export function addDeletedUserEmail(email: string): void {
     if (norm === 'weerapong1625@acu.ac.th') return; // master super admin cannot be blocked
     const set = getDeletedUserEmails();
     set.add(norm);
-    safeLocalStorageSetItem(DELETED_USERS_STORAGE_KEY, JSON.stringify(Array.from(set)));
+    localStorage.setItem(DELETED_USERS_STORAGE_KEY, JSON.stringify(Array.from(set)));
   } catch {}
 }
 
@@ -231,24 +229,10 @@ export function setCachedUserProfile(profile: FullUserProfile): void {
       avatarUrl: cleanAvatar,
       photoURL: cleanAvatar,
     };
-    const key = `${LOCAL_STORAGE_PREFIX}${profile.email.toLowerCase().trim()}`;
-    const saved = safeLocalStorageSetItem(key, JSON.stringify(cleanedProfile));
-    if (!saved) {
-      // Fallback: strip data: URLs from innovation cover thumbnails while keeping user avatar intact
-      const lightweight: FullUserProfile = {
-        ...cleanedProfile,
-        innovations: Array.isArray(cleanedProfile.innovations)
-          ? cleanedProfile.innovations.map((inv) => ({
-              ...inv,
-              coverImageUrl:
-                typeof inv.coverImageUrl === 'string' && /^data:/i.test(inv.coverImageUrl)
-                  ? ''
-                  : inv.coverImageUrl,
-            }))
-          : cleanedProfile.innovations,
-      };
-      safeLocalStorageSetItem(key, JSON.stringify(lightweight));
-    }
+    localStorage.setItem(
+      `${LOCAL_STORAGE_PREFIX}${profile.email.toLowerCase().trim()}`,
+      JSON.stringify(cleanedProfile)
+    );
   } catch (err) {
     console.warn('Could not save profile to localStorage (quota safe fallback):', err);
   }
@@ -282,7 +266,7 @@ function setStoredAvatarUrl(email: string, avatarUrl: string): void {
     }
     const clean = sanitizeAvatarUrl(avatarUrl);
     if (clean) {
-      safeLocalStorageSetItem(`acu_user_avatar_${norm}`, clean);
+      localStorage.setItem(`acu_user_avatar_${norm}`, clean);
     }
   } catch {
     // ignore
@@ -352,7 +336,9 @@ function setLocalUsersUidCache(
   }
 ): void {
   if (typeof window === 'undefined' || !uid || !entry.data) return;
-  safeLocalStorageSetItem(`${USERS_UID_CACHE_PREFIX}${uid}`, JSON.stringify({ ...entry, cachedAt: Date.now() }));
+  try {
+    localStorage.setItem(`${USERS_UID_CACHE_PREFIX}${uid}`, JSON.stringify({ ...entry, cachedAt: Date.now() }));
+  } catch {}
 }
 
 /**
@@ -870,7 +856,7 @@ function sanitizeInnovations(items: any): InnovationItem[] {
       submittedDate: hasTitle ? (item.submittedDate || 'ส่งแล้ว') : '-',
       linkUrl: item?.linkUrl || '',
       notes: item?.notes || '',
-      coverImageUrl: sanitizeMediaThumbnailForFirestore(item?.coverImageUrl, item?.linkUrl),
+      coverImageUrl: item?.coverImageUrl || '',
     };
   });
 }
@@ -1179,8 +1165,8 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
       const currentEmail = (localStorage.getItem('acu_current_user_email') || '').trim().toLowerCase();
       if (currentEmail === normEmail) {
         if (profile.fullName) {
-          safeLocalStorageSetItem('acu_current_user_name', profile.fullName);
-          safeLocalStorageSetItem('acu_user_name', profile.fullName);
+          localStorage.setItem('acu_current_user_name', profile.fullName);
+          localStorage.setItem('acu_user_name', profile.fullName);
         }
       }
       window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: payload }));
@@ -1203,20 +1189,9 @@ export async function saveFullUserProfile(profile: FullUserProfile): Promise<boo
 
   try {
     const safeDocId = getSafeDocId(normEmail);
-    const wasInSession = sessionProfileDocCache.has(safeDocId);
-    const profileRef = doc(db, 'user_profiles', safeDocId);
-    let isBrandNewProfile = false;
-    if (!wasInSession) {
-      try {
-        const existingSnap = await getDoc(profileRef);
-        isBrandNewProfile = !existingSnap.exists();
-      } catch {}
-    }
     sessionProfileDocCache.set(safeDocId, payload);
+    const profileRef = doc(db, 'user_profiles', safeDocId);
     await setDoc(profileRef, payload, { merge: true });
-    if (isBrandNewProfile) {
-      incrementAdminOverviewCounters({ totalUsersCount: 1 }).catch(() => {});
-    }
     return true;
   } catch {
     return true;
@@ -1499,26 +1474,14 @@ export async function adjustUserSubmissionCount(
 
 // Smart-cached pool for `user_profiles` only (no collection-wide `users` query, no onSnapshot)
 const ALL_USER_PROFILES_CACHE_KEY = 'acu_cached_all_user_profiles_map';
-const ALL_USER_PROFILES_FETCHED_AT_KEY = 'acu_cached_all_user_profiles_fetched_at';
-const USER_PROFILES_CACHE_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours TTL
-const USER_PROFILES_COOLDOWN_MS = 60 * 1000; // 60 seconds manual refresh cooldown
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
 let hasFetchedAllUserProfilesThisSession = false;
-let lastAllUserProfilesFetchedAt = 0;
-let lastManualAllUserProfilesRefreshAt = 0;
-let isFetchingAllUserProfiles = false;
 let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
 let userProfilesWindowListenersAttached = false;
 
 let lastEmptyUserProfilesServerCheckAt = 0;
-
-export function getAllUserProfilesCooldownSeconds(): number {
-  if (!lastManualAllUserProfilesRefreshAt) return 0;
-  const remaining = USER_PROFILES_COOLDOWN_MS - (Date.now() - lastManualAllUserProfilesRefreshAt);
-  return remaining > 0 ? Math.ceil(remaining / 1000) : 0;
-}
 
 function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   if (typeof window === 'undefined') return {};
@@ -1548,54 +1511,16 @@ function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   return {};
 }
 
-function stripLargeBase64FromBulkProfile(profile: FullUserProfile): FullUserProfile {
-  const safePhoto =
-    typeof profile.photoURL === 'string' && /^data:/i.test(profile.photoURL.trim())
-      ? ''
-      : profile.photoURL;
-  const safeAvatar =
-    typeof profile.avatarUrl === 'string' && /^data:/i.test(profile.avatarUrl.trim())
-      ? ''
-      : profile.avatarUrl;
-  return {
-    ...profile,
-    photoURL: safePhoto,
-    avatarUrl: safeAvatar,
-    innovations: Array.isArray(profile.innovations)
-      ? profile.innovations.map((inv) => ({
-          ...inv,
-          coverImageUrl:
-            typeof inv.coverImageUrl === 'string' && /^data:/i.test(inv.coverImageUrl.trim())
-              ? ''
-              : inv.coverImageUrl,
-        }))
-      : profile.innovations,
-  };
-}
-
-function saveStoredAllUserProfilesMap(
-  map: Record<string, FullUserProfile>,
-  updateFetchedAt = false
-): void {
+function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): void {
   if (typeof window === 'undefined') return;
   try {
     if (Object.keys(map).length === 0) {
       try {
         localStorage.removeItem(ALL_USER_PROFILES_CACHE_KEY);
-        localStorage.removeItem(ALL_USER_PROFILES_FETCHED_AT_KEY);
       } catch {}
       return;
     }
-    const lightweightMap: Record<string, FullUserProfile> = {};
-    Object.entries(map).forEach(([k, prof]) => {
-      if (prof) {
-        lightweightMap[k] = stripLargeBase64FromBulkProfile(prof);
-      }
-    });
-    const ok = safeLocalStorageSetItem(ALL_USER_PROFILES_CACHE_KEY, JSON.stringify(lightweightMap));
-    if (ok && updateFetchedAt) {
-      safeLocalStorageSetItem(ALL_USER_PROFILES_FETCHED_AT_KEY, String(Date.now()));
-    }
+    localStorage.setItem(ALL_USER_PROFILES_CACHE_KEY, JSON.stringify(map));
   } catch (err) {
     console.warn('Failed to save user profiles map cache (quota fallback to memory):', err);
   }
@@ -1689,7 +1614,7 @@ function ensureUserProfilesWindowListeners(): void {
 /**
  * One-time getDocs fetch for `user_profiles` (deduplicated per page load unless forceRefresh=true)
  */
-export async function refreshAllUserProfiles(forceRefresh = false): Promise<Record<string, FullUserProfile>> {
+export async function refreshAllUserProfiles(forceRefresh = true): Promise<Record<string, FullUserProfile>> {
   const localFallback =
     sharedUserProfilesMap && Object.keys(sharedUserProfilesMap).length > 0
       ? sharedUserProfilesMap
@@ -1698,19 +1623,13 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
           ...getAllLocalUserProfilesMap(),
         };
 
-  const storedFetchedAt =
-    lastAllUserProfilesFetchedAt ||
-    (typeof window !== 'undefined' ? Number(localStorage.getItem(ALL_USER_PROFILES_FETCHED_AT_KEY) || 0) : 0);
-  const isCacheFresh =
-    Object.keys(localFallback).length > 0 &&
-    (hasFetchedAllUserProfilesThisSession ||
-      (storedFetchedAt > 0 && Date.now() - storedFetchedAt < USER_PROFILES_CACHE_TTL_MS));
-
-  if (!forceRefresh && isCacheFresh) {
-    if (!sharedUserProfilesMap || Object.keys(sharedUserProfilesMap).length === 0) {
-      sharedUserProfilesMap = localFallback;
-    }
-    return localFallback;
+  if (
+    !forceRefresh &&
+    hasFetchedAllUserProfilesThisSession &&
+    sharedUserProfilesMap &&
+    Object.keys(sharedUserProfilesMap).length > 0
+  ) {
+    return sharedUserProfilesMap;
   }
 
   if (
@@ -1722,24 +1641,10 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
     return sharedUserProfilesMap;
   }
 
-  if (forceRefresh && getAllUserProfilesCooldownSeconds() > 0) {
-    if (inFlightAllUserProfilesFetch) return inFlightAllUserProfilesFetch;
-    return localFallback;
-  }
-
-  if (inFlightAllUserProfilesFetch) {
+  if (!forceRefresh && inFlightAllUserProfilesFetch) {
     return inFlightAllUserProfilesFetch;
   }
 
-  if (isFetchingAllUserProfiles) {
-    return localFallback;
-  }
-
-  if (forceRefresh) {
-    lastManualAllUserProfilesRefreshAt = Date.now();
-  }
-
-  isFetchingAllUserProfiles = true;
   inFlightAllUserProfilesFetch = (async () => {
     try {
       await waitForAuthReady();
@@ -1766,11 +1671,8 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
       if (Object.keys(nextProfileDocs).length > 0) {
         latestProfileDocsByEmail = nextProfileDocs;
         hasFetchedAllUserProfilesThisSession = true;
-        lastAllUserProfilesFetchedAt = Date.now();
         lastEmptyUserProfilesServerCheckAt = 0;
-        const merged = rebuildAndBroadcastMergedProfiles();
-        saveStoredAllUserProfilesMap(merged, true);
-        return merged;
+        return rebuildAndBroadcastMergedProfiles();
       }
 
       if (!snapshot.metadata?.fromCache) {
@@ -1780,19 +1682,17 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
         broadcastUserProfiles(localFallback);
         return localFallback;
       }
-      return sharedUserProfilesMap || {};
+      broadcastUserProfiles({});
+      return {};
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       } else {
         console.warn('refreshAllUserProfiles error (using local fallback):', err);
       }
-      if (Object.keys(localFallback).length > 0) {
-        broadcastUserProfiles(localFallback);
-      }
+      broadcastUserProfiles(localFallback);
       return localFallback;
     } finally {
-      isFetchingAllUserProfiles = false;
       inFlightAllUserProfilesFetch = null;
     }
   })();
@@ -1801,30 +1701,23 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
 }
 
 /**
- * Smart-cached subscription to all user profiles (`user_profiles` only, no `users` collection query, no onSnapshot).
- * Default does NOT auto-fetch from Firestore on modal/tab mount unless `{ autoFetch: true }`.
+ * Smart-cached subscription to all user profiles (`user_profiles` only, no `users` collection query, no onSnapshot)
  */
 export function subscribeAllUserProfiles(
-  callback: (profilesMap: Record<string, FullUserProfile>) => void,
-  options?: { autoFetch?: boolean; skipFetch?: boolean }
+  callback: (profilesMap: Record<string, FullUserProfile>) => void
 ): () => void {
   userProfilesListeners.add(callback);
   ensureUserProfilesWindowListeners();
 
-  const initial =
-    sharedUserProfilesMap && Object.keys(sharedUserProfilesMap).length > 0
-      ? sharedUserProfilesMap
-      : {
-          ...getStoredAllUserProfilesMap(),
-          ...getAllLocalUserProfilesMap(),
-        };
+  const initial = sharedUserProfilesMap || {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+  };
   if (Object.keys(initial).length > 0) {
     callback(initial);
   }
 
-  if (options?.autoFetch && !options?.skipFetch) {
-    refreshAllUserProfiles(false).catch(() => {});
-  }
+  refreshAllUserProfiles(false).catch(() => {});
 
   return () => {
     userProfilesListeners.delete(callback);
@@ -1939,52 +1832,44 @@ export async function deleteUserAccountCompletely(
         }
 
         // Purge user login logs from local cache
-        try {
-          const rawLogs = localStorage.getItem('acu_persistent_login_logs');
-          if (rawLogs) {
-            const parsed = JSON.parse(rawLogs);
-            if (Array.isArray(parsed)) {
-              const filtered = parsed.filter((l: any) => (l.email || '').toLowerCase().trim() !== normTarget);
-              safeLocalStorageSetItem('acu_persistent_login_logs', JSON.stringify(filtered));
-            }
+        const rawLogs = localStorage.getItem('acu_persistent_login_logs');
+        if (rawLogs) {
+          const parsed = JSON.parse(rawLogs);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((l: any) => (l.email || '').toLowerCase().trim() !== normTarget);
+            localStorage.setItem('acu_persistent_login_logs', JSON.stringify(filtered));
           }
-        } catch {}
+        }
 
         // Purge innovations from local cache
-        try {
-          const rawInnovs = localStorage.getItem('acu_cached_innovations_submissions');
-          if (rawInnovs) {
-            const parsed = JSON.parse(rawInnovs);
-            if (Array.isArray(parsed)) {
-              const filtered = parsed.filter((i: any) => (i.userEmail || '').toLowerCase().trim() !== normTarget);
-              safeLocalStorageSetItem('acu_cached_innovations_submissions', JSON.stringify(filtered));
-            }
+        const rawInnovs = localStorage.getItem('acu_cached_innovations_submissions');
+        if (rawInnovs) {
+          const parsed = JSON.parse(rawInnovs);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((i: any) => (i.userEmail || '').toLowerCase().trim() !== normTarget);
+            localStorage.setItem('acu_cached_innovations_submissions', JSON.stringify(filtered));
           }
-        } catch {}
+        }
 
         // Purge teacher media from local cache
-        try {
-          const rawMedia = localStorage.getItem('acu_cached_teacher_media');
-          if (rawMedia) {
-            const parsed = JSON.parse(rawMedia);
-            if (Array.isArray(parsed)) {
-              const filtered = parsed.filter((m: any) => (m.submittedByEmail || '').toLowerCase().trim() !== normTarget);
-              safeLocalStorageSetItem('acu_cached_teacher_media', JSON.stringify(filtered));
-            }
+        const rawMedia = localStorage.getItem('acu_cached_teacher_media');
+        if (rawMedia) {
+          const parsed = JSON.parse(rawMedia);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((m: any) => (m.submittedByEmail || '').toLowerCase().trim() !== normTarget);
+            localStorage.setItem('acu_cached_teacher_media', JSON.stringify(filtered));
           }
-        } catch {}
+        }
 
         // Purge facilities from local cache
-        try {
-          const rawFac = localStorage.getItem('acu_cached_facility_submissions');
-          if (rawFac) {
-            const parsed = JSON.parse(rawFac);
-            if (Array.isArray(parsed)) {
-              const filtered = parsed.filter((f: any) => (f.userEmail || '').toLowerCase().trim() !== normTarget);
-              safeLocalStorageSetItem('acu_cached_facility_submissions', JSON.stringify(filtered));
-            }
+        const rawFac = localStorage.getItem('acu_cached_facility_submissions');
+        if (rawFac) {
+          const parsed = JSON.parse(rawFac);
+          if (Array.isArray(parsed)) {
+            const filtered = parsed.filter((f: any) => (f.userEmail || '').toLowerCase().trim() !== normTarget);
+            localStorage.setItem('acu_cached_facility_submissions', JSON.stringify(filtered));
           }
-        } catch {}
+        }
       }
       removeUserCredential(normTarget);
     } catch (err) {
@@ -2112,15 +1997,7 @@ export async function deleteUserAccountCompletely(
       console.warn('Could not clean shared teaching ideas:', err);
     }
 
-    // 9. Update pre-aggregated admin overview counters incrementally
-    incrementAdminOverviewCounters({
-      totalUsersCount: deletedCounts.profile ? -1 : 0,
-      totalInnovationsCount: deletedCounts.innovations > 0 ? -deletedCounts.innovations : 0,
-      totalMediaCount: deletedCounts.teacherMedia > 0 ? -deletedCounts.teacherMedia : 0,
-      totalFacilityLogs: deletedCounts.facilities > 0 ? -deletedCounts.facilities : 0,
-    }).catch(() => {});
-
-    // 10. Dispatch instant update events across all application components
+    // 9. Dispatch instant update events across all application components
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_user_deleted', { detail: { email: normTarget } }));
       window.dispatchEvent(new CustomEvent('acu_login_logs_updated'));

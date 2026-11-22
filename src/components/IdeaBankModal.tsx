@@ -252,9 +252,6 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [editCategory, setEditCategory] = useState<AvailableCategory>('official_portal');
 
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
-  const [isSubmittingIdea, setIsSubmittingIdea] = useState<boolean>(false);
-  const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
-  const [isDeletingIdea, setIsDeletingIdea] = useState<boolean>(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
@@ -366,7 +363,6 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
 
   const handleAddCustomIdea = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingIdea) return;
     if (!newTitle.trim()) return;
 
     const normalizedUrl = normalizeHttpUrl(newUrl);
@@ -378,34 +374,27 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     const catObj = IDEA_CATEGORIES.find((c) => c.id === newCategory);
     const catLabel = catObj?.label.replace(/^[^\s]+\s*/, '') || 'คลังความรู้';
 
-    setIsSubmittingIdea(true);
-    try {
-      const res = await saveSharedIdea({
-        category: newCategory,
-        categoryLabel: catLabel,
-        title: newTitle.trim(),
-        description: newDesc.trim() || 'ข้อมูลและแหล่งเรียนรู้แบ่งปันโดยคณะครู ACU',
-        url: normalizedUrl,
-        imageUrl: newImageUrl.trim() ? normalizeHttpUrl(newImageUrl) : undefined,
-        tags: ['คลังความรู้', 'แบ่งปันโดยครู'],
-        creatorEmail: userEmail || 'anonymous',
-        creatorName: userEmail ? userEmail.split('@')[0] : 'ครู ACU',
-      });
+    const res = await saveSharedIdea({
+      category: newCategory,
+      categoryLabel: catLabel,
+      title: newTitle.trim(),
+      description: newDesc.trim() || 'ข้อมูลและแหล่งเรียนรู้แบ่งปันโดยคณะครู ACU',
+      url: normalizedUrl,
+      imageUrl: newImageUrl.trim() ? normalizeHttpUrl(newImageUrl) : undefined,
+      tags: ['คลังความรู้', 'แบ่งปันโดยครู'],
+      creatorEmail: userEmail || 'anonymous',
+      creatorName: userEmail ? userEmail.split('@')[0] : 'ครู ACU',
+    });
 
-      if (res.success) {
-        showNotice('success', 'เพิ่มข้อมูลเข้าสู่คลังไอเดียเรียบร้อยแล้ว');
-        setNewTitle('');
-        setNewDesc('');
-        setNewUrl('');
-        setNewImageUrl('');
-        setIsAddingIdea(false);
-      } else {
-        showNotice('error', res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
-      }
-    } catch {
-      showNotice('error', 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
-    } finally {
-      setIsSubmittingIdea(false);
+    if (res.success) {
+      showNotice('success', 'เพิ่มข้อมูลเข้าสู่คลังไอเดียเรียบร้อยแล้ว');
+      setNewTitle('');
+      setNewDesc('');
+      setNewUrl('');
+      setNewImageUrl('');
+      setIsAddingIdea(false);
+    } else {
+      showNotice('error', res.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
     }
   };
 
@@ -437,7 +426,6 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
 
   const handleSaveEdit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSavingEdit) return;
     if (!editingIdea || !editTitle.trim()) return;
 
     const normalizedUrl = normalizeHttpUrl(editUrl);
@@ -449,36 +437,28 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     const catObj = IDEA_CATEGORIES.find((c) => c.id === editCategory);
     const catLabel = catObj?.label.replace(/^[^\s]+\s*/, '') || 'คลังความรู้';
 
-    setIsSavingEdit(true);
-    try {
-      const res = await updateSharedIdea(
-        editingIdea.id,
-        {
-          title: editTitle.trim(),
-          description: editDesc.trim(),
-          url: normalizedUrl,
-          imageUrl: editImageUrl.trim() ? normalizeHttpUrl(editImageUrl) : '',
-          category: editCategory,
-          categoryLabel: catLabel,
-        },
-        userEmail
-      );
+    const res = await updateSharedIdea(
+      editingIdea.id,
+      {
+        title: editTitle.trim(),
+        description: editDesc.trim(),
+        url: normalizedUrl,
+        imageUrl: editImageUrl.trim() ? normalizeHttpUrl(editImageUrl) : '',
+        category: editCategory,
+        categoryLabel: catLabel,
+      },
+      userEmail
+    );
 
-      if (res.success) {
-        showNotice('success', 'แก้ไขข้อมูลเรียบร้อยแล้ว');
-        setEditingIdea(null);
-      } else {
-        showNotice('error', res.error || 'ไม่สามารถแก้ไขได้');
-      }
-    } catch {
-      showNotice('error', 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
-    } finally {
-      setIsSavingEdit(false);
+    if (res.success) {
+      showNotice('success', 'แก้ไขข้อมูลเรียบร้อยแล้ว');
+      setEditingIdea(null);
+    } else {
+      showNotice('error', res.error || 'ไม่สามารถแก้ไขได้');
     }
   };
 
   const handleDeleteIdea = async (item: IdeaResource) => {
-    if (isDeletingIdea) return;
     const raw = firestoreIdeas.find((f) => f.id === item.id);
     if (!raw) {
       showNotice('error', 'รายการนี้เป็นข้อมูลมาตรฐานของระบบ ไม่สามารถลบได้');
@@ -489,19 +469,12 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
       return;
     }
 
-    setIsDeletingIdea(true);
-    try {
-      const res = await deleteSharedIdea(raw.id, userEmail);
-      setConfirmDeleteId(null);
-      if (res.success) {
-        showNotice('success', 'ลบรายการเรียบร้อยแล้ว');
-      } else {
-        showNotice('error', res.error || 'ไม่สามารถลบข้อมูลได้');
-      }
-    } catch {
-      showNotice('error', 'เกิดข้อผิดพลาดในการลบข้อมูล');
-    } finally {
-      setIsDeletingIdea(false);
+    const res = await deleteSharedIdea(raw.id, userEmail);
+    setConfirmDeleteId(null);
+    if (res.success) {
+      showNotice('success', 'ลบรายการเรียบร้อยแล้ว');
+    } else {
+      showNotice('error', res.error || 'ไม่สามารถลบข้อมูลได้');
     }
   };
 
@@ -655,18 +628,16 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
                 <button
                   type="button"
-                  disabled={isSavingEdit}
                   onClick={() => setEditingIdea(null)}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs cursor-pointer"
+                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer"
                 >
                   ยกเลิก
                 </button>
                 <button
                   type="submit"
-                  disabled={isSavingEdit}
-                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
+                  className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer"
                 >
-                  {isSavingEdit ? 'กำลังบันทึก...' : 'บันทึกการแก้ไข'}
+                  บันทึกการแก้ไข
                 </button>
               </div>
             </form>
@@ -778,18 +749,16 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
               <div className="flex justify-end gap-2">
                 <button
                   type="button"
-                  disabled={isSubmittingIdea}
                   onClick={() => setIsAddingIdea(false)}
-                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 disabled:opacity-50 cursor-pointer"
+                  className="px-3 py-1.5 rounded-lg bg-slate-800 text-slate-300 text-xs hover:bg-slate-700 cursor-pointer"
                 >
                   ยกเลิก
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmittingIdea}
-                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-semibold cursor-pointer"
+                  className="px-4 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-xs font-semibold cursor-pointer"
                 >
-                  {isSubmittingIdea ? 'กำลังบันทึก...' : 'บันทึกลงคลังไอเดีย'}
+                  บันทึกลงคลังไอเดีย
                 </button>
               </div>
             </form>
@@ -973,17 +942,15 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
                               <div className="flex items-center gap-1">
                                 <button
                                   type="button"
-                                  disabled={isDeletingIdea}
                                   onClick={() => handleDeleteIdea(item)}
-                                  className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-white text-[11px] font-semibold cursor-pointer"
+                                  className="px-2 py-1 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-semibold cursor-pointer"
                                 >
-                                  {isDeletingIdea ? 'กำลังลบ...' : 'ยืนยันลบ'}
+                                  ยืนยันลบ
                                 </button>
                                 <button
                                   type="button"
-                                  disabled={isDeletingIdea}
                                   onClick={() => setConfirmDeleteId(null)}
-                                  className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-200 text-[11px] cursor-pointer"
+                                  className="px-2 py-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 text-[11px] cursor-pointer"
                                 >
                                   ยกเลิก
                                 </button>

@@ -49,29 +49,23 @@ export const AdminPrivilegeRewardModal: React.FC<AdminPrivilegeRewardModalProps>
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSaving) return;
     setIsSaving(true);
 
-    try {
-      const res = await adminUpdateRewardClaim({
-        userEmail: teacher.email,
-        teacherName: teacher.name,
-        claimStatus,
-        receivedReward: claimStatus === 'received' ? selectedReward : '',
-        adminNote,
-        administeredBy,
-      });
+    const res = await adminUpdateRewardClaim({
+      userEmail: teacher.email,
+      teacherName: teacher.name,
+      claimStatus,
+      receivedReward: claimStatus === 'received' ? selectedReward : '',
+      adminNote,
+      administeredBy,
+    });
 
-      if (res.success) {
-        onSuccess(`บันทึกสถานะของ ${teacher.name} สำเร็จแล้ว (${claimStatus === 'received' ? `มอบ ${selectedReward} เรียบร้อย` : 'อัปเดตสถานะสำเร็จ'})`);
-        onClose();
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการบันทึก');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการบันทึก');
-    } finally {
-      setIsSaving(false);
+    setIsSaving(false);
+    if (res.success) {
+      onSuccess(`บันทึกสถานะของ ${teacher.name} สำเร็จแล้ว (${claimStatus === 'received' ? `มอบ ${selectedReward} เรียบร้อย` : 'อัปเดตสถานะสำเร็จ'})`);
+      onClose();
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการบันทึก');
     }
   };
 

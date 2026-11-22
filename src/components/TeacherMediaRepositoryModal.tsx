@@ -19,19 +19,8 @@ import {
   Calendar,
   Plus,
   Heart,
-  RefreshCw,
-  Youtube,
-  FileText,
-  Palette,
-  HardDrive,
-  Globe
+  RefreshCw
 } from 'lucide-react';
-import {
-  detectMediaLinkCategory,
-  isDataOrBlobUri,
-  resolveDisplayThumbnailUrl,
-  sanitizeMediaThumbnailForFirestore,
-} from '../utils/mediaThumbnailUtils';
 import { 
   TeacherMediaWork, 
   subscribeTeacherMedia, 
@@ -97,76 +86,6 @@ function shuffleWithSeed<T>(array: T[], seed: number): T[] {
   return copy;
 }
 
-const MediaThumbnailOrIcon: React.FC<{
-  thumbnailUrl?: string;
-  onlineUrl?: string;
-  mediaType?: string;
-  title: string;
-  size?: 'sm' | 'lg';
-}> = ({ thumbnailUrl, onlineUrl, mediaType, title, size = 'sm' }) => {
-  const [imgFailed, setImgFailed] = useState(false);
-  const resolvedUrl = resolveDisplayThumbnailUrl(thumbnailUrl, onlineUrl);
-  const cat = detectMediaLinkCategory(onlineUrl, mediaType);
-
-  useEffect(() => {
-    setImgFailed(false);
-  }, [resolvedUrl]);
-
-  if (resolvedUrl && !imgFailed) {
-    return (
-      <img
-        src={resolvedUrl}
-        alt={title}
-        loading="lazy"
-        decoding="async"
-        onError={() => setImgFailed(true)}
-        className={
-          size === 'lg'
-            ? 'w-full max-h-72 object-contain rounded-2xl bg-slate-950 border border-slate-800 mb-4'
-            : 'w-full h-full object-cover group-hover/thumb:scale-110 transition-transform duration-300'
-        }
-      />
-    );
-  }
-
-  const iconSize = size === 'lg' ? 'w-12 h-12' : 'w-6 h-6';
-  const renderIcon = () => {
-    switch (cat.key) {
-      case 'youtube':
-        return <Youtube className={`${iconSize} text-rose-400`} />;
-      case 'gdrive':
-        return <HardDrive className={`${iconSize} text-emerald-400`} />;
-      case 'canva':
-        return <Palette className={`${iconSize} text-cyan-400`} />;
-      case 'pdf':
-      case 'print':
-        return <FileText className={`${iconSize} text-amber-400`} />;
-      case 'tech':
-        return <Globe className={`${iconSize} text-blue-400`} />;
-      default:
-        return <Layers className={`${iconSize} text-purple-400`} />;
-    }
-  };
-
-  if (size === 'lg') {
-    return (
-      <div className="w-full h-44 rounded-2xl bg-gradient-to-br from-slate-950 via-slate-900 to-purple-950/40 border border-slate-800 mb-4 flex flex-col items-center justify-center gap-2">
-        {renderIcon()}
-        <span className="text-xs font-semibold text-slate-300">{cat.label}</span>
-      </div>
-    );
-  }
-
-  return (
-    <div className="w-full h-full bg-gradient-to-br from-slate-900 to-purple-950/50 flex flex-col items-center justify-center gap-0.5 p-1 text-center">
-      {renderIcon()}
-      <span className="text-[8px] font-semibold text-slate-300 leading-tight line-clamp-1">
-        {cat.key === 'youtube' ? 'YouTube' : cat.key === 'gdrive' ? 'Drive' : cat.key === 'canva' ? 'Canva' : cat.key === 'pdf' ? 'PDF' : ''}
-      </span>
-    </div>
-  );
-};
-
 export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalProps> = ({
   userEmail,
   onClose,
@@ -184,9 +103,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<TeacherMediaWork | null>(null);
   const [isDeletingTarget, setIsDeletingTarget] = useState(false);
-  const [isSavingEdit, setIsSavingEdit] = useState(false);
-  const [submittingRatingIds, setSubmittingRatingIds] = useState<{ [id: string]: boolean }>({});
-  const [likingIds, setLikingIds] = useState<{ [id: string]: boolean }>({});
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() =>
     getManualRefreshCooldownSeconds('teacherMedia')
@@ -307,70 +223,51 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       title: item.title,
       description: item.description,
       onlineUrl: item.onlineUrl || '',
-      thumbnailUrl: sanitizeMediaThumbnailForFirestore(item.thumbnailUrl, item.onlineUrl),
+      thumbnailUrl: item.thumbnailUrl,
     });
   };
 
   const handleSaveEdit = async () => {
-    if (!editingItem || isSavingEdit) return;
-    if (isDataOrBlobUri(editForm.thumbnailUrl)) {
-      showErrorFeedback('ไม่รองรับลิงก์ภาพ Base64 (data:) เพื่อประหยัดพื้นที่ กรุณาใช้ลิงก์ https:// หรือเว้นว่างให้ระบบดึงปกอัตโนมัติ');
-      return;
-    }
-    const cleanThumb = sanitizeMediaThumbnailForFirestore(editForm.thumbnailUrl, editForm.onlineUrl.trim());
+    if (!editingItem) return;
     const updates = {
       title: editForm.title.trim(),
       description: editForm.description.trim(),
       onlineUrl: editForm.onlineUrl.trim(),
-      thumbnailUrl: cleanThumb,
+      thumbnailUrl: editForm.thumbnailUrl.trim() || editingItem.thumbnailUrl,
     };
 
-    setIsSavingEdit(true);
-    try {
-      const res = await updateTeacherMedia(editingItem.id, updates, userEmail);
+    const res = await updateTeacherMedia(editingItem.id, updates, userEmail);
 
-      if (res.success) {
-        showSuccessFeedback(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
-        setEditingItem(null);
-        setRawMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
-      } else {
-        showErrorFeedback(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
-      }
-    } catch {
-      showErrorFeedback('เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
-    } finally {
-      setIsSavingEdit(false);
+    if (res.success) {
+      showSuccessFeedback(`บันทึกการแก้ไขสื่อ "${editForm.title}" สำเร็จ`);
+      setEditingItem(null);
+      setRawMediaList(prev => prev.map(m => m.id === editingItem.id ? { ...m, ...updates } : m));
+    } else {
+      showErrorFeedback(res.error || 'แก้ไขข้อมูลไม่สำเร็จ');
     }
   };
 
   const handleDeleteConfirm = async () => {
-    if (!confirmDeleteTarget || isDeletingTarget) return;
+    if (!confirmDeleteTarget) return;
     const item = confirmDeleteTarget;
     setIsDeletingTarget(true);
-    try {
-      const res = await deleteTeacherMedia(item.id, userEmail);
-      if (res.success) {
-        setConfirmDeleteTarget(null);
-        setRawMediaList(prev => prev.filter(m => m.id !== item.id));
-        if (activeViewItem && activeViewItem.id === item.id) {
-          setActiveViewItem(null);
-        }
-        showSuccessFeedback(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
-      } else {
-        setConfirmDeleteTarget(null);
-        showErrorFeedback(res.error || 'ลบข้อมูลไม่สำเร็จ');
-      }
-    } catch {
+    const res = await deleteTeacherMedia(item.id, userEmail);
+    setIsDeletingTarget(false);
+    if (res.success) {
       setConfirmDeleteTarget(null);
-      showErrorFeedback('เกิดข้อผิดพลาดในการลบข้อมูล');
-    } finally {
-      setIsDeletingTarget(false);
+      setRawMediaList(prev => prev.filter(m => m.id !== item.id));
+      if (activeViewItem && activeViewItem.id === item.id) {
+        setActiveViewItem(null);
+      }
+      showSuccessFeedback(`ลบสื่อ "${item.title}" เรียบร้อยแล้ว`);
+    } else {
+      setConfirmDeleteTarget(null);
+      showErrorFeedback(res.error || 'ลบข้อมูลไม่สำเร็จ');
     }
   };
 
   const handleSaveNewMedia = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingNew) return;
     if (!addForm.title.trim()) {
       showErrorFeedback('กรุณากรอกชื่อสื่อ/นวัตกรรม');
       return;
@@ -379,49 +276,38 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
       showErrorFeedback('กรุณากรอกชื่อครูผู้จัดทำ');
       return;
     }
-    if (isDataOrBlobUri(addForm.thumbnailUrl)) {
-      showErrorFeedback('ไม่รองรับภาพ Base64 เพื่อประหยัดพื้นที่ฐานข้อมูล กรุณาใช้ลิงก์ https:// หรือปล่อยว่าง');
-      return;
-    }
-
-    const cleanThumb = sanitizeMediaThumbnailForFirestore(addForm.thumbnailUrl, addForm.onlineUrl.trim());
 
     setIsSubmittingNew(true);
-    try {
-      const res = await addTeacherMediaDirectly({
-        title: addForm.title.trim(),
-        teacherName: addForm.teacherName.trim(),
-        subjectGroup: addForm.subjectGroup,
-        subjectName: addForm.subjectName.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
-        mediaType: addForm.mediaType,
-        description: addForm.description.trim() || `สื่อการสอนวิชา ${addForm.subjectGroup}`,
-        thumbnailUrl: cleanThumb,
-        onlineUrl: addForm.onlineUrl.trim(),
-        submittedByEmail: userEmail,
-      });
+    const res = await addTeacherMediaDirectly({
+      title: addForm.title.trim(),
+      teacherName: addForm.teacherName.trim(),
+      subjectGroup: addForm.subjectGroup,
+      subjectName: addForm.subjectName.trim() || 'สื่อนวัตกรรมการจัดการเรียนรู้',
+      mediaType: addForm.mediaType,
+      description: addForm.description.trim() || `สื่อการสอนวิชา ${addForm.subjectGroup}`,
+      thumbnailUrl: addForm.thumbnailUrl.trim() || '/acu_active_logo.png',
+      onlineUrl: addForm.onlineUrl.trim(),
+      submittedByEmail: userEmail,
+    });
+    setIsSubmittingNew(false);
 
-      if (res.success) {
-        const savedTitle = addForm.title;
-        setIsAddModalOpen(false);
-        setSortOrder('newest');
-        setAddForm({
-          title: '',
-          teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? 'ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
-          subjectGroup: SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
-          subjectName: '',
-          mediaType: 'สื่อเทคโนโลยี',
-          description: '',
-          onlineUrl: '',
-          thumbnailUrl: '',
-        });
-        showSuccessFeedback(`เพิ่มสื่อ "${savedTitle}" เข้าสู่คลังเรียบร้อยแล้ว`, 3500);
-      } else {
-        showErrorFeedback(res.error || 'เพิ่มข้อมูลสื่อไม่สำเร็จ');
-      }
-    } catch {
-      showErrorFeedback('เกิดข้อผิดพลาดในการเพิ่มข้อมูลสื่อ');
-    } finally {
-      setIsSubmittingNew(false);
+    if (res.success) {
+      const savedTitle = addForm.title;
+      setIsAddModalOpen(false);
+      setSortOrder('newest');
+      setAddForm({
+        title: '',
+        teacherName: userEmail.toLowerCase() === 'weerapong1625@acu.ac.th' ? 'ม.วีระพงษ์ มีทรัพย์' : 'คุณครูอัสสัมชัญอุบลฯ',
+        subjectGroup: SUBJECT_GROUPS[0] || 'กลุ่มสาระการเรียนรู้วิทยาศาสตร์และเทคโนโลยี',
+        subjectName: '',
+        mediaType: 'สื่อเทคโนโลยี',
+        description: '',
+        onlineUrl: '',
+        thumbnailUrl: '',
+      });
+      showSuccessFeedback(`เพิ่มสื่อ "${savedTitle}" เข้าสู่คลังเรียบร้อยแล้ว`, 3500);
+    } else {
+      showErrorFeedback(res.error || 'เพิ่มข้อมูลสื่อไม่สำเร็จ');
     }
   };
 
@@ -449,82 +335,66 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
 
   // Handle star rating click
   const handleRate = async (item: TeacherMediaWork, stars: number) => {
-    if (submittingRatingIds[item.id]) return;
-    setSubmittingRatingIds(prev => ({ ...prev, [item.id]: true }));
     setUserVotedStars(prev => ({ ...prev, [item.id]: stars }));
     showSuccessFeedback(`ให้คะแนน ${stars} ดาวแก่สื่อ "${item.title}" เรียบร้อยแล้ว`, 2500);
 
-    try {
-      await rateTeacherMedia(item.id, stars, userEmail);
+    await rateTeacherMedia(item.id, stars, userEmail);
 
-      setRawMediaList(prev =>
-        prev.map(m => {
-          if (m.id === item.id) {
-            const currentTotal = m.ratingAvg * m.ratingCount;
-            const newCount = m.ratingCount + 1;
-            const newAvg = Number(((currentTotal + stars) / newCount).toFixed(1));
-            return { ...m, ratingAvg: newAvg, ratingCount: newCount };
-          }
-          return m;
-        })
-      );
-    } catch {
-      showErrorFeedback('เกิดข้อผิดพลาดในการให้คะแนนดาว');
-    } finally {
-      setSubmittingRatingIds(prev => ({ ...prev, [item.id]: false }));
-    }
+    setRawMediaList(prev =>
+      prev.map(m => {
+        if (m.id === item.id) {
+          const currentTotal = m.ratingAvg * m.ratingCount;
+          const newCount = m.ratingCount + 1;
+          const newAvg = Number(((currentTotal + stars) / newCount).toFixed(1));
+          return { ...m, ratingAvg: newAvg, ratingCount: newCount };
+        }
+        return m;
+      })
+    );
   };
 
   // Handle like toggle (Appreciation points for teacher)
   const handleToggleLike = async (item: TeacherMediaWork) => {
-    if (likingIds[item.id]) return;
-    setLikingIds(prev => ({ ...prev, [item.id]: true }));
-    try {
-      const res = await toggleLikeTeacherMedia(item.id, userEmail);
-      if (res.success) {
-        const normEmail = userEmail.toLowerCase().trim();
-        const updateLikes = (list: TeacherMediaWork[]) =>
-          list.map((m) => {
-            if (m.id === item.id) {
-              const prevLikedBy = Array.isArray(m.likedBy) ? m.likedBy : [];
-              const newLikedBy = res.isLiked
-                ? [...prevLikedBy.filter((e) => e !== normEmail), normEmail]
-                : prevLikedBy.filter((e) => e !== normEmail);
-              return {
-                ...m,
+    const res = await toggleLikeTeacherMedia(item.id, userEmail);
+    if (res.success) {
+      const normEmail = userEmail.toLowerCase().trim();
+      const updateLikes = (list: TeacherMediaWork[]) =>
+        list.map((m) => {
+          if (m.id === item.id) {
+            const prevLikedBy = Array.isArray(m.likedBy) ? m.likedBy : [];
+            const newLikedBy = res.isLiked
+              ? [...prevLikedBy.filter((e) => e !== normEmail), normEmail]
+              : prevLikedBy.filter((e) => e !== normEmail);
+            return {
+              ...m,
+              likes: res.likes,
+              likedBy: newLikedBy,
+            };
+          }
+          return m;
+        });
+
+      setRawMediaList((prev) => updateLikes(prev));
+
+      if (activeViewItem && activeViewItem.id === item.id) {
+        setActiveViewItem((prev) =>
+          prev
+            ? {
+                ...prev,
                 likes: res.likes,
-                likedBy: newLikedBy,
-              };
-            }
-            return m;
-          });
-
-        setRawMediaList((prev) => updateLikes(prev));
-
-        if (activeViewItem && activeViewItem.id === item.id) {
-          setActiveViewItem((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  likes: res.likes,
-                  likedBy: res.isLiked
-                    ? [...(prev.likedBy || []).filter((e) => e !== normEmail), normEmail]
-                    : (prev.likedBy || []).filter((e) => e !== normEmail),
-                }
-              : null
-          );
-        }
-
-        if (res.isLiked) {
-          showSuccessFeedback(`กดถูกใจสื่อ "${item.title}" สะสมแต้มชื่นชม +1 ให้คุณครู ${item.teacherName} สำเร็จ!`);
-        } else {
-          showSuccessFeedback(`ยกเลิกการถูกใจสื่อ "${item.title}"`);
-        }
+                likedBy: res.isLiked
+                  ? [...(prev.likedBy || []).filter((e) => e !== normEmail), normEmail]
+                  : (prev.likedBy || []).filter((e) => e !== normEmail),
+              }
+            : null
+        );
       }
-    } catch {
-      showErrorFeedback('เกิดข้อผิดพลาดในการกดถูกใจ');
-    } finally {
-      setLikingIds(prev => ({ ...prev, [item.id]: false }));
+
+      if (res.isLiked) {
+        showSuccessFeedback(`กดถูกใจสื่อ "${item.title}" สะสมแต้มชื่นชม +1 ให้คุณครู ${item.teacherName} สำเร็จ!`);
+      } else {
+        showSuccessFeedback(`ยกเลิกการถูกใจสื่อ "${item.title}"`);
+      }
     }
   };
 
@@ -741,20 +611,23 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                   <div>
                     {/* Header: Thumbnail + Meta */}
                     <div className="flex items-start gap-3 mb-3">
-                      {/* Small thumbnail preview or crisp category icon */}
+                      {/* Small thumbnail preview */}
                       <div className="w-16 h-16 sm:w-20 sm:h-20 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb">
-                        <MediaThumbnailOrIcon
-                          thumbnailUrl={item.thumbnailUrl}
-                          onlineUrl={item.onlineUrl}
-                          mediaType={item.mediaType}
-                          title={item.title}
-                          size="sm"
+                        <img
+                          src={item.thumbnailUrl}
+                          alt={item.title}
+                          loading="lazy"
+                          decoding="async"
+                          className="w-full h-full object-cover group-hover/thumb:scale-110 transition-transform duration-300"
+                          onError={(e) => {
+                            (e.target as HTMLImageElement).src = '/ACU N.png';
+                          }}
                         />
                         <button
                           type="button"
                           onClick={() => handleViewMedia(item, true)}
                           className="absolute inset-0 bg-black/50 opacity-0 group-hover/thumb:opacity-100 flex items-center justify-center text-white transition-opacity cursor-pointer"
-                          title="ดูรายละเอียด"
+                          title="ดูภาพขยาย"
                         >
                           <Eye className="w-4 h-4" />
                         </button>
@@ -814,11 +687,10 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                             <button
                               key={star}
                               type="button"
-                              disabled={Boolean(submittingRatingIds[item.id])}
                               onMouseEnter={() => setHoverRating(prev => ({ ...prev, [item.id]: star }))}
                               onMouseLeave={() => setHoverRating(prev => ({ ...prev, [item.id]: 0 }))}
                               onClick={() => handleRate(item, star)}
-                              className="text-slate-600 hover:text-amber-400 focus:outline-none transition-colors disabled:opacity-50 cursor-pointer"
+                              className="text-slate-600 hover:text-amber-400 focus:outline-none transition-colors"
                               title={`ให้คะแนน ${star} ดาว`}
                             >
                               <Star
@@ -839,9 +711,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                       {/* Like / ชื่นชม Button (สะสมแต้มให้คุณครูผู้โพสต์) */}
                       <button
                         type="button"
-                        disabled={Boolean(likingIds[item.id])}
                         onClick={() => handleToggleLike(item)}
-                        className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50 ${
+                        className={`px-2 py-1 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-all cursor-pointer ${
                           item.likedBy?.includes(userEmail.toLowerCase().trim())
                             ? 'bg-rose-500/25 border border-rose-500/60 text-rose-300 shadow-sm shadow-rose-500/20'
                             : 'bg-slate-800/80 hover:bg-slate-700/80 border border-slate-700 text-slate-300 hover:text-rose-400'
@@ -998,12 +869,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               </div>
 
               <div>
-                <label className="block text-slate-300 mb-1 font-semibold">URL รูปภาพตัวอย่างสื่อภายนอก (ไม่บังคับ — ระบบดึงปก YouTube หรือแสดงไอคอนอัตโนมัติ)</label>
+                <label className="block text-slate-300 mb-1 font-semibold">URL รูปภาพตัวอย่างสื่อ</label>
                 <input
-                  type="url"
+                  type="text"
                   value={editForm.thumbnailUrl}
                   onChange={(e) => setEditForm(prev => ({ ...prev, thumbnailUrl: e.target.value }))}
-                  placeholder="https://... (เว้นว่างไว้หากใช้ปก YouTube หรือไอคอนหมวดหมู่)"
+                  placeholder="https://..."
                   className="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white focus:outline-none focus:border-amber-400"
                 />
               </div>
@@ -1012,19 +883,17 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
               <button
                 type="button"
-                disabled={isSavingEdit}
                 onClick={() => setEditingItem(null)}
-                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 text-xs font-semibold cursor-pointer"
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold"
               >
                 ยกเลิก
               </button>
               <button
                 type="button"
-                disabled={isSavingEdit}
                 onClick={handleSaveEdit}
-                className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white text-xs font-bold shadow-md shadow-amber-500/20 cursor-pointer"
+                className="px-5 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold shadow-md shadow-amber-500/20"
               >
-                {isSavingEdit ? 'กำลังบันทึก...' : 'บันทึกการแก้ไข'}
+                บันทึกการแก้ไข
               </button>
             </div>
           </div>
@@ -1061,12 +930,13 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             </div>
 
             <div className="py-4">
-              <MediaThumbnailOrIcon
-                thumbnailUrl={activeViewItem.thumbnailUrl}
-                onlineUrl={activeViewItem.onlineUrl}
-                mediaType={activeViewItem.mediaType}
-                title={activeViewItem.title}
-                size="lg"
+              <img
+                src={activeViewItem.thumbnailUrl}
+                alt={activeViewItem.title}
+                onError={(e) => {
+                  (e.target as HTMLImageElement).src = '/ACU N.png';
+                }}
+                className="w-full max-h-72 object-contain rounded-2xl bg-slate-950 border border-slate-800 mb-4"
               />
 
               <div className="p-4 rounded-xl bg-slate-800/60 border border-slate-700 text-xs space-y-2">
@@ -1112,9 +982,8 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
 
                 <button
                   type="button"
-                  disabled={Boolean(likingIds[activeViewItem.id])}
                   onClick={() => handleToggleLike(activeViewItem)}
-                  className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 ${
+                  className={`px-3 py-2 rounded-xl text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer ${
                     activeViewItem.likedBy?.includes(userEmail.toLowerCase().trim())
                       ? 'bg-rose-600 text-white shadow-md shadow-rose-600/30'
                       : 'bg-slate-800 hover:bg-slate-700 text-slate-300'

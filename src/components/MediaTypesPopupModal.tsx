@@ -118,55 +118,44 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   };
 
   const handleSavePoster = async () => {
-    if (!newImagePreview || isSaving) return;
+    if (!newImagePreview) return;
     setIsSaving(true);
     setSaveSuccessNotice(null);
     setErrorNotice(null);
 
-    try {
-      // 1. Immediately reflect the change on the screen
+    // 1. Immediately reflect the change on the screen
+    setPosterUrl(newImagePreview);
+
+    const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
+    const res = await saveCriteriaPoster(newImagePreview, emailToUse);
+    setIsSaving(false);
+
+    if (res.success) {
       setPosterUrl(newImagePreview);
-
-      const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
-      const res = await saveCriteriaPoster(newImagePreview, emailToUse);
-
-      if (res.success) {
-        setPosterUrl(newImagePreview);
-        setSaveSuccessNotice('บันทึกภาพเกณฑ์/ประเภทสื่อลงระบบสำเร็จ ภาพเปลี่ยนทันที');
-        setTimeout(() => {
-          setIsAdminUploadOpen(false);
-          setNewImagePreview(null);
-          setSaveSuccessNotice(null);
-        }, 900);
-      } else {
-        setErrorNotice(res.message);
-      }
-    } catch {
-      setErrorNotice('เกิดข้อผิดพลาดในการบันทึกภาพเกณฑ์');
-    } finally {
-      setIsSaving(false);
+      setSaveSuccessNotice('บันทึกภาพเกณฑ์/ประเภทสื่อลงระบบสำเร็จ ภาพเปลี่ยนทันที');
+      setTimeout(() => {
+        setIsAdminUploadOpen(false);
+        setNewImagePreview(null);
+        setSaveSuccessNotice(null);
+      }, 900);
+    } else {
+      setErrorNotice(res.message);
     }
   };
 
   const handleResetConfirm = async () => {
-    if (isSaving) return;
     const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
     setIsSaving(true);
     setErrorNotice(null);
-    try {
-      setPosterUrl(DEFAULT_CRITERIA_POSTER);
-      const res = await resetCriteriaPoster(emailToUse);
-      setConfirmResetOpen(false);
-      if (res.success) {
-        setNewImagePreview(null);
-        setIsAdminUploadOpen(false);
-      } else {
-        setErrorNotice(res.message);
-      }
-    } catch {
-      setErrorNotice('เกิดข้อผิดพลาดในการรีเซ็ตภาพเกณฑ์');
-    } finally {
-      setIsSaving(false);
+    setPosterUrl(DEFAULT_CRITERIA_POSTER);
+    const res = await resetCriteriaPoster(emailToUse);
+    setIsSaving(false);
+    setConfirmResetOpen(false);
+    if (res.success) {
+      setNewImagePreview(null);
+      setIsAdminUploadOpen(false);
+    } else {
+      setErrorNotice(res.message);
     }
   };
 

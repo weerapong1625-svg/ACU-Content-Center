@@ -18,31 +18,20 @@ import {
   ACU_LAST_ACTIVE_KEY,
 } from './hooks/useInactivityTimeout';
 import { signOut, onAuthStateChanged } from 'firebase/auth';
-import { auth, safeLocalStorageSetItem } from './firebase';
+import { auth } from './firebase';
 import {
   getBangkokDateParts,
   logUserLogin,
   flushPendingLoginLogs,
-  fetchSiteSummaryOnce,
 } from './services/auditService';
 import {
   clearSessionAvatarSyncMemo,
   getCachedUserProfile,
-  refreshAllUserProfiles,
   syncUserAvatarOnAuthOrLogin,
 } from './services/userProfileService';
-import { preloadCoreCollectionsOnce } from './services/submissionService';
 import { sanitizeAvatarUrl } from './utils/avatarUtils';
-import { invalidateAppDataCacheIfVersionMismatch } from './utils/cache';
-
-const APP_CACHE_VERSION = '2026.11.1';
 
 export default function App() {
-  // Automatic Cache Invalidation: wipe stale localStorage data caches on APP_CACHE_VERSION bump (preserves auth/session)
-  React.useEffect(() => {
-    invalidateAppDataCacheIfVersionMismatch(APP_CACHE_VERSION);
-  }, []);
-
   // Check if session has expired prior to mount
   const [sessionTimedOut, setSessionTimedOut] = useState<boolean>(() => {
     try {
@@ -76,7 +65,7 @@ export default function App() {
       }
       if (email) {
         // Refresh active timestamp on valid existing session
-        safeLocalStorageSetItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
+        localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
       }
       return email;
     } catch {
@@ -110,14 +99,11 @@ export default function App() {
     };
   }, []);
 
-  // Startup-only cache-first hydration once auth resolves (0 Firestore reads if 12h caches are fresh)
+  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated once auth resolves
   React.useEffect(() => {
     if (!loggedInUser || !isAuthResolved) return;
     syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser, false).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
-    preloadCoreCollectionsOnce().catch(() => {});
-    fetchSiteSummaryOnce(false).catch(() => {});
-    refreshAllUserProfiles(false).catch(() => {});
   }, [loggedInUser, isAuthResolved]);
 
   // Unified single-point visit recorder to guarantee consistent logging across devices
@@ -141,13 +127,13 @@ export default function App() {
             sessionStorage.setItem(sessionKey, '1');
             return;
           }
-          safeLocalStorageSetItem(deviceStampKey, String(now));
+          localStorage.setItem(deviceStampKey, String(now));
         } catch {
           // ignore storage errors
         }
       } else {
         try {
-          safeLocalStorageSetItem(deviceStampKey, String(now));
+          localStorage.setItem(deviceStampKey, String(now));
         } catch {
           // ignore
         }
@@ -212,8 +198,8 @@ export default function App() {
     setLoggedInUser(normalized);
     setSessionTimedOut(false);
     try {
-      safeLocalStorageSetItem('acu_current_user_email', normalized);
-      safeLocalStorageSetItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
+      localStorage.setItem('acu_current_user_email', normalized);
+      localStorage.setItem(ACU_LAST_ACTIVE_KEY, Date.now().toString());
     } catch {
       // ignore
     }

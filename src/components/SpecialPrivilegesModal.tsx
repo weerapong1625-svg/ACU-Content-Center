@@ -90,7 +90,6 @@ export const SpecialPrivilegesModal: React.FC<SpecialPrivilegesModalProps> = ({
   // Handle Reward Claim Submission
   const handleSubmitClaim = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingClaim) return;
     if (!isEligible) {
       setClaimMessage({
         type: 'error',
@@ -102,71 +101,57 @@ export const SpecialPrivilegesModal: React.FC<SpecialPrivilegesModalProps> = ({
     setIsSubmittingClaim(true);
     setClaimMessage(null);
 
-    try {
-      const res = await submitTeacherRewardClaim({
-        userEmail,
-        teacherName: teacherName || statusData?.teacherName || userEmail,
-        selectedReward,
-        totalShares,
-        note: claimNote,
-      });
+    const res = await submitTeacherRewardClaim({
+      userEmail,
+      teacherName: teacherName || statusData?.teacherName || userEmail,
+      selectedReward,
+      totalShares,
+      note: claimNote,
+    });
 
-      if (res.success) {
-        setClaimMessage({
-          type: 'success',
-          text: `🎉 ยืนยันสิทธิ์สำเร็จ! กรุณาติดต่อรับ "${selectedReward}" ได้ที่ ${PICKUP_LOCATION}`,
-        });
-      } else {
-        setClaimMessage({
-          type: 'error',
-          text: res.error || 'เกิดข้อผิดพลาดในการส่งคำขอรับรางวัล',
-        });
-      }
-    } catch {
+    setIsSubmittingClaim(false);
+    if (res.success) {
+      setClaimMessage({
+        type: 'success',
+        text: `🎉 ยืนยันสิทธิ์สำเร็จ! กรุณาติดต่อรับ "${selectedReward}" ได้ที่ ${PICKUP_LOCATION}`,
+      });
+    } else {
       setClaimMessage({
         type: 'error',
-        text: 'เกิดข้อผิดพลาดในการส่งคำขอรับรางวัล',
+        text: res.error || 'เกิดข้อผิดพลาดในการส่งคำขอรับรางวัล',
       });
-    } finally {
-      setIsSubmittingClaim(false);
     }
   };
 
   // Handle Quick Share educational resource
   const handleQuickShare = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingShare) return;
     if (!quickTitle.trim()) return;
 
     setIsSubmittingShare(true);
     setQuickShareSuccess(null);
 
-    try {
-      const res = await quickShareEducationalResource({
-        title: quickTitle,
-        description: quickDesc,
-        url: quickUrl,
-        category: quickCategory,
-        userEmail,
-        teacherName: teacherName || statusData?.teacherName || userEmail,
-      });
+    const res = await quickShareEducationalResource({
+      title: quickTitle,
+      description: quickDesc,
+      url: quickUrl,
+      category: quickCategory,
+      userEmail,
+      teacherName: teacherName || statusData?.teacherName || userEmail,
+    });
 
-      if (res.success) {
-        setQuickShareSuccess('แชร์แหล่งการเรียนรู้เรียบร้อย! ระบบนับสถิติเพิ่ม +1 ครั้งทันที');
-        setQuickTitle('');
-        setQuickUrl('');
-        setQuickDesc('');
-        setTimeout(() => {
-          setQuickShareSuccess(null);
-          setShowQuickShareForm(false);
-        }, 3000);
-      } else {
-        alert(res.error || 'เกิดข้อผิดพลาดในการแชร์');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการแชร์');
-    } finally {
-      setIsSubmittingShare(false);
+    setIsSubmittingShare(false);
+    if (res.success) {
+      setQuickShareSuccess('แชร์แหล่งการเรียนรู้เรียบร้อย! ระบบนับสถิติเพิ่ม +1 ครั้งทันที');
+      setQuickTitle('');
+      setQuickUrl('');
+      setQuickDesc('');
+      setTimeout(() => {
+        setQuickShareSuccess(null);
+        setShowQuickShareForm(false);
+      }, 3000);
+    } else {
+      alert(res.error || 'เกิดข้อผิดพลาดในการแชร์');
     }
   };
 
@@ -591,7 +576,7 @@ export const SpecialPrivilegesModal: React.FC<SpecialPrivilegesModalProps> = ({
                     <button
                       type="submit"
                       disabled={isSubmittingClaim || !isEligible}
-                      className={`px-6 py-2.5 rounded-xl font-bold text-xs shadow-lg transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50 ${
+                      className={`px-6 py-2.5 rounded-xl font-bold text-xs shadow-lg transition-all flex items-center gap-2 cursor-pointer ${
                         isEligible
                           ? 'bg-gradient-to-r from-amber-500 via-orange-500 to-red-500 hover:from-amber-400 hover:to-orange-400 text-white shadow-amber-500/25 hover:scale-105 active:scale-95'
                           : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
@@ -599,11 +584,9 @@ export const SpecialPrivilegesModal: React.FC<SpecialPrivilegesModalProps> = ({
                     >
                       <Gift className="w-4 h-4" />
                       <span>
-                        {isSubmittingClaim
-                          ? 'กำลังบันทึก...'
-                          : isEligible
-                            ? `ยืนยันขอรับรางวัล (${selectedReward})`
-                            : `ยังแชร์ไม่ครบ (ขาดอีก ${remaining} ครั้ง)`}
+                        {isEligible
+                          ? `ยืนยันขอรับรางวัล (${selectedReward})`
+                          : `ยังแชร์ไม่ครบ (ขาดอีก ${remaining} ครั้ง)`}
                       </span>
                     </button>
                   </div>
