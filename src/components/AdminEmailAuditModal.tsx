@@ -19,7 +19,8 @@ import {
 import { 
   auditAndSyncAllDatabaseEmails, 
   DatabaseEmailAuditResult, 
-  deleteUserAccountCompletely
+  deleteUserAccountCompletely,
+  getCachedEmailAuditResult
 } from '../services/userProfileService';
 import { SUPER_ADMIN_EMAIL } from '../services/logoService';
 import { useSyncButtonState } from '../context/FirestoreDataContext';
@@ -39,7 +40,9 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
   onUserDeleted,
   onViewUserProfile,
 }) => {
-  const [auditResult, setAuditResult] = useState<DatabaseEmailAuditResult | null>(null);
+  const [auditResult, setAuditResult] = useState<DatabaseEmailAuditResult | null>(() =>
+    getCachedEmailAuditResult()
+  );
   const [isLoading, setIsLoading] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [deletingEmail, setDeletingEmail] = useState<string | null>(null);
@@ -61,15 +64,24 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
   }, [isOpen]);
 
   const handleRunAudit = async (forceRefresh = false) => {
+    const applySafeAuditResult = (res: DatabaseEmailAuditResult) => {
+      setAuditResult((prev) => {
+        if (!res.success && prev?.success) {
+          return prev;
+        }
+        return res;
+      });
+    };
+
     if (forceRefresh) {
       if (isAuditRefreshDisabled) return;
       await triggerAuditSync(async () => {
         setIsLoading(true);
         try {
           const res = await auditAndSyncAllDatabaseEmails(adminEmail, true);
-          setAuditResult(res);
+          applySafeAuditResult(res);
         } catch (err) {
-          console.error('Audit failed:', err);
+          console.warn('Audit refresh failed, preserving cached audit result:', err);
         } finally {
           setIsLoading(false);
         }
@@ -80,9 +92,9 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
     setIsLoading(true);
     try {
       const res = await auditAndSyncAllDatabaseEmails(adminEmail, false);
-      setAuditResult(res);
+      applySafeAuditResult(res);
     } catch (err) {
-      console.error('Audit failed:', err);
+      console.warn('Audit load failed, preserving cached audit result:', err);
     } finally {
       setIsLoading(false);
     }

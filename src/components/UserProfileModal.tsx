@@ -230,7 +230,11 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     if (isManualRefreshDisabled) return;
     setRefreshCooldownNotice(null);
     const { executed } = await triggerProfileSync(async () => {
-      await syncProfileStats();
+      try {
+        await syncProfileStats();
+      } catch (err) {
+        console.warn('[UserProfileModal] Manual syncProfileStats failed, preserving cached stats:', err);
+      }
     });
     if (executed) {
       setRefreshCooldownNotice('ซิงค์ข้อมูลสถิติและคลังสื่อล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
@@ -363,17 +367,57 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         fallbackSeedName: incoming.fullName || userName,
       });
       const effectiveAvatar = isUiAvatarPlaceholder(resolvedRaw) ? '' : resolvedRaw;
-      const mergedData: FullUserProfile = {
-        ...incoming,
-        avatarUrl: effectiveAvatar,
-        photoURL: effectiveAvatar,
-      };
-      setProfile(mergedData);
+      setProfile((prev) => {
+        const refStats = latestCached?.stats || prev?.stats;
+        const incomingStats = incoming.stats || {
+          totalViews: 0,
+          uniqueVisitors: 0,
+          points: 0,
+          averageRating: 0,
+          totalRatings: 0,
+        };
+        const mergedData: FullUserProfile = {
+          ...incoming,
+          avatarUrl: effectiveAvatar,
+          photoURL: effectiveAvatar,
+          stats: {
+            totalViews:
+              incomingStats.totalViews > 0 || !refStats?.totalViews
+                ? incomingStats.totalViews
+                : refStats.totalViews,
+            uniqueVisitors:
+              incomingStats.uniqueVisitors > 0 || !refStats?.uniqueVisitors
+                ? incomingStats.uniqueVisitors
+                : refStats.uniqueVisitors,
+            points:
+              incomingStats.points > 0 || !refStats?.points
+                ? incomingStats.points
+                : refStats.points,
+            averageRating:
+              incomingStats.averageRating > 0 || !refStats?.averageRating
+                ? incomingStats.averageRating
+                : refStats.averageRating,
+            totalRatings:
+              incomingStats.totalRatings > 0 || !refStats?.totalRatings
+                ? incomingStats.totalRatings
+                : refStats.totalRatings,
+            submissionCount:
+              typeof incomingStats.submissionCount === 'number' &&
+              (incomingStats.submissionCount > 0 || !refStats?.submissionCount)
+                ? incomingStats.submissionCount
+                : (refStats?.submissionCount ?? 0),
+            dailyStats: incomingStats.dailyStats || refStats?.dailyStats,
+            monthlyStats: incomingStats.monthlyStats || refStats?.monthlyStats,
+            yearlyStats: incomingStats.yearlyStats || refStats?.yearlyStats,
+          },
+        };
+        return mergedData;
+      });
       if (allowFormReset) {
-        setFullNameInput(mergedData.fullName || userName || '');
-        setNicknameInput(mergedData.nickname || '');
-        setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-        setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+        setFullNameInput(incoming.fullName || userName || '');
+        setNicknameInput(incoming.nickname || '');
+        setSchoolInput(incoming.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
+        setRoleInput(incoming.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
       }
     };
 

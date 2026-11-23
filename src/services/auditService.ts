@@ -1,4 +1,4 @@
-import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch, increment } from 'firebase/firestore';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, startAfter, where, doc, setDoc, getDoc, writeBatch, increment, type DocumentData, type QueryDocumentSnapshot } from 'firebase/firestore';
 import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 import { sanitizeAvatarUrl } from '../utils/avatarUtils';
@@ -32,6 +32,8 @@ const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
 export const LOGIN_LOGS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for login_logs getDocs
+export const LOGIN_LOGS_PAGE_SIZE = 24;
+const LOGIN_LOGS_PAGINATION_KEY = 'acu_login_logs_pagination_v1';
 export const SITE_SUMMARY_CACHE_KEY = 'acu_site_summary_cache';
 export const VISITOR_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for lightweight site_summary counter
 
@@ -51,10 +53,15 @@ let lastLogEmail = '';
 
 // Shared local listener registry (zero Firestore onSnapshot reads)
 const logListeners = new Set<(logs: LoginLogEntry[]) => void>();
+const loginLogsPaginationListeners = new Set<(hasMore: boolean) => void>();
 let sharedLatestLogs: LoginLogEntry[] | null = null;
 let hasFetchedLoginLogsFromServer = false;
 let lastLoginLogsFetchedAt = 0;
 let inFlightLoginLogsFetch: Promise<LoginLogEntry[]> | null = null;
+let inFlightLoadMoreLoginLogs: Promise<LoginLogEntry[]> | null = null;
+let loginLogsLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+let loginLogsLastCursor: string | null = null;
+let hasMoreLoginLogsState = false;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
 
@@ -378,7 +385,10 @@ export function subscribeSiteSummary(
   if (!isSiteSummaryFresh(initial)) {
     fetchSiteSummaryOnce(false)
       .then((res) => {
-        if (res) callback(res);
+        if (!res) return;
+        if (res.totalVisits > 0 || Boolean(res.resetAt) || !initial || initial.totalVisits === 0) {
+          callback(res);
+        }
       })
       .catch(() => {});
   }
@@ -1093,17 +1103,66 @@ function isAdminLogViewer(callerEmail?: string): boolean {
   return candidates.some((em) => (em || '').trim().toLowerCase() === adminEmail);
 }
 
+interface StoredLoginLogsPagination {
+  hasMore: boolean;
+  lastCursor: string | null;
+  ordered: boolean;
+}
+
+function readStoredLoginLogsPagination(): StoredLoginLogsPagination | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(LOGIN_LOGS_PAGINATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as StoredLoginLogsPagination) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredLoginLogsPagination(meta: StoredLoginLogsPagination): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(LOGIN_LOGS_PAGINATION_KEY, JSON.stringify(meta));
+  } catch {
+    // ignore
+  }
+}
+
+export function getHasMoreLoginLogs(): boolean {
+  const stored = readStoredLoginLogsPagination();
+  return stored ? Boolean(stored.hasMore) : hasMoreLoginLogsState;
+}
+
+export function subscribeLoginLogsPagination(cb: (hasMore: boolean) => void): () => void {
+  loginLogsPaginationListeners.add(cb);
+  cb(getHasMoreLoginLogs());
+  return () => {
+    loginLogsPaginationListeners.delete(cb);
+  };
+}
+
+function notifyLoginLogsPagination(): void {
+  const hasMore = getHasMoreLoginLogs();
+  loginLogsPaginationListeners.forEach((cb) => {
+    try {
+      cb(hasMore);
+    } catch {}
+  });
+}
+
 /**
- * One-time getDocs fetch of latest login logs (limit 30) — invoked ONLY when Admin opens the Login Logs tab
+ * One-time paginated getDocs fetch of latest login logs (limit 24) — invoked ONLY when Admin opens
  * or explicitly refreshes, and cached in memory + localStorage to protect Firestore daily read quotas.
  * Regular users (Teachers/Students) NEVER read the login_logs collection.
  */
 export async function fetchAdminLoginLogsOnce(
   forceRefresh = false,
-  maxCount = 30,
+  maxCount = LOGIN_LOGS_PAGE_SIZE,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeLimit = Math.min(Math.max(1, maxCount), 30);
+  const safeLimit = Math.min(Math.max(1, maxCount), LOGIN_LOGS_PAGE_SIZE);
   const localFallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
 
   if (!isAdminLogViewer(callerEmail)) {
@@ -1135,9 +1194,11 @@ export async function fetchAdminLoginLogsOnce(
 
       const logsRef = collection(db, 'login_logs');
       let snapshot;
+      let usedTimestampOrder = true;
       try {
         snapshot = await getDocs(query(logsRef, orderBy('loginTimestamp', 'desc'), limit(safeLimit)));
       } catch {
+        usedTimestampOrder = false;
         try {
           snapshot = await getDocs(query(logsRef, orderBy('createdAt', 'desc'), limit(safeLimit)));
         } catch {
@@ -1158,6 +1219,19 @@ export async function fetchAdminLoginLogsOnce(
         if (mapped.clientLogId) confirmedIds.add(String(mapped.clientLogId));
         fsLogs.push(mapped);
       });
+
+      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
+      const lastCursorVal =
+        fsLogs.length > 0 ? (fsLogs[fsLogs.length - 1].loginTimestamp || null) : null;
+      loginLogsLastDoc = lastSnap;
+      loginLogsLastCursor = lastCursorVal;
+      hasMoreLoginLogsState = snapshot.docs.length === safeLimit && usedTimestampOrder;
+      writeStoredLoginLogsPagination({
+        hasMore: hasMoreLoginLogsState,
+        lastCursor: lastCursorVal,
+        ordered: usedTimestampOrder,
+      });
+      notifyLoginLogsPagination();
 
       hasFetchedLoginLogsFromServer = true;
       lastLoginLogsFetchedAt = Date.now();
@@ -1180,7 +1254,9 @@ export async function fetchAdminLoginLogsOnce(
         notifyQuotaExceeded();
       }
       console.warn('[Firestore] fetchAdminLoginLogsOnce failed, falling back to localStorage:', err);
-      broadcastLogsToListeners(localFallback);
+      if (localFallback.length > 0) {
+        broadcastLogsToListeners(localFallback);
+      }
       return localFallback;
     } finally {
       inFlightLoginLogsFetch = null;
@@ -1188,6 +1264,89 @@ export async function fetchAdminLoginLogsOnce(
   })();
 
   return inFlightLoginLogsFetch;
+}
+
+/**
+ * Load next batch of 24 login logs using Firestore startAfter() (Admin only)
+ */
+export async function loadMoreAdminLoginLogs(callerEmail?: string): Promise<LoginLogEntry[]> {
+  const existing = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+
+  if (!isAdminLogViewer(callerEmail)) {
+    return existing;
+  }
+
+  if (inFlightLoadMoreLoginLogs) {
+    return inFlightLoadMoreLoginLogs;
+  }
+
+  const storedMeta = readStoredLoginLogsPagination();
+  const fallbackCursor =
+    loginLogsLastCursor ||
+    storedMeta?.lastCursor ||
+    (existing.length > 0 ? existing[existing.length - 1].loginTimestamp : null);
+  const canContinue = loginLogsLastDoc !== null || (Boolean(storedMeta?.ordered) && Boolean(fallbackCursor));
+
+  if (!canContinue) {
+    hasMoreLoginLogsState = false;
+    writeStoredLoginLogsPagination({ hasMore: false, lastCursor: fallbackCursor, ordered: false });
+    notifyLoginLogsPagination();
+    return existing;
+  }
+
+  inFlightLoadMoreLoginLogs = (async () => {
+    try {
+      await waitForAuthReady();
+      const logsRef = collection(db, 'login_logs');
+      const pagedQuery = loginLogsLastDoc
+        ? query(logsRef, orderBy('loginTimestamp', 'desc'), startAfter(loginLogsLastDoc), limit(LOGIN_LOGS_PAGE_SIZE))
+        : query(logsRef, orderBy('loginTimestamp', 'desc'), startAfter(fallbackCursor!), limit(LOGIN_LOGS_PAGE_SIZE));
+
+      const snapshot = await getDocs(pagedQuery);
+      const nextLogs: LoginLogEntry[] = [];
+      const confirmedIds = new Set<string>();
+      snapshot.forEach((docSnap) => {
+        const mapped = mapLoginLogSnapshot(docSnap);
+        confirmedIds.add(docSnap.id);
+        if (mapped.clientLogId) confirmedIds.add(String(mapped.clientLogId));
+        nextLogs.push(mapped);
+      });
+
+      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : loginLogsLastDoc;
+      const lastCursorVal =
+        nextLogs.length > 0
+          ? (nextLogs[nextLogs.length - 1].loginTimestamp || fallbackCursor)
+          : fallbackCursor;
+      loginLogsLastDoc = lastSnap;
+      loginLogsLastCursor = lastCursorVal;
+      hasMoreLoginLogsState = snapshot.docs.length === LOGIN_LOGS_PAGE_SIZE;
+      writeStoredLoginLogsPagination({
+        hasMore: hasMoreLoginLogsState,
+        lastCursor: lastCursorVal,
+        ordered: true,
+      });
+      notifyLoginLogsPagination();
+      removePendingLoginLogByIds(confirmedIds);
+
+      if (nextLogs.length > 0) {
+        const merged = mergeLogs(existing, nextLogs);
+        saveLocalLoginLogs(merged, false);
+        broadcastLogsToListeners(merged);
+        return merged;
+      }
+      return existing;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('[Firestore] loadMoreAdminLoginLogs failed, preserving loaded logs:', err);
+      return existing;
+    } finally {
+      inFlightLoadMoreLoginLogs = null;
+    }
+  })();
+
+  return inFlightLoadMoreLoginLogs;
 }
 
 /**
@@ -1199,7 +1358,10 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
   logListeners.add(callback);
   ensureLocalLogWindowSync();
 
-  const initial = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+  const initial =
+    sharedLatestLogs && sharedLatestLogs.length > 0
+      ? sharedLatestLogs
+      : mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
   callback(initial);
 
   return () => {
@@ -1208,13 +1370,13 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
 }
 
 /**
- * Flush pending login logs and optionally fetch latest 30 logs when explicitly forced by Admin
+ * Flush pending login logs and optionally fetch latest 24 logs when explicitly forced by Admin
  */
 export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   try {
     await flushPendingLoginLogs();
     if (force) {
-      return await fetchAdminLoginLogsOnce(true, 30);
+      return await fetchAdminLoginLogsOnce(true, LOGIN_LOGS_PAGE_SIZE);
     }
   } catch {
     // non-fatal fallback to local cache
@@ -1291,11 +1453,11 @@ export function generateLoginLogsCSV(logs: LoginLogEntry[]): string {
  * Fetch latest login logs for the Admin System Test dashboard (reuses cached logs unless forceRefresh=true)
  */
 export async function fetchRecentLoginLogs(
-  maxCount = 30,
+  maxCount = LOGIN_LOGS_PAGE_SIZE,
   forceRefresh = false,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeCount = Math.min(Math.max(1, maxCount), 30);
+  const safeCount = Math.min(Math.max(1, maxCount), LOGIN_LOGS_PAGE_SIZE);
   const logs = await fetchAdminLoginLogsOnce(forceRefresh, safeCount, callerEmail);
   return logs.slice(0, safeCount);
 }

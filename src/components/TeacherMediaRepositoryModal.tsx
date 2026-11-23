@@ -185,7 +185,17 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [isSavingEdit, setIsSavingEdit] = useState(false);
   const [submittingRatingIds, setSubmittingRatingIds] = useState<{ [id: string]: boolean }>({});
   const [likingIds, setLikingIds] = useState<{ [id: string]: boolean }>({});
-  const { teacherMedia: globalMediaList, ensureTeacherMediaLoaded, syncTeacherMedia } = useFirestoreData();
+  const {
+    teacherMedia: globalMediaList,
+    coreCounts,
+    hasMoreTeacherMedia,
+    isLoadingMore,
+    loadMoreTeacherMedia,
+    ensureTeacherMediaLoaded,
+    syncTeacherMedia,
+  } = useFirestoreData();
+  const isLoadingMoreMedia = isLoadingMore('teacherMedia');
+  const totalMediaDisplayCount = Math.max(rawMediaList.length, coreCounts.totalTeacherMedia || 0);
   const {
     isSyncing: isRefreshing,
     cooldownSeconds: refreshCooldown,
@@ -286,7 +296,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     if (sortOrder === 'shuffle') {
       return shuffleWithSeed(rawMediaList, shuffleSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
     }
-    return rawMediaList.slice(0, MAX_MEDIA_DISPLAY_LIMIT);
+    return rawMediaList;
   }, [rawMediaList, sortOrder, shuffleSeed]);
 
   const handleStartEdit = (item: TeacherMediaWork) => {
@@ -559,7 +569,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                   {sortOrder === 'newest' ? (
                     <>
                       <Sparkles className="w-3 h-3 text-emerald-400" />
-                      <span>แสดงสื่อล่าสุดทันที ({rawMediaList.length} รายการ)</span>
+                      <span>แสดงสื่อล่าสุดทันที ({totalMediaDisplayCount} รายการ)</span>
                     </>
                   ) : (
                     <>
@@ -910,6 +920,24 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             })}
           </div>
 
+          {hasMoreTeacherMedia && (
+            <div className="mt-6 flex flex-col items-center justify-center gap-2">
+              <button
+                type="button"
+                onClick={() => loadMoreTeacherMedia()}
+                disabled={isLoadingMoreMedia}
+                className="px-6 py-2.5 rounded-xl bg-purple-600/25 hover:bg-purple-600/40 border border-purple-500/40 text-purple-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreMedia ? 'animate-spin' : ''}`} />
+                <span>{isLoadingMoreMedia ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (24 รายการถัดไป)'}</span>
+              </button>
+              <span className="text-[11px] text-slate-400">
+                โหลดแล้ว {rawMediaList.length}
+                {totalMediaDisplayCount > rawMediaList.length ? ` จากทั้งหมด ${totalMediaDisplayCount}` : ''} รายการ
+              </span>
+            </div>
+          )}
+
           {filteredList.length === 0 && (
             <div className="py-16 text-center text-slate-400">
               <FolderArchive className="w-12 h-12 mx-auto mb-3 text-slate-600" />
@@ -923,7 +951,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           <div className="flex items-center gap-2 flex-wrap">
             <span>แสดงสื่อในคลัง: <strong className="text-purple-300">{filteredList.length}</strong> รายการ</span>
             <span className="text-slate-600">•</span>
-            <span className="text-slate-400">สุ่มแสดงผลอัตโนมัติประจำวัน (ไม่เกิน {MAX_MEDIA_DISPLAY_LIMIT} สื่อ จากทั้งหมด {rawMediaList.length} รายการ)</span>
+            <span className="text-slate-400">สุ่มแสดงผลอัตโนมัติประจำวัน (โหลดแล้ว {rawMediaList.length} จากทั้งหมด {totalMediaDisplayCount} รายการ)</span>
           </div>
           <span>เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้นที่แก้ไข/ลบได้</span>
         </div>

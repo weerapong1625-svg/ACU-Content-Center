@@ -11,8 +11,19 @@ import {
   FacilitySubmission,
   InnovationSubmission,
   SharedIdeaItem,
+  SubmissionPaginationState,
   TeacherMediaWork,
+  ensureUserOwnSubmissionsLoaded,
   getInitialCriteriaPosterUrl,
+  getInitialInnovationsFromCache,
+  getInitialTeacherMediaFromCache,
+  getStoredFacilities,
+  getStoredSharedIdeas,
+  getSubmissionPaginationSnapshot,
+  loadMoreFacilities as loadMoreFacilitiesService,
+  loadMoreInnovations as loadMoreInnovationsService,
+  loadMoreSharedIdeas as loadMoreSharedIdeasService,
+  loadMoreTeacherMedia as loadMoreTeacherMediaService,
   refreshAllFacilities,
   refreshAllInnovations,
   refreshSharedIdeas,
@@ -21,23 +32,32 @@ import {
   subscribeAllSubmissions,
   subscribeCriteriaPoster,
   subscribeSharedIdeas,
+  subscribeSubmissionPagination,
   subscribeTeacherMedia,
 } from '../services/submissionService';
 import {
   FullUserProfile,
   getCachedUserProfile,
+  getHasMoreUserProfiles,
+  getInitialAllUserProfilesMap,
+  loadMoreUserProfiles as loadMoreUserProfilesService,
   refreshAllUserProfiles,
   subscribeAllUserProfiles,
   subscribeFullUserProfile,
+  subscribeUserProfilesPagination,
 } from '../services/userProfileService';
 import {
+  LOGIN_LOGS_PAGE_SIZE,
   LoginLogEntry,
   SiteVisitSummary,
   fetchAdminLoginLogsOnce,
   fetchSiteSummaryOnce,
+  getHasMoreLoginLogs,
   getLocalLoginLogs,
   getLocalSiteSummary,
+  loadMoreAdminLoginLogs as loadMoreAdminLoginLogsService,
   subscribeAllLoginLogs,
+  subscribeLoginLogsPagination,
   subscribeSiteSummary,
 } from '../services/auditService';
 import {
@@ -45,6 +65,14 @@ import {
   refreshRewardClaims,
   subscribeAllTeachersPrivilegeStatus,
 } from '../services/privilegeService';
+import {
+  AdminServerCounts,
+  CoreCollectionCounts,
+  fetchAdminServerCounts,
+  fetchCoreCollectionCounts,
+  getInitialAdminServerCountsFromCache,
+  getInitialCoreCountsFromCache,
+} from '../services/serverStatsService';
 import { getInitialLogoUrl, subscribeSchoolLogo } from '../services/logoService';
 import {
   getInitialCertificateLogoUrl,
@@ -107,6 +135,14 @@ function writeStoredCooldowns(map: Record<string, number>): void {
   }
 }
 
+export type LoadMoreCollectionKey =
+  | 'innovations'
+  | 'facilities'
+  | 'teacherMedia'
+  | 'sharedIdeas'
+  | 'userProfiles'
+  | 'loginLogs';
+
 export interface FirestoreDataContextValue {
   // Global centralized collection & user state
   userEmail: string | null;
@@ -124,6 +160,26 @@ export interface FirestoreDataContextValue {
   criteriaPosterUrl: string;
   popupBannerConfig: PopupBannerConfig;
   innovationsLoaded: boolean;
+
+  // Server-side getCountFromServer() totals & breakdowns (cached 6h in localStorage)
+  coreCounts: CoreCollectionCounts;
+  adminServerCounts: AdminServerCounts;
+
+  // 24-item pagination state & Load More handlers
+  hasMoreInnovations: boolean;
+  hasMoreFacilities: boolean;
+  hasMoreTeacherMedia: boolean;
+  hasMoreSharedIdeas: boolean;
+  hasMoreUserProfiles: boolean;
+  hasMoreLoginLogs: boolean;
+  loadingMoreMap: Record<LoadMoreCollectionKey, boolean>;
+  isLoadingMore: (key: LoadMoreCollectionKey) => boolean;
+  loadMoreInnovations: () => Promise<InnovationSubmission[]>;
+  loadMoreFacilities: () => Promise<FacilitySubmission[]>;
+  loadMoreTeacherMedia: () => Promise<TeacherMediaWork[]>;
+  loadMoreSharedIdeas: () => Promise<SharedIdeaItem[]>;
+  loadMoreUserProfiles: () => Promise<Record<string, FullUserProfile>>;
+  loadMoreLoginLogs: (callerEmail?: string) => Promise<LoginLogEntry[]>;
 
   // Centralized lazy-activation guards (mount once per app lifecycle, never re-fetch on component remount)
   ensureInnovationsLoaded: () => void;
@@ -173,15 +229,52 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
   const [currentUserProfile, setCurrentUserProfile] = useState<FullUserProfile | null>(() =>
     userEmail ? getCachedUserProfile(userEmail) : null
   );
-  const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
-  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
-  const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
-  const [sharedIdeas, setSharedIdeas] = useState<SharedIdeaItem[]>([]);
-  const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
+  const [innovations, setInnovations] = useState<InnovationSubmission[]>(() =>
+    getInitialInnovationsFromCache()
+  );
+  const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>(() =>
+    getInitialTeacherMediaFromCache()
+  );
+  const [facilities, setFacilities] = useState<FacilitySubmission[]>(() =>
+    getStoredFacilities()
+  );
+  const [sharedIdeas, setSharedIdeas] = useState<SharedIdeaItem[]>(() =>
+    getStoredSharedIdeas()
+  );
+  const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>(() =>
+    getInitialAllUserProfilesMap()
+  );
   const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => getLocalSiteSummary());
   const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
-  const [innovationsLoaded, setInnovationsLoaded] = useState<boolean>(false);
+  const [innovationsLoaded, setInnovationsLoaded] = useState<boolean>(
+    () => getInitialInnovationsFromCache().length > 0
+  );
+
+  // Server-side counts & pagination state
+  const [coreCounts, setCoreCounts] = useState<CoreCollectionCounts>(() =>
+    getInitialCoreCountsFromCache()
+  );
+  const [adminServerCounts, setAdminServerCounts] = useState<AdminServerCounts>(() =>
+    getInitialAdminServerCountsFromCache()
+  );
+  const [submissionPagination, setSubmissionPagination] = useState<SubmissionPaginationState>(() =>
+    getSubmissionPaginationSnapshot()
+  );
+  const [hasMoreUserProfiles, setHasMoreUserProfiles] = useState<boolean>(() =>
+    getHasMoreUserProfiles()
+  );
+  const [hasMoreLoginLogs, setHasMoreLoginLogs] = useState<boolean>(() =>
+    getHasMoreLoginLogs()
+  );
+  const [loadingMoreMap, setLoadingMoreMap] = useState<Record<LoadMoreCollectionKey, boolean>>({
+    innovations: false,
+    facilities: false,
+    teacherMedia: false,
+    sharedIdeas: false,
+    userProfiles: false,
+    loginLogs: false,
+  });
 
   // Lightweight cached settings
   const [schoolLogoUrl, setSchoolLogoUrl] = useState<string>(() => getInitialLogoUrl());
@@ -250,7 +343,7 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
     return () => window.clearInterval(timer);
   }, [hasActiveCooldown]);
 
-  // Subscribe once to shared lightweight settings (24h TTL cached)
+  // Subscribe once to shared lightweight settings (24h TTL cached) + pagination states
   useEffect(() => {
     const u1 = subscribeSchoolLogo(setSchoolLogoUrl);
     const u2 = subscribeCertificateLogo(setCertificateLogoUrl);
@@ -258,11 +351,17 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
     const u4 = subscribePopupBanner((cfg) => {
       if (cfg) setPopupBannerConfig(cfg);
     });
+    const u5 = subscribeSubmissionPagination(setSubmissionPagination);
+    const u6 = subscribeUserProfilesPagination(setHasMoreUserProfiles);
+    const u7 = subscribeLoginLogsPagination(setHasMoreLoginLogs);
     return () => {
       u1();
       u2();
       u3();
       u4();
+      u5();
+      u6();
+      u7();
     };
   }, []);
 
@@ -294,42 +393,90 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
     };
   }, []);
 
-  const ensureInnovationsLoaded = useCallback(() => {
-    if (activeStreamsRef.current.innovations) return;
-    activeStreamsRef.current.innovations = true;
-    const unsub = subscribeAllInnovations((list) => {
-      setInnovations(list);
-      setInnovationsLoaded(true);
-    });
-    unsubsRef.current.push(unsub);
+  const refreshCoreCountsSafe = useCallback(async (force = false) => {
+    try {
+      const next = await fetchCoreCollectionCounts(force);
+      setCoreCounts((prev) => ({
+        totalInnovations: Math.max(prev.totalInnovations, next.totalInnovations),
+        totalTeacherMedia: Math.max(prev.totalTeacherMedia, next.totalTeacherMedia),
+        totalFacilities: Math.max(prev.totalFacilities, next.totalFacilities),
+        totalSharedIdeas: Math.max(prev.totalSharedIdeas, next.totalSharedIdeas),
+        updatedAt: next.updatedAt || prev.updatedAt,
+      }));
+    } catch (err) {
+      console.warn('[FirestoreDataContext] refreshCoreCountsSafe failed, preserving cached counts:', err);
+    }
   }, []);
+
+  const refreshAdminCountsSafe = useCallback(async (force = false) => {
+    try {
+      const next = await fetchAdminServerCounts(force, true);
+      setAdminServerCounts(next);
+      setCoreCounts({
+        totalInnovations: next.totalInnovations,
+        totalTeacherMedia: next.totalTeacherMedia,
+        totalFacilities: next.totalFacilities,
+        totalSharedIdeas: next.totalSharedIdeas,
+        updatedAt: next.updatedAt,
+      });
+    } catch (err) {
+      console.warn('[FirestoreDataContext] refreshAdminCountsSafe failed, preserving cached counts:', err);
+    }
+  }, []);
+
+  const ensureInnovationsLoaded = useCallback(() => {
+    if (!activeStreamsRef.current.innovations) {
+      activeStreamsRef.current.innovations = true;
+      const unsub = subscribeAllInnovations((list) => {
+        setInnovations(list);
+        setInnovationsLoaded(true);
+      });
+      unsubsRef.current.push(unsub);
+    }
+    if (userEmail) {
+      ensureUserOwnSubmissionsLoaded(userEmail, false).catch(() => {});
+    }
+    refreshCoreCountsSafe(false);
+  }, [refreshCoreCountsSafe, userEmail]);
 
   const ensureTeacherMediaLoaded = useCallback(() => {
-    if (activeStreamsRef.current.media) return;
-    activeStreamsRef.current.media = true;
-    const unsub = subscribeTeacherMedia((works) => {
-      setTeacherMedia(works);
-    });
-    unsubsRef.current.push(unsub);
-  }, []);
+    if (!activeStreamsRef.current.media) {
+      activeStreamsRef.current.media = true;
+      const unsub = subscribeTeacherMedia((works) => {
+        setTeacherMedia(works);
+      });
+      unsubsRef.current.push(unsub);
+    }
+    if (userEmail) {
+      ensureUserOwnSubmissionsLoaded(userEmail, false).catch(() => {});
+    }
+    refreshCoreCountsSafe(false);
+  }, [refreshCoreCountsSafe, userEmail]);
 
   const ensureFacilitiesLoaded = useCallback(() => {
-    if (activeStreamsRef.current.facilities) return;
-    activeStreamsRef.current.facilities = true;
-    const unsub = subscribeAllSubmissions((list) => {
-      setFacilities(list);
-    });
-    unsubsRef.current.push(unsub);
-  }, []);
+    if (!activeStreamsRef.current.facilities) {
+      activeStreamsRef.current.facilities = true;
+      const unsub = subscribeAllSubmissions((list) => {
+        setFacilities(list);
+      });
+      unsubsRef.current.push(unsub);
+    }
+    if (userEmail) {
+      ensureUserOwnSubmissionsLoaded(userEmail, false).catch(() => {});
+    }
+    refreshCoreCountsSafe(false);
+  }, [refreshCoreCountsSafe, userEmail]);
 
   const ensureSharedIdeasLoaded = useCallback(() => {
-    if (activeStreamsRef.current.ideas) return;
-    activeStreamsRef.current.ideas = true;
-    const unsub = subscribeSharedIdeas((ideas) => {
-      setSharedIdeas(ideas);
-    });
-    unsubsRef.current.push(unsub);
-  }, []);
+    if (!activeStreamsRef.current.ideas) {
+      activeStreamsRef.current.ideas = true;
+      const unsub = subscribeSharedIdeas((ideas) => {
+        setSharedIdeas(ideas);
+      });
+      unsubsRef.current.push(unsub);
+    }
+    refreshCoreCountsSafe(false);
+  }, [refreshCoreCountsSafe]);
 
   const ensureUserProfilesLoaded = useCallback(() => {
     if (activeStreamsRef.current.profiles) return;
@@ -365,12 +512,17 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
       });
       unsubsRef.current.push(unsub);
     }
-    const fetched = await fetchAdminLoginLogsOnce(false, 30, callerEmail || userEmail || undefined);
-    if (Array.isArray(fetched) && fetched.length > 0) {
-      setLoginLogs(fetched);
+    try {
+      const fetched = await fetchAdminLoginLogsOnce(false, LOGIN_LOGS_PAGE_SIZE, callerEmail || userEmail || undefined);
+      if (Array.isArray(fetched) && fetched.length > 0) {
+        setLoginLogs(fetched);
+      }
+      return fetched;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] ensureLoginLogsLoaded failed, preserving cached logs:', err);
+      return loginLogs;
     }
-    return fetched;
-  }, [userEmail]);
+  }, [userEmail, loginLogs]);
 
   const ensurePrivilegeSummariesLoaded = useCallback(() => {
     if (activeStreamsRef.current.privileges) return;
@@ -395,7 +547,11 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
   const ensureTeacherCoreLoaded = useCallback(() => {
     ensureInnovationsLoaded();
     ensureTeacherMediaLoaded();
-  }, [ensureInnovationsLoaded, ensureTeacherMediaLoaded]);
+    refreshCoreCountsSafe(false);
+    if (userEmail) {
+      ensureUserOwnSubmissionsLoaded(userEmail, false).catch(() => {});
+    }
+  }, [ensureInnovationsLoaded, ensureTeacherMediaLoaded, refreshCoreCountsSafe, userEmail]);
 
   const ensureAdminDashboardLoaded = useCallback(() => {
     ensureInnovationsLoaded();
@@ -404,6 +560,7 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
     ensureUserProfilesLoaded();
     ensurePrivilegeSummariesLoaded();
     ensureSiteSummaryLoaded();
+    refreshAdminCountsSafe(false);
     if (!activeStreamsRef.current.loginLogs) {
       activeStreamsRef.current.loginLogs = true;
       const unsub = subscribeAllLoginLogs((logs) => {
@@ -418,113 +575,304 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
     ensureSiteSummaryLoaded,
     ensureTeacherMediaLoaded,
     ensureUserProfilesLoaded,
+    refreshAdminCountsSafe,
   ]);
 
-  const syncInnovations = useCallback(async () => {
-    const list = await refreshAllInnovations(true);
-    setInnovations(list);
-    setInnovationsLoaded(true);
-    return list;
-  }, []);
-
-  const syncTeacherMedia = useCallback(async () => {
-    const works = await refreshTeacherMedia(true);
-    setTeacherMedia(works);
-    return works;
-  }, []);
-
-  const syncFacilities = useCallback(async () => {
-    const list = await refreshAllFacilities(true);
-    setFacilities(list);
-    return list;
-  }, []);
-
-  const syncSharedIdeas = useCallback(async () => {
-    const ideas = await refreshSharedIdeas(true);
-    setSharedIdeas(ideas);
-    return ideas;
-  }, []);
-
-  const syncProfileStats = useCallback(async () => {
-    const [innovsRes, mediaRes, summaryRes] = await Promise.allSettled([
-      refreshAllInnovations(true),
-      refreshTeacherMedia(true),
-      fetchSiteSummaryOnce(true),
-    ]);
-    if (innovsRes.status === 'fulfilled' && Array.isArray(innovsRes.value)) {
-      setInnovations(innovsRes.value);
-      setInnovationsLoaded(true);
-    }
-    if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value)) {
-      setTeacherMedia(mediaRes.value);
-    }
-    if (summaryRes.status === 'fulfilled' && summaryRes.value) {
-      setSiteSummary(summaryRes.value);
-    }
-  }, []);
-
-  const syncLoginLogsAndSummary = useCallback(
-    async (callerEmail?: string) => {
-      const [siteRes, logsRes] = await Promise.allSettled([
-        fetchSiteSummaryOnce(true),
-        fetchAdminLoginLogsOnce(true, 30, callerEmail || userEmail || undefined),
-      ]);
-      const nextSummary = siteRes.status === 'fulfilled' ? siteRes.value : null;
-      const nextLogs = logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) ? logsRes.value : [];
-      if (nextSummary) setSiteSummary(nextSummary);
-      if (nextLogs.length > 0) setLoginLogs(nextLogs);
-      return { siteSummary: nextSummary, loginLogs: nextLogs };
-    },
-    [userEmail]
+  // Paginated Load More handlers (batches of 24 with startAfter)
+  const isLoadingMore = useCallback(
+    (key: LoadMoreCollectionKey): boolean => Boolean(loadingMoreMap[key]),
+    [loadingMoreMap]
   );
 
-  const syncAllAdminData = useCallback(
+  const loadMoreInnovations = useCallback(async () => {
+    setLoadingMoreMap((prev) => ({ ...prev, innovations: true }));
+    try {
+      const next = await loadMoreInnovationsService();
+      if (Array.isArray(next) && next.length > 0) {
+        setInnovations(next);
+      }
+      return next;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] loadMoreInnovations failed, preserving loaded items:', err);
+      return innovations;
+    } finally {
+      setLoadingMoreMap((prev) => ({ ...prev, innovations: false }));
+    }
+  }, [innovations]);
+
+  const loadMoreFacilities = useCallback(async () => {
+    setLoadingMoreMap((prev) => ({ ...prev, facilities: true }));
+    try {
+      const next = await loadMoreFacilitiesService();
+      if (Array.isArray(next) && next.length > 0) {
+        setFacilities(next);
+      }
+      return next;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] loadMoreFacilities failed, preserving loaded items:', err);
+      return facilities;
+    } finally {
+      setLoadingMoreMap((prev) => ({ ...prev, facilities: false }));
+    }
+  }, [facilities]);
+
+  const loadMoreTeacherMedia = useCallback(async () => {
+    setLoadingMoreMap((prev) => ({ ...prev, teacherMedia: true }));
+    try {
+      const next = await loadMoreTeacherMediaService();
+      if (Array.isArray(next) && next.length > 0) {
+        setTeacherMedia(next);
+      }
+      return next;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] loadMoreTeacherMedia failed, preserving loaded items:', err);
+      return teacherMedia;
+    } finally {
+      setLoadingMoreMap((prev) => ({ ...prev, teacherMedia: false }));
+    }
+  }, [teacherMedia]);
+
+  const loadMoreSharedIdeas = useCallback(async () => {
+    setLoadingMoreMap((prev) => ({ ...prev, sharedIdeas: true }));
+    try {
+      const next = await loadMoreSharedIdeasService();
+      if (Array.isArray(next) && next.length > 0) {
+        setSharedIdeas(next);
+      }
+      return next;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] loadMoreSharedIdeas failed, preserving loaded items:', err);
+      return sharedIdeas;
+    } finally {
+      setLoadingMoreMap((prev) => ({ ...prev, sharedIdeas: false }));
+    }
+  }, [sharedIdeas]);
+
+  const loadMoreUserProfiles = useCallback(async () => {
+    setLoadingMoreMap((prev) => ({ ...prev, userProfiles: true }));
+    try {
+      const next = await loadMoreUserProfilesService();
+      if (next && Object.keys(next).length > 0) {
+        setUserProfilesMap(next);
+      }
+      return next;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] loadMoreUserProfiles failed, preserving loaded items:', err);
+      return userProfilesMap;
+    } finally {
+      setLoadingMoreMap((prev) => ({ ...prev, userProfiles: false }));
+    }
+  }, [userProfilesMap]);
+
+  const loadMoreLoginLogs = useCallback(
     async (callerEmail?: string) => {
-      const effectiveEmail = callerEmail || userEmail || undefined;
-      const [
-        innovRes,
-        mediaRes,
-        facRes,
-        profilesRes,
-        claimsRes,
-        ideasRes,
-        siteRes,
-        logsRes,
-      ] = await Promise.allSettled([
+      setLoadingMoreMap((prev) => ({ ...prev, loginLogs: true }));
+      try {
+        const next = await loadMoreAdminLoginLogsService(callerEmail || userEmail || undefined);
+        if (Array.isArray(next) && next.length > 0) {
+          setLoginLogs(next);
+        }
+        return next;
+      } catch (err) {
+        console.warn('[FirestoreDataContext] loadMoreLoginLogs failed, preserving loaded logs:', err);
+        return loginLogs;
+      } finally {
+        setLoadingMoreMap((prev) => ({ ...prev, loginLogs: false }));
+      }
+    },
+    [loginLogs, userEmail]
+  );
+
+  const syncInnovations = useCallback(async () => {
+    try {
+      const [list] = await Promise.all([
+        refreshAllInnovations(true),
+        refreshCoreCountsSafe(true),
+        userEmail ? ensureUserOwnSubmissionsLoaded(userEmail, true) : Promise.resolve(),
+      ]);
+      if (Array.isArray(list) && list.length > 0) {
+        setInnovations(list);
+      }
+      setInnovationsLoaded(true);
+      return list;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] syncInnovations failed, preserving cached state:', err);
+      setInnovationsLoaded(true);
+      return innovations;
+    }
+  }, [innovations, refreshCoreCountsSafe, userEmail]);
+
+  const syncTeacherMedia = useCallback(async () => {
+    try {
+      const [works] = await Promise.all([
+        refreshTeacherMedia(true),
+        refreshCoreCountsSafe(true),
+        userEmail ? ensureUserOwnSubmissionsLoaded(userEmail, true) : Promise.resolve(),
+      ]);
+      if (Array.isArray(works) && works.length > 0) {
+        setTeacherMedia(works);
+      }
+      return works;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] syncTeacherMedia failed, preserving cached state:', err);
+      return teacherMedia;
+    }
+  }, [refreshCoreCountsSafe, teacherMedia, userEmail]);
+
+  const syncFacilities = useCallback(async () => {
+    try {
+      const [list] = await Promise.all([
+        refreshAllFacilities(true),
+        refreshCoreCountsSafe(true),
+        userEmail ? ensureUserOwnSubmissionsLoaded(userEmail, true) : Promise.resolve(),
+      ]);
+      if (Array.isArray(list) && list.length > 0) {
+        setFacilities(list);
+      }
+      return list;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] syncFacilities failed, preserving cached state:', err);
+      return facilities;
+    }
+  }, [facilities, refreshCoreCountsSafe, userEmail]);
+
+  const syncSharedIdeas = useCallback(async () => {
+    try {
+      const [ideas] = await Promise.all([
+        refreshSharedIdeas(true),
+        refreshCoreCountsSafe(true),
+      ]);
+      if (Array.isArray(ideas) && ideas.length > 0) {
+        setSharedIdeas(ideas);
+      }
+      return ideas;
+    } catch (err) {
+      console.warn('[FirestoreDataContext] syncSharedIdeas failed, preserving cached state:', err);
+      return sharedIdeas;
+    }
+  }, [refreshCoreCountsSafe, sharedIdeas]);
+
+  const syncProfileStats = useCallback(async () => {
+    try {
+      const [innovsRes, mediaRes, summaryRes] = await Promise.allSettled([
         refreshAllInnovations(true),
         refreshTeacherMedia(true),
-        refreshAllFacilities(true),
-        refreshAllUserProfiles(true),
-        refreshRewardClaims(true),
-        refreshSharedIdeas(true),
         fetchSiteSummaryOnce(true),
-        fetchAdminLoginLogsOnce(true, 30, effectiveEmail),
+        refreshCoreCountsSafe(true),
+        userEmail ? ensureUserOwnSubmissionsLoaded(userEmail, true) : Promise.resolve(),
       ]);
-      if (innovRes.status === 'fulfilled' && Array.isArray(innovRes.value) && innovRes.value.length > 0) {
-        setInnovations(innovRes.value);
+      if (innovsRes.status === 'fulfilled' && Array.isArray(innovsRes.value) && innovsRes.value.length > 0) {
+        setInnovations(innovsRes.value);
         setInnovationsLoaded(true);
       }
       if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value) && mediaRes.value.length > 0) {
         setTeacherMedia(mediaRes.value);
       }
-      if (facRes.status === 'fulfilled' && Array.isArray(facRes.value) && facRes.value.length > 0) {
-        setFacilities(facRes.value);
+      if (summaryRes.status === 'fulfilled' && summaryRes.value) {
+        const nextSummary = summaryRes.value;
+        setSiteSummary((prev) => {
+          if (!prev) return nextSummary;
+          if ((nextSummary.totalVisits || 0) === 0 && !nextSummary.resetAt && (prev.totalVisits || 0) > 0) {
+            return prev;
+          }
+          return nextSummary;
+        });
       }
-      if (profilesRes.status === 'fulfilled' && profilesRes.value && Object.keys(profilesRes.value).length > 0) {
-        setUserProfilesMap(profilesRes.value);
+    } catch (err) {
+      console.warn('[FirestoreDataContext] syncProfileStats failed, preserving cached stats:', err);
+    }
+  }, [refreshCoreCountsSafe, userEmail]);
+
+  const syncLoginLogsAndSummary = useCallback(
+    async (callerEmail?: string) => {
+      try {
+        const [siteRes, logsRes] = await Promise.allSettled([
+          fetchSiteSummaryOnce(true),
+          fetchAdminLoginLogsOnce(true, LOGIN_LOGS_PAGE_SIZE, callerEmail || userEmail || undefined),
+        ]);
+        const nextSummary = siteRes.status === 'fulfilled' ? siteRes.value : null;
+        const nextLogs = logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) ? logsRes.value : [];
+        if (nextSummary) {
+          setSiteSummary((prev) => {
+            if (!prev) return nextSummary;
+            if ((nextSummary.totalVisits || 0) === 0 && !nextSummary.resetAt && (prev.totalVisits || 0) > 0) {
+              return prev;
+            }
+            return nextSummary;
+          });
+        }
+        if (nextLogs.length > 0) setLoginLogs(nextLogs);
+        return {
+          siteSummary: nextSummary || siteSummary,
+          loginLogs: nextLogs.length > 0 ? nextLogs : loginLogs,
+        };
+      } catch (err) {
+        console.warn('[FirestoreDataContext] syncLoginLogsAndSummary failed, preserving cached state:', err);
+        return { siteSummary, loginLogs };
       }
-      if (ideasRes.status === 'fulfilled' && Array.isArray(ideasRes.value) && ideasRes.value.length > 0) {
-        setSharedIdeas(ideasRes.value);
-      }
-      if (siteRes.status === 'fulfilled' && siteRes.value) {
-        setSiteSummary(siteRes.value);
-      }
-      if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
-        setLoginLogs(logsRes.value);
-      }
-      void claimsRes;
     },
-    [userEmail]
+    [userEmail, siteSummary, loginLogs]
+  );
+
+  const syncAllAdminData = useCallback(
+    async (callerEmail?: string) => {
+      try {
+        const effectiveEmail = callerEmail || userEmail || undefined;
+        const [
+          innovRes,
+          mediaRes,
+          facRes,
+          profilesRes,
+          claimsRes,
+          ideasRes,
+          siteRes,
+          logsRes,
+        ] = await Promise.allSettled([
+          refreshAllInnovations(true),
+          refreshTeacherMedia(true),
+          refreshAllFacilities(true),
+          refreshAllUserProfiles(true),
+          refreshRewardClaims(true),
+          refreshSharedIdeas(true),
+          fetchSiteSummaryOnce(true),
+          fetchAdminLoginLogsOnce(true, LOGIN_LOGS_PAGE_SIZE, effectiveEmail),
+          refreshAdminCountsSafe(true),
+        ]);
+        if (innovRes.status === 'fulfilled' && Array.isArray(innovRes.value) && innovRes.value.length > 0) {
+          setInnovations(innovRes.value);
+          setInnovationsLoaded(true);
+        }
+        if (mediaRes.status === 'fulfilled' && Array.isArray(mediaRes.value) && mediaRes.value.length > 0) {
+          setTeacherMedia(mediaRes.value);
+        }
+        if (facRes.status === 'fulfilled' && Array.isArray(facRes.value) && facRes.value.length > 0) {
+          setFacilities(facRes.value);
+        }
+        if (profilesRes.status === 'fulfilled' && profilesRes.value && Object.keys(profilesRes.value).length > 0) {
+          setUserProfilesMap(profilesRes.value);
+        }
+        if (ideasRes.status === 'fulfilled' && Array.isArray(ideasRes.value) && ideasRes.value.length > 0) {
+          setSharedIdeas(ideasRes.value);
+        }
+        if (siteRes.status === 'fulfilled' && siteRes.value) {
+          const nextSummary = siteRes.value;
+          setSiteSummary((prev) => {
+            if (!prev) return nextSummary;
+            if ((nextSummary.totalVisits || 0) === 0 && !nextSummary.resetAt && (prev.totalVisits || 0) > 0) {
+              return prev;
+            }
+            return nextSummary;
+          });
+        }
+        if (logsRes.status === 'fulfilled' && Array.isArray(logsRes.value) && logsRes.value.length > 0) {
+          setLoginLogs(logsRes.value);
+        }
+        void claimsRes;
+      } catch (err) {
+        console.warn('[FirestoreDataContext] syncAllAdminData failed, preserving cached state:', err);
+      }
+    },
+    [refreshAdminCountsSafe, userEmail]
   );
 
   const getCooldownSeconds = useCallback(
@@ -610,6 +958,22 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
       criteriaPosterUrl,
       popupBannerConfig,
       innovationsLoaded,
+      coreCounts,
+      adminServerCounts,
+      hasMoreInnovations: submissionPagination.innovations,
+      hasMoreFacilities: submissionPagination.facilities,
+      hasMoreTeacherMedia: submissionPagination.teacherMedia,
+      hasMoreSharedIdeas: submissionPagination.sharedIdeas,
+      hasMoreUserProfiles,
+      hasMoreLoginLogs,
+      loadingMoreMap,
+      isLoadingMore,
+      loadMoreInnovations,
+      loadMoreFacilities,
+      loadMoreTeacherMedia,
+      loadMoreSharedIdeas,
+      loadMoreUserProfiles,
+      loadMoreLoginLogs,
       ensureInnovationsLoaded,
       ensureTeacherMediaLoaded,
       ensureFacilitiesLoaded,
@@ -648,6 +1012,19 @@ export const FirestoreDataProvider: React.FC<FirestoreDataProviderProps> = ({
       criteriaPosterUrl,
       popupBannerConfig,
       innovationsLoaded,
+      coreCounts,
+      adminServerCounts,
+      submissionPagination,
+      hasMoreUserProfiles,
+      hasMoreLoginLogs,
+      loadingMoreMap,
+      isLoadingMore,
+      loadMoreInnovations,
+      loadMoreFacilities,
+      loadMoreTeacherMedia,
+      loadMoreSharedIdeas,
+      loadMoreUserProfiles,
+      loadMoreLoginLogs,
       ensureInnovationsLoaded,
       ensureTeacherMediaLoaded,
       ensureFacilitiesLoaded,

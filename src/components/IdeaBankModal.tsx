@@ -256,7 +256,16 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
-  const { sharedIdeas: globalIdeas, ensureSharedIdeasLoaded, syncSharedIdeas } = useFirestoreData();
+  const {
+    sharedIdeas: globalIdeas,
+    coreCounts,
+    hasMoreSharedIdeas,
+    isLoadingMore,
+    loadMoreSharedIdeas,
+    ensureSharedIdeasLoaded,
+    syncSharedIdeas,
+  } = useFirestoreData();
+  const isLoadingMoreIdeas = isLoadingMore('sharedIdeas');
   const {
     isSyncing: isRefreshing,
     cooldownSeconds: refreshCooldown,
@@ -1041,6 +1050,24 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
               })
             )}
           </div>
+
+          {hasMoreSharedIdeas && (
+            <div className="px-4 sm:px-6 pb-6 flex flex-col items-center justify-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => loadMoreSharedIdeas()}
+                disabled={isLoadingMoreIdeas}
+                className="px-6 py-2.5 rounded-xl bg-amber-500/20 hover:bg-amber-500/35 border border-amber-500/40 text-amber-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreIdeas ? 'animate-spin' : ''}`} />
+                <span>{isLoadingMoreIdeas ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (ไอเดียครู 24 รายการถัดไป)'}</span>
+              </button>
+              <span className="text-[11px] text-slate-400">
+                โหลดไอเดียครูแล้ว {firestoreIdeas.length}
+                {coreCounts.totalSharedIdeas > firestoreIdeas.length ? ` / ${coreCounts.totalSharedIdeas}` : ''} รายการ
+              </span>
+            </div>
+          )}
         </div>
 
         {/* Fixed Footer */}
@@ -1050,6 +1077,9 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
           </div>
           <span className="text-amber-300/90 text-[11px]">
             แสดง {filtered.length} แหล่งเรียนรู้ที่เข้าชมได้จริง
+            {coreCounts.totalSharedIdeas > firestoreIdeas.length
+              ? ` (ไอเดียครูในระบบ ${coreCounts.totalSharedIdeas} รายการ)`
+              : ''}
           </span>
         </div>
       </div>

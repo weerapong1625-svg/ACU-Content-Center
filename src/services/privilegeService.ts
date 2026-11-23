@@ -5,9 +5,14 @@ import {
   getDoc,
   getDocs,
   query,
+  orderBy,
   limit,
+  startAfter,
+  documentId,
+  type DocumentData,
+  type QueryDocumentSnapshot,
 } from 'firebase/firestore';
-import { db, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
+import { db, isAuthReady, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import {
   ADMIN_TARGET_EMAIL,
   isValidActiveMediaRecord,
@@ -252,9 +257,13 @@ async function fetchSingleClaimOnce(
     try {
       const docRef = doc(db, CLAIMS_COLLECTION, getClaimDocId(normEmail));
       const snap = await getDoc(docRef);
+      const latestMap = getStoredRewardClaimsMap();
+      const existingCachedClaim = latestMap[normEmail] || cachedClaim;
+      if (!snap.exists() && (snap.metadata?.fromCache || !isAuthReady()) && existingCachedClaim) {
+        return existingCachedClaim;
+      }
       sessionSingleClaimFetched.add(normEmail);
       const claim = snap.exists() ? (snap.data() as RewardClaimRecord) : null;
-      const latestMap = getStoredRewardClaimsMap();
       if (claim) {
         latestMap[normEmail] = claim;
       } else {
@@ -281,8 +290,18 @@ async function fetchSingleClaimOnce(
   return run;
 }
 
+const CLAIMS_PAGE_SIZE = 24;
+let claimsLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+let claimsLastDocId: string | null = null;
+let hasMoreClaimsState = false;
+let inFlightLoadMoreClaims: Promise<Record<string, RewardClaimRecord>> | null = null;
+
+export function getHasMoreRewardClaims(): boolean {
+  return hasMoreClaimsState;
+}
+
 /**
- * One-time getDocs fetch for reward_privilege_claims (6-hour localStorage TTL unless forceRefresh=true)
+ * One-time paginated getDocs fetch for reward_privilege_claims (24 per batch, 6-hour localStorage TTL)
  */
 export async function refreshRewardClaims(
   forceRefresh = false
@@ -300,7 +319,24 @@ export async function refreshRewardClaims(
 
   inFlightClaimsListFetch = (async () => {
     try {
-      const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(500)));
+      const claimsRef = collection(db, CLAIMS_COLLECTION);
+      let snap;
+      let usedOrdered = true;
+      try {
+        snap = await getDocs(query(claimsRef, orderBy(documentId()), limit(CLAIMS_PAGE_SIZE)));
+      } catch {
+        usedOrdered = false;
+        snap = await getDocs(query(claimsRef, limit(CLAIMS_PAGE_SIZE)));
+      }
+
+      if (
+        snap.empty &&
+        (snap.metadata?.fromCache || !isAuthReady()) &&
+        Object.keys(localFallback).length > 0
+      ) {
+        return localFallback;
+      }
+
       const deletedUsers = getDeletedUserEmails();
       const map: Record<string, RewardClaimRecord> = {};
       snap.forEach((d) => {
@@ -312,14 +348,23 @@ export async function refreshRewardClaims(
           }
         }
       });
-      sessionClaimsListFetched = true;
-      if (saveStoredRewardClaimsMap(map)) {
-        try {
-          localStorage.setItem(CLAIMS_FETCHED_AT_KEY, String(Date.now()));
-        } catch {}
+
+      const lastSnap = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : null;
+      claimsLastDoc = lastSnap;
+      claimsLastDocId = lastSnap ? lastSnap.id : null;
+      hasMoreClaimsState = snap.docs.length === CLAIMS_PAGE_SIZE && usedOrdered;
+
+      if (Object.keys(map).length > 0 || Object.keys(localFallback).length === 0) {
+        sessionClaimsListFetched = true;
+        if (saveStoredRewardClaimsMap(map)) {
+          try {
+            localStorage.setItem(CLAIMS_FETCHED_AT_KEY, String(Date.now()));
+          } catch {}
+        }
+        notifyRewardClaimsChanged();
+        return map;
       }
-      notifyRewardClaimsChanged();
-      return map;
+      return localFallback;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
@@ -332,6 +377,68 @@ export async function refreshRewardClaims(
   })();
 
   return inFlightClaimsListFetch;
+}
+
+/**
+ * Load next batch of 24 reward claims using Firestore startAfter()
+ */
+export async function loadMoreRewardClaims(): Promise<Record<string, RewardClaimRecord>> {
+  const existing = getStoredRewardClaimsMap();
+
+  if (inFlightLoadMoreClaims) {
+    return inFlightLoadMoreClaims;
+  }
+
+  if (!claimsLastDoc && !claimsLastDocId) {
+    hasMoreClaimsState = false;
+    return existing;
+  }
+
+  inFlightLoadMoreClaims = (async () => {
+    try {
+      const claimsRef = collection(db, CLAIMS_COLLECTION);
+      const pagedQuery = claimsLastDoc
+        ? query(claimsRef, orderBy(documentId()), startAfter(claimsLastDoc), limit(CLAIMS_PAGE_SIZE))
+        : query(claimsRef, orderBy(documentId()), startAfter(claimsLastDocId!), limit(CLAIMS_PAGE_SIZE));
+
+      const snap = await getDocs(pagedQuery);
+      const deletedUsers = getDeletedUserEmails();
+      const nextMap: Record<string, RewardClaimRecord> = { ...existing };
+      let added = 0;
+
+      snap.forEach((d) => {
+        const data = d.data() as RewardClaimRecord;
+        if (data?.userEmail) {
+          const norm = data.userEmail.trim().toLowerCase();
+          if (!deletedUsers.has(norm)) {
+            nextMap[norm] = data;
+            added++;
+          }
+        }
+      });
+
+      const lastSnap = snap.docs.length > 0 ? snap.docs[snap.docs.length - 1] : claimsLastDoc;
+      claimsLastDoc = lastSnap;
+      claimsLastDocId = lastSnap ? lastSnap.id : claimsLastDocId;
+      hasMoreClaimsState = snap.docs.length === CLAIMS_PAGE_SIZE;
+
+      if (added > 0) {
+        saveStoredRewardClaimsMap(nextMap);
+        notifyRewardClaimsChanged();
+      }
+      return nextMap;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('[Firestore] loadMoreRewardClaims failed, preserving cached claims:', err);
+      return existing;
+    } finally {
+      inFlightLoadMoreClaims = null;
+    }
+  })();
+
+  return inFlightLoadMoreClaims;
 }
 
 /**
@@ -506,8 +613,10 @@ export function subscribeUserPrivilegeStatus(
   fetchSingleClaimOnce(normEmail, false)
     .then((fetched) => {
       if (!isActive) return;
-      claimData = fetched;
-      computeAndEmit();
+      if (fetched !== null || !claimData) {
+        claimData = fetched;
+        computeAndEmit();
+      }
     })
     .catch(() => {});
 
@@ -898,9 +1007,11 @@ export function subscribeAllTeachersPrivilegeStatus(
 
   refreshRewardClaims(false)
     .then((map) => {
-      if (!isActive) return;
-      claimsMap = map;
-      computeAll();
+      if (!isActive || !map) return;
+      if (Object.keys(map).length > 0 || Object.keys(claimsMap).length === 0) {
+        claimsMap = map;
+        computeAll();
+      }
     })
     .catch(() => {});
 

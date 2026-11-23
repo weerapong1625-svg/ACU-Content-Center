@@ -28,7 +28,9 @@ import {
 import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
-  fetchRecentLoginLogs, 
+  LOGIN_LOGS_PAGE_SIZE,
+  fetchRecentLoginLogs,
+  getLocalLoginLogs,
   LoginLogEntry
 } from '../services/auditService';
 import { UserProfileModal } from './UserProfileModal';
@@ -61,7 +63,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [showAdminPasswordModal, setShowAdminPasswordModal] = useState(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
-  const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
+  const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'content'>('overview');
 
@@ -170,9 +172,14 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     if (!isSuperAdmin(userEmail)) return;
     setShowSystemTestModal(true);
     setIsLoadingLogs(true);
-    const logs = await fetchRecentLoginLogs(30, false, userEmail);
-    setRecentLogs(logs);
-    setIsLoadingLogs(false);
+    try {
+      const logs = await fetchRecentLoginLogs(LOGIN_LOGS_PAGE_SIZE, false, userEmail);
+      setRecentLogs((prev) => (Array.isArray(logs) && (logs.length > 0 || prev.length === 0) ? logs : prev));
+    } catch (err) {
+      console.warn('[RoleSelectionDashboard] Failed to load recent login logs, preserving cached logs:', err);
+    } finally {
+      setIsLoadingLogs(false);
+    }
   };
 
   const handleRefreshSystemTestLogs = async () => {
@@ -180,8 +187,10 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     await triggerSystemLogsSync(async () => {
       setIsLoadingLogs(true);
       try {
-        const logs = await fetchRecentLoginLogs(30, true, userEmail);
-        setRecentLogs(logs);
+        const logs = await fetchRecentLoginLogs(LOGIN_LOGS_PAGE_SIZE, true, userEmail);
+        setRecentLogs((prev) => (Array.isArray(logs) && (logs.length > 0 || prev.length === 0) ? logs : prev));
+      } catch (err) {
+        console.warn('[RoleSelectionDashboard] Failed to refresh login logs, preserving cached logs:', err);
       } finally {
         setIsLoadingLogs(false);
       }

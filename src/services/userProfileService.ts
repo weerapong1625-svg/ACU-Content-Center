@@ -10,7 +10,13 @@ import {
   deleteDoc, 
   writeBatch, 
   query, 
-  limit
+  where,
+  orderBy,
+  limit,
+  startAfter,
+  documentId,
+  type DocumentData,
+  type QueryDocumentSnapshot
 } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
 import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
@@ -435,6 +441,15 @@ async function readSingleUserDocByUid(
         setLocalUsersUidCache(cleanUid, result);
         return result;
       }
+      const existingLocal = getLocalUsersUidCache(cleanUid, true);
+      if ((snap.metadata?.fromCache || !isAuthReady()) && existingLocal?.data) {
+        return {
+          uid: existingLocal.uid,
+          data: existingLocal.data,
+          photoURL: existingLocal.photoURL || '',
+          hasDeadBlob: Boolean(existingLocal.hasDeadBlob),
+        };
+      }
       const emptyResult = { uid: cleanUid, data: null, photoURL: '', hasDeadBlob: false };
       sessionUsersDocCache.set(cleanUid, emptyResult);
       setLocalUsersUidCache(cleanUid, emptyResult);
@@ -488,9 +503,15 @@ async function readSingleProfileDocOnce(
     try {
       await waitForAuthReady();
       const profileSnap = await getDoc(doc(db, 'user_profiles', safeDocId));
+      const expiredLocal = getLocalProfileDocCache(safeDocId, true);
+      if (!profileSnap.exists() && (profileSnap.metadata?.fromCache || !isAuthReady()) && expiredLocal?.data) {
+        return expiredLocal.data;
+      }
       const data = profileSnap.exists() ? profileSnap.data() : null;
       sessionProfileDocCache.set(safeDocId, data);
-      setLocalProfileDocCache(safeDocId, data);
+      if (data !== null || !expiredLocal?.data) {
+        setLocalProfileDocCache(safeDocId, data);
+      }
       return data;
     } catch (err) {
       console.warn('[Firestore] readSingleProfileDocOnce failed, falling back to localStorage:', err);
@@ -899,9 +920,10 @@ export function subscribeFullUserProfile(
 
   const resolvedUid = resolveUserUid(normEmail);
   const safeDocId = getSafeDocId(normEmail);
-  let profileDocData: Record<string, any> | null = sessionProfileDocCache.get(safeDocId) ?? null;
+  let profileDocData: Record<string, any> | null =
+    sessionProfileDocCache.get(safeDocId) ?? getLocalProfileDocCache(safeDocId, true)?.data ?? null;
   let usersDocData: Record<string, any> | null =
-    sessionUsersDocCache.get(resolvedUid)?.data || getLocalUsersUidCache(resolvedUid)?.data || null;
+    sessionUsersDocCache.get(resolvedUid)?.data || getLocalUsersUidCache(resolvedUid, true)?.data || null;
   let isActive = true;
 
   const emitMerged = () => {
@@ -988,11 +1010,15 @@ export function subscribeFullUserProfile(
     readSingleProfileDocOnce(safeDocId, false)
       .then((data) => {
         if (!isActive) return;
-        profileDocData = data;
-        emitMerged();
+        if (data) {
+          profileDocData = data;
+          emitMerged();
+        } else if (!initialCached) {
+          emitMerged();
+        }
       })
       .catch(() => {
-        if (isActive) emitMerged();
+        if (isActive && !initialCached) emitMerged();
       });
   } else if (!initialCached) {
     emitMerged();
@@ -1501,12 +1527,69 @@ export async function adjustUserSubmissionCount(
 const ALL_USER_PROFILES_CACHE_KEY = 'acu_cached_all_user_profiles_map';
 const ALL_USER_PROFILES_FETCHED_AT_KEY = 'acu_cached_all_user_profiles_fetched_at';
 const ALL_USER_PROFILES_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL
+export const USER_PROFILES_PAGE_SIZE = 24;
+const USER_PROFILES_PAGINATION_KEY = 'acu_user_profiles_pagination_v1';
+
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
+const userProfilesPaginationListeners = new Set<(hasMore: boolean) => void>();
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
 let hasFetchedAllUserProfilesThisSession = false;
 let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
+let inFlightLoadMoreUserProfiles: Promise<Record<string, FullUserProfile>> | null = null;
+let userProfilesLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
+let userProfilesLastDocId: string | null = null;
+let hasMoreUserProfilesState = false;
 let userProfilesWindowListenersAttached = false;
+
+interface StoredProfilesPaginationMeta {
+  hasMore: boolean;
+  lastDocId: string | null;
+  ordered: boolean;
+}
+
+function readStoredProfilesPagination(): StoredProfilesPaginationMeta | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(USER_PROFILES_PAGINATION_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? (parsed as StoredProfilesPaginationMeta) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredProfilesPagination(meta: StoredProfilesPaginationMeta): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(USER_PROFILES_PAGINATION_KEY, JSON.stringify(meta));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getHasMoreUserProfiles(): boolean {
+  const stored = readStoredProfilesPagination();
+  return stored ? Boolean(stored.hasMore) : hasMoreUserProfilesState;
+}
+
+export function subscribeUserProfilesPagination(cb: (hasMore: boolean) => void): () => void {
+  userProfilesPaginationListeners.add(cb);
+  cb(getHasMoreUserProfiles());
+  return () => {
+    userProfilesPaginationListeners.delete(cb);
+  };
+}
+
+function notifyUserProfilesPagination(): void {
+  const hasMore = getHasMoreUserProfiles();
+  userProfilesPaginationListeners.forEach((cb) => {
+    try {
+      cb(hasMore);
+    } catch {}
+  });
+}
 
 function hasFreshAllUserProfilesCache(): boolean {
   if (typeof window === 'undefined') return false;
@@ -1538,6 +1621,17 @@ function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   return {};
 }
 
+export function getInitialAllUserProfilesMap(): Record<string, FullUserProfile> {
+  const merged: Record<string, FullUserProfile> = {
+    ...getStoredAllUserProfilesMap(),
+    ...getAllLocalUserProfilesMap(),
+    ...(sharedUserProfilesMap || {}),
+  };
+  const deletedEmails = getDeletedUserEmails();
+  deletedEmails.forEach((em) => delete merged[em]);
+  return merged;
+}
+
 function saveStoredAllUserProfilesMap(map: Record<string, FullUserProfile>): boolean {
   if (typeof window === 'undefined') return false;
   try {
@@ -1561,37 +1655,58 @@ function rebuildAndBroadcastMergedProfiles(): Record<string, FullUserProfile> {
       return;
     }
     const d = latestProfileDocsByEmail[normEmail] || {};
+    const prev = map[normEmail];
     const resolvedAvatar = resolveDisplayAvatarUrl({
       firestoreAvatarUrl: d.photoURL || d.avatarUrl,
-      localCachedAvatarUrl: map[normEmail]?.avatarUrl,
-      fallbackSeedName: d.fullName || normEmail,
+      localCachedAvatarUrl: prev?.avatarUrl,
+      fallbackSeedName: d.fullName || prev?.fullName || normEmail,
     });
     const cleanFinalAvatar = isUiAvatarPlaceholder(resolvedAvatar) ? '' : resolvedAvatar;
 
     map[normEmail] = {
-      uid: d.uid || resolveUserUid(normEmail),
+      uid: d.uid || prev?.uid || resolveUserUid(normEmail),
       email: normEmail,
-      fullName: d.fullName || d.displayName || normEmail.split('@')[0],
-      nickname: d.nickname || '',
-      school: d.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
-      displayName: d.displayName || d.fullName || normEmail.split('@')[0],
+      fullName: d.fullName || d.displayName || prev?.fullName || normEmail.split('@')[0],
+      nickname: d.nickname ?? prev?.nickname ?? '',
+      school: d.school || prev?.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี',
+      displayName: d.displayName || d.fullName || prev?.displayName || normEmail.split('@')[0],
       avatarUrl: cleanFinalAvatar,
       photoURL: cleanFinalAvatar,
-      role: d.role || 'ครูผู้สอน',
-      innovations: sanitizeInnovations(d.innovations),
+      role: d.role || prev?.role || 'ครูผู้สอน',
+      innovations: Array.isArray(d.innovations)
+        ? sanitizeInnovations(d.innovations)
+        : prev?.innovations || DEFAULT_INNOVATION_ITEMS,
       stats: {
-        totalViews: typeof d.stats?.totalViews === 'number' ? d.stats.totalViews : 0,
-        uniqueVisitors: typeof d.stats?.uniqueVisitors === 'number' ? d.stats.uniqueVisitors : 0,
-        points: typeof d.stats?.points === 'number' ? d.stats.points : 0,
-        averageRating: typeof d.stats?.averageRating === 'number' ? d.stats.averageRating : 0,
-        totalRatings: typeof d.stats?.totalRatings === 'number' ? d.stats.totalRatings : 0,
-        submissionCount: typeof d.stats?.submissionCount === 'number' ? d.stats.submissionCount : 0,
-        dailyStats: d.stats?.dailyStats,
-        monthlyStats: d.stats?.monthlyStats,
-        yearlyStats: d.stats?.yearlyStats,
+        totalViews:
+          typeof d.stats?.totalViews === 'number'
+            ? d.stats.totalViews
+            : (prev?.stats?.totalViews ?? 0),
+        uniqueVisitors:
+          typeof d.stats?.uniqueVisitors === 'number'
+            ? d.stats.uniqueVisitors
+            : (prev?.stats?.uniqueVisitors ?? 0),
+        points:
+          typeof d.stats?.points === 'number'
+            ? d.stats.points
+            : (prev?.stats?.points ?? 0),
+        averageRating:
+          typeof d.stats?.averageRating === 'number'
+            ? d.stats.averageRating
+            : (prev?.stats?.averageRating ?? 0),
+        totalRatings:
+          typeof d.stats?.totalRatings === 'number'
+            ? d.stats.totalRatings
+            : (prev?.stats?.totalRatings ?? 0),
+        submissionCount:
+          typeof d.stats?.submissionCount === 'number'
+            ? d.stats.submissionCount
+            : (prev?.stats?.submissionCount ?? 0),
+        dailyStats: d.stats?.dailyStats || prev?.stats?.dailyStats,
+        monthlyStats: d.stats?.monthlyStats || prev?.stats?.monthlyStats,
+        yearlyStats: d.stats?.yearlyStats || prev?.stats?.yearlyStats,
       },
-      praises: Array.isArray(d.praises) ? d.praises : [],
-      updatedAt: d.updatedAt,
+      praises: Array.isArray(d.praises) ? d.praises : (prev?.praises || []),
+      updatedAt: d.updatedAt || prev?.updatedAt,
     };
   });
 
@@ -1634,7 +1749,7 @@ function ensureUserProfilesWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for `user_profiles` (6-hour localStorage TTL unless forceRefresh=true)
+ * One-time paginated getDocs fetch for `user_profiles` (24 docs per batch, 6-hour localStorage TTL)
  */
 export async function refreshAllUserProfiles(forceRefresh = false): Promise<Record<string, FullUserProfile>> {
   const storedMap = {
@@ -1660,8 +1775,16 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
   inFlightAllUserProfilesFetch = (async () => {
     try {
       await waitForAuthReady();
-      const colQuery = query(collection(db, 'user_profiles'), limit(500));
-      const snapshot = await getDocs(colQuery);
+      const profilesRef = collection(db, 'user_profiles');
+      let snapshot;
+      let usedOrdered = true;
+      try {
+        snapshot = await getDocs(query(profilesRef, orderBy(documentId()), limit(USER_PROFILES_PAGE_SIZE)));
+      } catch {
+        usedOrdered = false;
+        snapshot = await getDocs(query(profilesRef, limit(USER_PROFILES_PAGE_SIZE)));
+      }
+
       if (
         snapshot.empty &&
         (snapshot.metadata?.fromCache || !isAuthReady()) &&
@@ -1670,6 +1793,7 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
         broadcastUserProfiles(localFallback);
         return localFallback;
       }
+
       const nextProfileDocs: Record<string, any> = {};
       snapshot.forEach((docSnap) => {
         const d = docSnap.data();
@@ -1680,6 +1804,18 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
           nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
         }
       });
+
+      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
+      userProfilesLastDoc = lastSnap;
+      userProfilesLastDocId = lastSnap ? lastSnap.id : null;
+      hasMoreUserProfilesState = snapshot.docs.length === USER_PROFILES_PAGE_SIZE && usedOrdered;
+      writeStoredProfilesPagination({
+        hasMore: hasMoreUserProfilesState,
+        lastDocId: userProfilesLastDocId,
+        ordered: usedOrdered,
+      });
+      notifyUserProfilesPagination();
+
       if (Object.keys(nextProfileDocs).length > 0 || Object.keys(localFallback).length === 0) {
         latestProfileDocsByEmail = nextProfileDocs;
         hasFetchedAllUserProfilesThisSession = true;
@@ -1701,7 +1837,9 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
         notifyQuotaExceeded();
       }
       console.warn('[Firestore] refreshAllUserProfiles failed, falling back to localStorage:', err);
-      broadcastUserProfiles(localFallback);
+      if (Object.keys(localFallback).length > 0) {
+        broadcastUserProfiles(localFallback);
+      }
       return localFallback;
     } finally {
       inFlightAllUserProfilesFetch = null;
@@ -1709,6 +1847,80 @@ export async function refreshAllUserProfiles(forceRefresh = false): Promise<Reco
   })();
 
   return inFlightAllUserProfilesFetch;
+}
+
+/**
+ * Load next batch of 24 user profiles using Firestore startAfter()
+ */
+export async function loadMoreUserProfiles(): Promise<Record<string, FullUserProfile>> {
+  const existingMap = sharedUserProfilesMap || getInitialAllUserProfilesMap();
+
+  if (inFlightLoadMoreUserProfiles) {
+    return inFlightLoadMoreUserProfiles;
+  }
+
+  const storedMeta = readStoredProfilesPagination();
+  const cursorDocId = userProfilesLastDoc ? userProfilesLastDoc.id : (userProfilesLastDocId || storedMeta?.lastDocId || null);
+  const canContinue = userProfilesLastDoc !== null || (Boolean(storedMeta?.ordered) && Boolean(cursorDocId));
+
+  if (!canContinue) {
+    hasMoreUserProfilesState = false;
+    writeStoredProfilesPagination({ hasMore: false, lastDocId: cursorDocId, ordered: false });
+    notifyUserProfilesPagination();
+    return existingMap;
+  }
+
+  inFlightLoadMoreUserProfiles = (async () => {
+    try {
+      await waitForAuthReady();
+      const profilesRef = collection(db, 'user_profiles');
+      const pagedQuery = userProfilesLastDoc
+        ? query(profilesRef, orderBy(documentId()), startAfter(userProfilesLastDoc), limit(USER_PROFILES_PAGE_SIZE))
+        : query(profilesRef, orderBy(documentId()), startAfter(cursorDocId!), limit(USER_PROFILES_PAGE_SIZE));
+
+      const snapshot = await getDocs(pagedQuery);
+      const nextProfileDocs: Record<string, any> = {};
+      snapshot.forEach((docSnap) => {
+        const d = docSnap.data();
+        const rawEmail =
+          d.email ||
+          (docSnap.id.includes('%40') || docSnap.id.includes('@') ? decodeURIComponent(docSnap.id) : '');
+        if (rawEmail) {
+          nextProfileDocs[rawEmail.toLowerCase().trim()] = d;
+        }
+      });
+
+      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : userProfilesLastDoc;
+      userProfilesLastDoc = lastSnap;
+      userProfilesLastDocId = lastSnap ? lastSnap.id : cursorDocId;
+      hasMoreUserProfilesState = snapshot.docs.length === USER_PROFILES_PAGE_SIZE;
+      writeStoredProfilesPagination({
+        hasMore: hasMoreUserProfilesState,
+        lastDocId: userProfilesLastDocId,
+        ordered: true,
+      });
+      notifyUserProfilesPagination();
+
+      if (Object.keys(nextProfileDocs).length > 0) {
+        latestProfileDocsByEmail = {
+          ...latestProfileDocsByEmail,
+          ...nextProfileDocs,
+        };
+        return rebuildAndBroadcastMergedProfiles();
+      }
+      return existingMap;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('[Firestore] loadMoreUserProfiles failed, preserving loaded profiles:', err);
+      return existingMap;
+    } finally {
+      inFlightLoadMoreUserProfiles = null;
+    }
+  })();
+
+  return inFlightLoadMoreUserProfiles;
 }
 
 /**
@@ -1901,15 +2113,18 @@ export async function deleteUserAccountCompletely(
       console.warn('Direct deleteDoc user_profiles notice:', err);
     }
 
-    // 4. Delete login logs for this user if requested
+    // 4. Delete login logs for this user if requested (scoped queries, zero full-collection scans)
     if (options.deleteLogs) {
       try {
         const logsCol = collection(db, 'login_logs');
-        const logsSnap = await getDocs(logsCol);
-        const userLogDocs = logsSnap.docs.filter((d) => {
-          const email = (d.data().email || d.data().userEmail || '').trim().toLowerCase();
-          return email === normTarget;
-        });
+        const [byEmail, byUserEmail] = await Promise.all([
+          getDocs(query(logsCol, where('email', '==', normTarget))),
+          getDocs(query(logsCol, where('userEmail', '==', normTarget))),
+        ]);
+        const uniqueMap = new Map<string, any>();
+        byEmail.docs.forEach((d) => uniqueMap.set(d.id, d));
+        byUserEmail.docs.forEach((d) => uniqueMap.set(d.id, d));
+        const userLogDocs = Array.from(uniqueMap.values());
 
         for (let i = 0; i < userLogDocs.length; i += 100) {
           const chunk = userLogDocs.slice(i, i + 100);
@@ -1923,15 +2138,18 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 5. Delete innovation submissions if requested
+    // 5. Delete innovation submissions if requested (scoped queries)
     if (options.deleteSubmissions) {
       try {
         const innovCol = collection(db, 'teacher_innovations_submissions');
-        const innovSnap = await getDocs(innovCol);
-        const userInnovDocs = innovSnap.docs.filter((d) => {
-          const email = (d.data().userEmail || d.data().email || d.data().teacherEmail || '').trim().toLowerCase();
-          return email === normTarget;
-        });
+        const [byUserEmail, byEmail, byTeacherEmail] = await Promise.all([
+          getDocs(query(innovCol, where('userEmail', '==', normTarget))),
+          getDocs(query(innovCol, where('email', '==', normTarget))),
+          getDocs(query(innovCol, where('teacherEmail', '==', normTarget))),
+        ]);
+        const uniqueMap = new Map<string, any>();
+        [...byUserEmail.docs, ...byEmail.docs, ...byTeacherEmail.docs].forEach((d) => uniqueMap.set(d.id, d));
+        const userInnovDocs = Array.from(uniqueMap.values());
 
         for (let i = 0; i < userInnovDocs.length; i += 100) {
           const chunk = userInnovDocs.slice(i, i + 100);
@@ -1945,15 +2163,17 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 6. Delete facility records in system_test_submissions if requested
+    // 6. Delete facility records in system_test_submissions if requested (scoped queries)
     if (options.deleteFacilities || options.deleteSubmissions) {
       try {
         const sysCol = collection(db, 'system_test_submissions');
-        const sysSnap = await getDocs(sysCol);
-        const userSysDocs = sysSnap.docs.filter((d) => {
-          const email = (d.data().userEmail || d.data().email || '').trim().toLowerCase();
-          return email === normTarget;
-        });
+        const [byUserEmail, byEmail] = await Promise.all([
+          getDocs(query(sysCol, where('userEmail', '==', normTarget))),
+          getDocs(query(sysCol, where('email', '==', normTarget))),
+        ]);
+        const uniqueMap = new Map<string, any>();
+        [...byUserEmail.docs, ...byEmail.docs].forEach((d) => uniqueMap.set(d.id, d));
+        const userSysDocs = Array.from(uniqueMap.values());
 
         for (let i = 0; i < userSysDocs.length; i += 100) {
           const chunk = userSysDocs.slice(i, i + 100);
@@ -1967,15 +2187,18 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 7. Delete teacher media repository works if requested
+    // 7. Delete teacher media repository works if requested (scoped queries)
     if (options.deleteMedia) {
       try {
         const mediaCol = collection(db, 'teacher_media_repository');
-        const mediaSnap = await getDocs(mediaCol);
-        const userMediaDocs = mediaSnap.docs.filter((d) => {
-          const email = (d.data().submittedByEmail || d.data().userEmail || d.data().email || '').trim().toLowerCase();
-          return email === normTarget;
-        });
+        const [bySubmittedBy, byUserEmail, byEmail] = await Promise.all([
+          getDocs(query(mediaCol, where('submittedByEmail', '==', normTarget))),
+          getDocs(query(mediaCol, where('userEmail', '==', normTarget))),
+          getDocs(query(mediaCol, where('email', '==', normTarget))),
+        ]);
+        const uniqueMap = new Map<string, any>();
+        [...bySubmittedBy.docs, ...byUserEmail.docs, ...byEmail.docs].forEach((d) => uniqueMap.set(d.id, d));
+        const userMediaDocs = Array.from(uniqueMap.values());
 
         for (let i = 0; i < userMediaDocs.length; i += 100) {
           const chunk = userMediaDocs.slice(i, i + 100);
@@ -1989,14 +2212,17 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 8. Delete shared teaching ideas if present
+    // 8. Delete shared teaching ideas if present (scoped queries)
     try {
-      const sharedCol = collection(db, 'shared_teaching_ideas');
-      const sharedSnap = await getDocs(sharedCol);
-      const userSharedDocs = sharedSnap.docs.filter((d) => {
-        const email = (d.data().authorEmail || d.data().email || d.data().userEmail || '').trim().toLowerCase();
-        return email === normTarget;
-      });
+      const sharedCol = collection(db, 'shared_ideas');
+      const [byAuthorEmail, byEmail, byUserEmail] = await Promise.all([
+        getDocs(query(sharedCol, where('authorEmail', '==', normTarget))),
+        getDocs(query(sharedCol, where('email', '==', normTarget))),
+        getDocs(query(sharedCol, where('userEmail', '==', normTarget))),
+      ]);
+      const uniqueMap = new Map<string, any>();
+      [...byAuthorEmail.docs, ...byEmail.docs, ...byUserEmail.docs].forEach((d) => uniqueMap.set(d.id, d));
+      const userSharedDocs = Array.from(uniqueMap.values());
 
       for (let i = 0; i < userSharedDocs.length; i += 100) {
         const chunk = userSharedDocs.slice(i, i + 100);
@@ -2088,6 +2314,10 @@ function readCachedEmailAudit(allowExpired = false): DatabaseEmailAuditResult | 
   }
 }
 
+export function getCachedEmailAuditResult(): DatabaseEmailAuditResult | null {
+  return readCachedEmailAudit(true);
+}
+
 export async function auditAndSyncAllDatabaseEmails(
   adminEmail: string,
   forceRefresh = false
@@ -2124,11 +2354,17 @@ export async function auditAndSyncAllDatabaseEmails(
 
   inFlightEmailAudit = (async () => {
     try {
+    let hadReadError = false;
+    let firstReadErrorMsg = '';
     const safeGetDocs = async (colName: string) => {
       try {
         return await getDocs(collection(db, colName));
-      } catch (e) {
-        console.warn(`Could not getDocs for ${colName}:`, e);
+      } catch (e: any) {
+        hadReadError = true;
+        if (!firstReadErrorMsg) {
+          firstReadErrorMsg = e?.message || `Could not read ${colName}`;
+        }
+        console.warn(`[Firestore] auditAndSyncAllDatabaseEmails getDocs failed for ${colName}:`, e);
         return { docs: [], size: 0 } as any;
       }
     };
@@ -2141,6 +2377,34 @@ export async function auditAndSyncAllDatabaseEmails(
       safeGetDocs('system_test_submissions'),
       safeGetDocs('teacher_media_repository'),
     ]);
+
+    if (hadReadError) {
+      const fallbackAudit = readCachedEmailAudit(true);
+      if (fallbackAudit) {
+        return fallbackAudit;
+      }
+      const totalDocs =
+        (profilesSnap.size || 0) +
+        (logsSnap.size || 0) +
+        (innovSnap.size || 0) +
+        (sysSnap.size || 0) +
+        (mediaSnap.size || 0);
+      if (totalDocs === 0) {
+        return {
+          success: false,
+          timestamp: nowIso,
+          scannedUniqueEmails: 0,
+          emailsList: [],
+          collectionCounts: { userProfiles: 0, loginLogs: 0, innovations: 0, facilities: 0, teacherMedia: 0 },
+          normalizedCount: 0,
+          missingProfilesCreated: 0,
+          namesSynchronized: 0,
+          discrepancies: [],
+          isFullyConsistent: false,
+          error: firstReadErrorMsg || 'ไม่สามารถดึงข้อมูลจาก Firestore ได้ชั่วคราว (Quota exceeded หรือไม่มีสิทธิ์เข้าถึง)',
+        };
+      }
+    }
 
     const deletedEmails = getDeletedUserEmails();
     const discrepancies: EmailAuditDiscrepancy[] = [];

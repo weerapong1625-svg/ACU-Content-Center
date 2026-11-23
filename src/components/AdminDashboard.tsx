@@ -96,6 +96,7 @@ import {
   clearAdminOwnMedia,
   updateFacilitySubmission,
   deleteFacilitySubmission,
+  getInitialInnovationsFromCache,
   MEDIA_ITEM_NUMBERS,
   INNOVATION_MEDIA_TYPES,
   PRODUCTION_TYPES
@@ -179,11 +180,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     criteriaPosterUrl: globalPosterUrl,
     popupBannerConfig: globalBannerConfig,
     innovationsLoaded,
+    adminServerCounts,
+    hasMoreInnovations,
+    hasMoreFacilities,
+    hasMoreUserProfiles,
+    hasMoreLoginLogs,
+    isLoadingMore,
+    loadMoreInnovations,
+    loadMoreFacilities,
+    loadMoreUserProfiles,
+    loadMoreLoginLogs,
     ensureAdminDashboardLoaded,
     ensureLoginLogsLoaded,
     syncLoginLogsAndSummary,
     syncAllAdminData,
   } = useFirestoreData();
+
+  const isLoadingMoreInnovs = isLoadingMore('innovations');
+  const isLoadingMoreFacs = isLoadingMore('facilities');
+  const isLoadingMoreLogs = isLoadingMore('loginLogs');
+  const isLoadingMoreTeachers = isLoadingMore('userProfiles') || isLoadingMore('innovations');
 
   const {
     isSyncing: isRefreshingAll,
@@ -208,7 +224,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => globalSiteSummary || getLocalSiteSummary());
   const [isQuotaFallback, setIsQuotaFallback] = useState<boolean>(false);
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>(() => globalUserProfilesMap);
-  const [isLoading, setIsLoading] = useState(!innovationsLoaded);
+  const [isLoading, setIsLoading] = useState(
+    () => !innovationsLoaded && globalInnovations.length === 0 && getInitialInnovationsFromCache().length === 0
+  );
 
   // 0. Special Privileges and 20-Share Rewards Management
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>(() => globalPrivilegeSummaries);
@@ -462,7 +480,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   useEffect(() => {
     if (globalSiteSummary) {
-      setSiteSummary(globalSiteSummary);
+      setSiteSummary((prev) => {
+        if (!prev) return globalSiteSummary;
+        if (
+          (globalSiteSummary.totalVisits || 0) === 0 &&
+          !globalSiteSummary.resetAt &&
+          (prev.totalVisits || 0) > 0
+        ) {
+          return prev;
+        }
+        return globalSiteSummary;
+      });
     }
   }, [globalSiteSummary]);
 
@@ -515,10 +543,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const handleRefreshLoginLogs = async () => {
     if (!isAdminResolved || isRefreshLogsDisabled) return;
     const { executed } = await triggerLogsSync(async () => {
-      await syncLoginLogsAndSummary(userEmail);
+      try {
+        await syncLoginLogsAndSummary(userEmail);
+      } catch (err) {
+        console.warn('[AdminDashboard] Refresh login logs failed, preserving cached data:', err);
+      }
     });
     if (executed) {
-      showToast('อัปเดตสถิติและประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ — รีเฟรชได้อีกครั้งใน 60 วินาที');
+      showToast('อัปเดตสถิติและประวัติการเข้าชม (24 รายการล่าสุด) สำเร็จ — รีเฟรชได้อีกครั้งใน 60 วินาที');
     }
   };
 
@@ -526,7 +558,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     if (!isAdminResolved || isRefreshAllDisabled) return;
     setIsQuotaFallback(false);
     const { executed } = await triggerAllAdminSync(async () => {
-      await syncAllAdminData(userEmail);
+      try {
+        await syncAllAdminData(userEmail);
+      } catch (err) {
+        console.warn('[AdminDashboard] Refresh all admin data failed, preserving cached data:', err);
+      }
     });
     if (executed) {
       showToast('ซิงค์ข้อมูลล่าสุดจากฐานข้อมูลและอัปเดตแคชเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
@@ -597,14 +633,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
   }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear, onlyMyAdminInnovations]);
 
-  // Statistics calculation from cached collections (6-hour localStorage TTL)
+  // Statistics calculation combining server-side getCountFromServer() totals + cached items (never resets to 0)
   const stats = useMemo(() => {
     const unifiedTotal = teacherSummaries.reduce((sum, t) => sum + t.submittedCount, 0);
-    const totalSubmissions = Math.max(innovations.length, unifiedTotal);
-    const totalTeachers = teacherSummaries.length;
+    const totalSubmissions = Math.max(
+      innovations.length,
+      unifiedTotal,
+      adminServerCounts.totalInnovations || 0
+    );
+    const totalTeachers = Math.max(
+      teacherSummaries.length,
+      adminServerCounts.totalTeachers || 0
+    );
     const completed5Count = teacherSummaries.filter(t => t.isComplete).length;
-    const inProgressCount = totalTeachers - completed5Count;
-    const totalFacilities = facilities.length;
+    const inProgressCount = Math.max(0, totalTeachers - completed5Count);
+    const totalFacilities = Math.max(
+      facilities.length,
+      adminServerCounts.totalFacilities || 0
+    );
 
     // By Subject Group
     const subjectGroupCounts: Record<string, number> = {};
@@ -615,11 +661,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const sg = i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์';
       subjectGroupCounts[sg] = (subjectGroupCounts[sg] || 0) + 1;
     });
+    SUBJECT_GROUPS.forEach(sg => {
+      subjectGroupCounts[sg] = Math.max(
+        subjectGroupCounts[sg] || 0,
+        adminServerCounts.subjectGroupCounts?.[sg] || 0
+      );
+    });
 
     // By Grade
     const gradeCounts: Record<string, number> = {};
     innovations.forEach(i => {
       gradeCounts[i.gradeLevel] = (gradeCounts[i.gradeLevel] || 0) + 1;
+    });
+    GRADE_LEVELS.forEach(grade => {
+      gradeCounts[grade] = Math.max(
+        gradeCounts[grade] || 0,
+        adminServerCounts.gradeCounts?.[grade] || 0
+      );
     });
 
     // By Media Type
@@ -635,14 +693,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         mediaTypeCounts['สื่ออื่น ๆ']++;
       }
     });
+    Object.keys(mediaTypeCounts).forEach(mt => {
+      mediaTypeCounts[mt] = Math.max(
+        mediaTypeCounts[mt] || 0,
+        adminServerCounts.mediaTypeCounts?.[mt] || 0
+      );
+    });
 
     // By Production Type
-    let selfMadeCount = 0;
-    let sourcedCount = 0;
+    let localSelfMade = 0;
+    let localSourced = 0;
     innovations.forEach(i => {
-      if (i.productionType === 'ครูผลิตสื่อเอง') selfMadeCount++;
-      else sourcedCount++;
+      if (i.productionType === 'ครูผลิตสื่อเอง') localSelfMade++;
+      else localSourced++;
     });
+    const selfMadeCount = Math.max(localSelfMade, adminServerCounts.selfMadeCount || 0);
+    const sourcedCount = Math.max(localSourced, adminServerCounts.sourcedCount || 0);
 
     return {
       totalSubmissions,
@@ -656,7 +722,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       selfMadeCount,
       sourcedCount,
     };
-  }, [innovations, teacherSummaries, facilities]);
+  }, [innovations, teacherSummaries, facilities, adminServerCounts]);
 
   // Handle Logo Upload
   const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -982,7 +1048,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   const totalServerVisitorsCount = Math.max(
     loginLogs.length,
-    siteSummary?.totalVisits || 0
+    siteSummary?.totalVisits || 0,
+    adminServerCounts.totalLoginLogs || 0
   );
 
   const visitorTabKpis = useMemo(() => {
@@ -1255,11 +1322,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Privilege Statistics Summary
   const privilegeStats = useMemo(() => {
-    const totalTeachers = privilegeSummaries.length;
+    const totalTeachers = Math.max(privilegeSummaries.length, adminServerCounts.totalTeachers || 0);
     const eligibleCount = privilegeSummaries.filter((p) => p.isEligible).length;
-    const receivedCount = privilegeSummaries.filter((p) => p.claimStatus === 'received').length;
-    const pendingCount = privilegeSummaries.filter((p) => p.claimStatus === 'pending_pickup').length;
-    const inProgressCount = privilegeSummaries.filter((p) => !p.isEligible).length;
+    const receivedCount = Math.max(
+      privilegeSummaries.filter((p) => p.claimStatus === 'received').length,
+      adminServerCounts.receivedRewardsCount || 0
+    );
+    const pendingCount = Math.max(
+      privilegeSummaries.filter((p) => p.claimStatus === 'pending_pickup').length,
+      adminServerCounts.pendingRewardsCount || 0
+    );
+    const inProgressCount = Math.max(0, totalTeachers - eligibleCount);
     const dollCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ตุ๊กตา') || (p.claimStatus === 'received' && p.selectedReward?.includes('ตุ๊กตา'))).length;
     const snackCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ขนม') || (p.claimStatus === 'received' && p.selectedReward?.includes('ขนม'))).length;
     const candyCount = privilegeSummaries.filter((p) => p.receivedReward?.includes('ลูกอม') || (p.claimStatus === 'received' && p.selectedReward?.includes('ลูกอม'))).length;
@@ -1276,7 +1349,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       candyCount,
       totalPostsShared,
     };
-  }, [privilegeSummaries]);
+  }, [privilegeSummaries, adminServerCounts]);
 
   // Handle Export Privileges CSV
   const handleExportPrivilegesCSV = () => {
@@ -1917,7 +1990,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           >
             <Layers className="w-3.5 h-3.5" />
               <span>
-                ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length})
+                ข้อมูลการส่งสื่อ 5 ชิ้น ({Math.max(innovations.length, adminServerCounts.totalInnovations || 0)})
               </span>
             </button>
 
@@ -1932,7 +2005,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             >
               <Users className="w-3.5 h-3.5" />
               <span>
-                สรุปรายชื่อครู ({teacherSummaries.length})
+                สรุปรายชื่อครู ({Math.max(teacherSummaries.length, adminServerCounts.totalTeachers || 0)})
               </span>
             </button>
 
@@ -1947,7 +2020,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             >
               <School className="w-3.5 h-3.5" />
               <span>
-                บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length})
+                บันทึกแหล่งเรียนรู้ 33 แหล่ง ({Math.max(facilities.length, adminServerCounts.totalFacilities || 0)})
               </span>
             </button>
 
@@ -2390,10 +2463,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   onClick={handleRefreshLoginLogs}
                   disabled={isRefreshLogsDisabled || !isAdminResolved}
                   className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  title={refreshLogsCooldown > 0 ? `รอ ${refreshLogsCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'ดึงยอดรวมและประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล'}
+                  title={refreshLogsCooldown > 0 ? `รอ ${refreshLogsCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'ดึงยอดรวมและประวัติการเข้าชมล่าสุด 24 รายการจากฐานข้อมูล'}
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
-                  <span>{getRefreshLogsLabel('รีเฟรชข้อมูลสถิติ (30 ล่าสุด)')}</span>
+                  <span>{getRefreshLogsLabel('รีเฟรชข้อมูลสถิติ (24 ล่าสุด)')}</span>
                 </button>
 
                 <button
@@ -2646,6 +2719,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   </tbody>
                 </table>
               </div>
+              {hasMoreLoginLogs && (
+                <div className="p-4 border-t border-slate-800 flex flex-col items-center justify-center gap-1.5 bg-slate-950/40">
+                  <button
+                    type="button"
+                    onClick={() => loadMoreLoginLogs(userEmail)}
+                    disabled={isLoadingMoreLogs}
+                    className="px-6 py-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/35 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreLogs ? 'animate-spin' : ''}`} />
+                    <span>{isLoadingMoreLogs ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (24 รายการถัดไป)'}</span>
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    โหลดประวัติเข้าชมแล้ว {loginLogs.length}
+                    {adminServerCounts.totalLoginLogs > loginLogs.length
+                      ? ` / ${adminServerCounts.totalLoginLogs}`
+                      : ''} รายการ
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -3896,6 +3988,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   </tbody>
                 </table>
               </div>
+              {hasMoreInnovations && (
+                <div className="p-4 border-t border-slate-800 flex flex-col items-center justify-center gap-1.5 bg-slate-950/40">
+                  <button
+                    type="button"
+                    onClick={() => loadMoreInnovations()}
+                    disabled={isLoadingMoreInnovs}
+                    className="px-6 py-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/35 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreInnovs ? 'animate-spin' : ''}`} />
+                    <span>{isLoadingMoreInnovs ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (24 รายการถัดไป)'}</span>
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    โหลดข้อมูลสื่อ 5 ชิ้นแล้ว {innovations.length}
+                    {adminServerCounts.totalInnovations > innovations.length
+                      ? ` / ${adminServerCounts.totalInnovations}`
+                      : ''} รายการ
+                  </span>
+                </div>
+              )}
             </div>
 
           </div>
@@ -4103,6 +4214,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   </tbody>
                 </table>
               </div>
+              {(hasMoreUserProfiles || hasMoreInnovations) && (
+                <div className="p-4 border-t border-slate-800 flex flex-col items-center justify-center gap-1.5 bg-slate-950/40">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      Promise.all([
+                        hasMoreUserProfiles ? loadMoreUserProfiles() : Promise.resolve(),
+                        hasMoreInnovations ? loadMoreInnovations() : Promise.resolve(),
+                      ]).catch(() => {});
+                    }}
+                    disabled={isLoadingMoreTeachers}
+                    className="px-6 py-2.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/35 border border-blue-500/40 text-blue-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreTeachers ? 'animate-spin' : ''}`} />
+                    <span>{isLoadingMoreTeachers ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (รายชื่อครู 24 รายการถัดไป)'}</span>
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    แสดงรายชื่อครูที่โหลดแล้ว {teacherSummaries.length}
+                    {adminServerCounts.totalTeachers > teacherSummaries.length
+                      ? ` / ${adminServerCounts.totalTeachers}`
+                      : ''} ท่าน
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -4350,6 +4485,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                   </tbody>
                 </table>
               </div>
+              {hasMoreFacilities && (
+                <div className="p-4 border-t border-slate-800 flex flex-col items-center justify-center gap-1.5 bg-slate-950/40">
+                  <button
+                    type="button"
+                    onClick={() => loadMoreFacilities()}
+                    disabled={isLoadingMoreFacs}
+                    className="px-6 py-2.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/35 border border-emerald-500/40 text-emerald-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreFacs ? 'animate-spin' : ''}`} />
+                    <span>{isLoadingMoreFacs ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (24 รายการถัดไป)'}</span>
+                  </button>
+                  <span className="text-[11px] text-slate-400">
+                    โหลดบันทึกแหล่งเรียนรู้แล้ว {facilities.length}
+                    {adminServerCounts.totalFacilities > facilities.length
+                      ? ` / ${adminServerCounts.totalFacilities}`
+                      : ''} รายการ
+                  </span>
+                </div>
+              )}
             </div>
           </div>
         )}
