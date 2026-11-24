@@ -34,6 +34,7 @@ import {
   UserCheck,
   FileText,
   Upload,
+  RotateCcw,
   Award,
   Printer,
   MapPin,
@@ -108,13 +109,7 @@ import {
   deleteFacilitySubmission,
   MEDIA_ITEM_NUMBERS,
   INNOVATION_MEDIA_TYPES,
-  PRODUCTION_TYPES,
-  subscribeInnovationsPagination,
-  loadMoreInnovations,
-  loadMoreTeacherMedia,
-  PaginationState,
-  getManualRefreshCooldownSeconds,
-  recordManualRefreshTimestamp
+  PRODUCTION_TYPES
 } from '../services/submissionService';
 import { 
   fetchGoogleSheetsConfig, 
@@ -131,7 +126,16 @@ import {
   DEFAULT_NEW_SHEET_URL,
   TeacherSummaryItem
 } from '../services/googleSheetsService';
-import { getBangkokDateParts } from '../services/auditService';
+import {
+  LoginLogEntry,
+  subscribeAllLoginLogs,
+  fetchAdminLoginLogsOnce,
+  generateLoginLogsTSV,
+  generateLoginLogsCSV,
+  resetAllLoginLogs,
+  resetAdminLoginLogs,
+  getBangkokDateParts
+} from '../services/auditService';
 import {
   PopupBannerConfig,
   subscribePopupBanner,
@@ -139,12 +143,6 @@ import {
   DEFAULT_BANNER_IMAGE,
   DEFAULT_BANNER_IMAGE_2
 } from '../services/bannerService';
-import {
-  DashboardServerStats,
-  getCachedServerStats,
-  subscribeDashboardServerStats,
-  fetchDashboardServerStats
-} from '../services/serverStatsService';
 
 const CURRENT_CALENDAR_YEAR = getBangkokDateParts()?.year || new Date().getFullYear() || 2026;
 // ลิสต์ปีการศึกษาล่วงหน้า 10 ปีข้างหน้า และปีย้อนหลัง (พ.ศ. 2579 ลงมาถึง 2567 / 2036 ลงมาถึง 2024)
@@ -170,18 +168,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   const isSuperAdmin = userEmail.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
 
   // Navigation tabs
-  const [activeTab, setActiveTab] = useState<'stats' | 'certificates' | 'privileges' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
+  const [activeTab, setActiveTab] = useState<'stats' | 'visitors' | 'certificates' | 'privileges' | 'innovations' | 'teachers' | 'facilities' | 'settings'>('stats');
 
-  // Firestore data (6h localStorage TTL cached)
+  // Real-time Firestore data
   const [innovations, setInnovations] = useState<InnovationSubmission[]>([]);
   const [teacherMedia, setTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [facilities, setFacilities] = useState<FacilitySubmission[]>([]);
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
   const [userProfilesMap, setUserProfilesMap] = useState<Record<string, FullUserProfile>>({});
   const [isLoading, setIsLoading] = useState(true);
+  const [isRefreshingLogs, setIsRefreshingLogs] = useState(false);
   const [isRefreshingAll, setIsRefreshingAll] = useState(false);
-  const [serverStats, setServerStats] = useState<DashboardServerStats>(() => getCachedServerStats());
-  const [innovPagination, setInnovPagination] = useState<PaginationState>({ hasMore: false, isLoadingMore: false });
-  const [refreshAllCooldownSec, setRefreshAllCooldownSec] = useState<number>(() => getManualRefreshCooldownSeconds('admin_all'));
 
   // 0. Special Privileges and 20-Share Rewards Management
   const [privilegeSummaries, setPrivilegeSummaries] = useState<TeacherPrivilegeAdminItem[]>([]);
@@ -191,6 +188,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
   // Yearly Stats & Certificate Filter
   const [selectedYear, setSelectedYear] = useState<string>('2026');
+
+  // 1. Visitor logs filter by year and search
+  const [visitorYear, setVisitorYear] = useState<string>('2026');
+  const [visitorSearchTerm, setVisitorSearchTerm] = useState('');
 
   // 2. Online Certificate Verification Filter & Target state
   const [certificateFilter, setCertificateFilter] = useState<'all' | 'eligible' | 'in_progress'>('all');
@@ -273,6 +274,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
   // Admin View User Profile Modal State
   const [viewUserProfileTarget, setViewUserProfileTarget] = useState<{ email: string; name: string; avatarUrl: string } | null>(null);
 
+  // Reset visitor logs modal state
+  const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
+  const [isResettingLogs, setIsResettingLogs] = useState(false);
+
   // Image preview modal state
   const [previewModalImg, setPreviewModalImg] = useState<{ url: string; title: string } | null>(null);
 
@@ -323,14 +328,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       });
 
       if (res.success) {
-        setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
-        setTeacherMedia((prev) => prev.filter((m) => (m.submittedByEmail || m.userEmail || '').trim().toLowerCase() !== norm));
-        setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
-        setUserProfilesMap((prev) => {
-          const next = { ...prev };
-          delete next[norm];
-          return next;
-        });
         showToast(`ลบบัญชีผู้ใช้ ${norm} สำเร็จเรียบร้อยแล้ว`);
       } else {
         alert(res.error || 'ไม่สามารถลบบัญชีผู้ใช้ได้');
@@ -353,9 +350,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     try {
       const res = await clearAdminOwnMedia(SUPER_ADMIN_EMAIL);
       if (res.success) {
-        const normAdmin = SUPER_ADMIN_EMAIL.toLowerCase();
-        setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== normAdmin));
-        setTeacherMedia((prev) => prev.filter((m) => (m.submittedByEmail || m.userEmail || '').trim().toLowerCase() !== normAdmin));
         showToast(`ลบสื่อของ Admin (${SUPER_ADMIN_EMAIL}) เรียบร้อยแล้ว (${res.deletedCount} รายการ)`);
       } else {
         alert(res.error || 'ไม่สามารถลบสื่อของ Admin ได้');
@@ -395,6 +389,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setCurrentPosterUrl(url);
     });
 
+    const unsubLogs = subscribeAllLoginLogs((logs) => {
+      setLoginLogs(logs);
+    });
+
     const unsubProfiles = subscribeAllUserProfiles((profiles) => {
       setUserProfilesMap(profiles);
     });
@@ -411,14 +409,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setPrivilegeSummaries(list);
     });
 
-    const unsubServerStats = subscribeDashboardServerStats((statsData) => {
-      setServerStats(statsData);
-    });
-
-    const unsubInnovPagination = subscribeInnovationsPagination((pag) => {
-      setInnovPagination(pag);
-    });
-
     // Fetch Google Sheets Config
     fetchGoogleSheetsConfig().then((cfg) => {
       if (cfg.sheetUrl) setGoogleSheetsUrl(cfg.sheetUrl);
@@ -431,28 +421,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       unsubLogo();
       unsubCertLogo();
       unsubPoster();
+      unsubLogs();
       unsubProfiles();
       unsubBanner();
       unsubPrivileges();
-      unsubServerStats();
-      unsubInnovPagination();
     };
   }, []);
 
-  // Cooldown countdown timer (60s)
+  // Fetch latest 30 login logs ONLY when Admin explicitly opens the Visitors/Logs tab
   useEffect(() => {
-    if (refreshAllCooldownSec <= 0) return;
-    const timer = setInterval(() => {
-      setRefreshAllCooldownSec(getManualRefreshCooldownSeconds('admin_all'));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [refreshAllCooldownSec]);
+    if (activeTab === 'visitors') {
+      setIsRefreshingLogs(true);
+      fetchAdminLoginLogsOnce(false, 30, userEmail)
+        .finally(() => setIsRefreshingLogs(false));
+    }
+  }, [activeTab, userEmail]);
+
+  const handleRefreshLoginLogs = async () => {
+    setIsRefreshingLogs(true);
+    try {
+      await fetchAdminLoginLogsOnce(true, 30, userEmail);
+      showToast('อัปเดตประวัติการเข้าชม (30 รายการล่าสุด) สำเร็จ');
+    } finally {
+      setIsRefreshingLogs(false);
+    }
+  };
 
   const handleRefreshAllAdminData = async () => {
-    if (isRefreshingAll || refreshAllCooldownSec > 0) return;
     setIsRefreshingAll(true);
-    recordManualRefreshTimestamp('admin_all');
-    setRefreshAllCooldownSec(60);
     try {
       await Promise.all([
         refreshAllInnovations(true),
@@ -460,7 +456,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         refreshTeacherMedia(true),
         refreshAllUserProfiles(true),
         refreshRewardClaims(true),
-        fetchDashboardServerStats(true),
+        activeTab === 'visitors' ? fetchAdminLoginLogsOnce(true, 30, userEmail) : Promise.resolve([]),
       ]);
       showToast('ซิงค์ข้อมูลล่าสุดจากฐานข้อมูลเรียบร้อยแล้ว');
     } finally {
@@ -473,24 +469,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return aggregateTeacherSummary(innovations, teacherMedia, userProfilesMap);
   }, [innovations, teacherMedia, userProfilesMap]);
 
-  // Self-healing sync: synchronize out-of-sync user_profiles stats.submissionCount upward-only when paginated so partial pages never overwrite down to 0
+  // Self-healing sync: synchronize out-of-sync user_profiles stats.submissionCount in background (memo-guarded, zero N+1 reads)
   useEffect(() => {
     if (teacherSummaries.length === 0) return;
     teacherSummaries.forEach((teacher) => {
       const normEmail = (teacher.email || '').trim().toLowerCase();
       if (!normEmail) return;
       const prof = userProfilesMap[normEmail];
-      const storedCount = prof?.stats?.submissionCount ?? 0;
-      if (prof && (teacher.submittedCount > storedCount || (!innovPagination.hasMore && storedCount !== teacher.submittedCount))) {
+      if (prof && prof.stats?.submissionCount !== teacher.submittedCount) {
         syncUserSubmissionCountIfOutOfSync(
           normEmail,
           teacher.submittedCount,
-          storedCount,
+          prof.stats?.submissionCount,
           prof.uid
         );
       }
     });
-  }, [teacherSummaries, userProfilesMap, innovPagination.hasMore]);
+  }, [teacherSummaries, userProfilesMap]);
 
   // Filtered teachers list (Tab 3)
   const filteredTeacherSummaries = useMemo(() => {
@@ -533,24 +528,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     });
   }, [innovations, searchTerm, selectedGradeFilter, selectedMediaTypeFilter, selectedSubjectGroupFilter, innovationYear, onlyMyAdminInnovations]);
 
-  // Statistics calculation (uses server-side getCountFromServer counts + local fallback so paginated limit(30) never undercounts or resets to 0)
+  // Statistics calculation
   const stats = useMemo(() => {
     const unifiedTotal = teacherSummaries.reduce((sum, t) => sum + t.submittedCount, 0);
-    const localTotalSubmissions = Math.max(innovations.length, unifiedTotal);
-    const totalSubmissions = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.totalInnovationsCount, localTotalSubmissions)
-      : localTotalSubmissions;
-    const totalTeachers = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.totalUsersCount, teacherSummaries.length)
-      : teacherSummaries.length;
-    const localCompleted5Count = teacherSummaries.filter(t => t.isComplete).length;
-    const completed5Count = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.completedTeachersCount, localCompleted5Count)
-      : localCompleted5Count;
-    const inProgressCount = Math.max(0, totalTeachers - completed5Count);
-    const totalFacilities = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.totalFacilitiesCount, facilities.length)
-      : facilities.length;
+    const totalSubmissions = Math.max(innovations.length, unifiedTotal);
+    const totalTeachers = teacherSummaries.length;
+    const completed5Count = teacherSummaries.filter(t => t.isComplete).length;
+    const inProgressCount = totalTeachers - completed5Count;
+    const totalFacilities = facilities.length;
 
     // By Subject Group
     const subjectGroupCounts: Record<string, number> = {};
@@ -561,11 +546,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const sg = i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์';
       subjectGroupCounts[sg] = (subjectGroupCounts[sg] || 0) + 1;
     });
-    if (serverStats.fetchedAt > 0) {
-      SUBJECT_GROUPS.forEach(sg => {
-        subjectGroupCounts[sg] = Math.max(serverStats.subjectGroupCounts[sg] || 0, subjectGroupCounts[sg] || 0);
-      });
-    }
 
     // By Grade
     const gradeCounts: Record<string, number> = {};
@@ -586,25 +566,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         mediaTypeCounts['สื่ออื่น ๆ']++;
       }
     });
-    if (serverStats.fetchedAt > 0) {
-      mediaTypeCounts['สื่อสิ่งพิมพ์'] = Math.max(serverStats.mediaTypeCounts['สื่อสิ่งพิมพ์'] || 0, mediaTypeCounts['สื่อสิ่งพิมพ์']);
-      mediaTypeCounts['สื่อเทคโนโลยี'] = Math.max(serverStats.mediaTypeCounts['สื่อเทคโนโลยี'] || 0, mediaTypeCounts['สื่อเทคโนโลยี']);
-      mediaTypeCounts['สื่ออื่น ๆ'] = Math.max(serverStats.mediaTypeCounts['สื่ออื่น ๆ'] || 0, mediaTypeCounts['สื่ออื่น ๆ']);
-    }
 
     // By Production Type
-    let localSelfMadeCount = 0;
-    let localSourcedCount = 0;
+    let selfMadeCount = 0;
+    let sourcedCount = 0;
     innovations.forEach(i => {
-      if (i.productionType === 'ครูผลิตสื่อเอง') localSelfMadeCount++;
-      else localSourcedCount++;
+      if (i.productionType === 'ครูผลิตสื่อเอง') selfMadeCount++;
+      else sourcedCount++;
     });
-    const selfMadeCount = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.productionTypeCounts.selfMadeCount || 0, localSelfMadeCount)
-      : localSelfMadeCount;
-    const sourcedCount = serverStats.fetchedAt > 0
-      ? Math.max(serverStats.productionTypeCounts.sourcedCount || 0, localSourcedCount)
-      : localSourcedCount;
 
     return {
       totalSubmissions,
@@ -618,7 +587,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       selfMadeCount,
       sourcedCount,
     };
-  }, [innovations, teacherSummaries, facilities, serverStats]);
+  }, [innovations, teacherSummaries, facilities]);
 
   // Handle Logo Upload
   const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -871,22 +840,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี (อ่านจาก user_profiles เท่านั้น ไม่ยิง query login_logs)
+  // Filtered visitor login logs with visitorYear (Bangkok calendar)
+  const filteredLoginLogs = useMemo(() => {
+    return loginLogs.filter((l) => {
+      if (visitorYear !== 'all') {
+        const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+        const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
+        if (yr !== visitorYear) return false;
+      }
+      if (visitorSearchTerm.trim()) {
+        const term = visitorSearchTerm.toLowerCase();
+        return (
+          l.email.toLowerCase().includes(term) ||
+          l.displayName.toLowerCase().includes(term)
+        );
+      }
+      return true;
+    });
+  }, [loginLogs, visitorYear, visitorSearchTerm]);
+
+  // 1. สถิติผู้เข้าชม: สรุปสถิติผู้เข้าชมแยกตามปี (พ.ศ. 2567 ถึง พ.ศ. 2579)
+  const visitorYearlyBreakdown = useMemo(() => {
+    const counts: Record<string, number> = {};
+    loginLogs.forEach((log) => {
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      const yr = parts ? parts.year.toString() : String(CURRENT_CALENDAR_YEAR);
+      counts[yr] = (counts[yr] || 0) + 1;
+    });
+    return counts;
+  }, [loginLogs]);
+
+  // 2. ตรวจสอบเกียรติบัตร: สรุปผู้มีสิทธิ์ (ครบ 100 ครั้ง) แยกตามปี
   const certificateYearlyBreakdown = useMemo(() => {
     const result: Record<string, { total: number; eligible: number }> = {};
     ADVANCE_YEAR_OPTIONS.forEach((opt) => {
       const yr = opt.yearNum;
-      const yrStr = String(yr);
       const visitsByEmail: Record<string, number> = {};
-      Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
-        const em = emKey.toLowerCase().trim();
-        const yearCount = typeof prof?.stats?.yearlyStats?.[yrStr] === 'number'
-          ? prof.stats.yearlyStats[yrStr]
-          : (yr === CURRENT_CALENDAR_YEAR ? (prof?.stats?.totalViews || 0) : 0);
-        if (yearCount > 0) {
-          visitsByEmail[em] = yearCount;
+      loginLogs.forEach((log) => {
+        if (!log.email) return;
+        const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+        if (parts && parts.year === yr) {
+          const em = log.email.toLowerCase().trim();
+          visitsByEmail[em] = (visitsByEmail[em] || 0) + 1;
         }
       });
+      if (yr === CURRENT_CALENDAR_YEAR) {
+        Object.entries(userProfilesMap).forEach(([emKey, prof]) => {
+          const em = emKey.toLowerCase().trim();
+          if (!visitsByEmail[em] && (prof?.stats?.totalViews || 0) > 0) {
+            visitsByEmail[em] = prof.stats.totalViews;
+          }
+        });
+      }
       const eligible = Object.values(visitsByEmail).filter((v) => v >= 100).length;
       result[opt.value] = {
         total: Object.keys(visitsByEmail).length,
@@ -894,7 +899,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       };
     });
     return result;
-  }, [userProfilesMap]);
+  }, [loginLogs, userProfilesMap]);
 
   // 3. ข้อมูลการส่งสื่อ: จำนวนสื่อที่ส่งแยกตามปี
   const innovationYearlyBreakdown = useMemo(() => {
@@ -918,14 +923,38 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     return counts;
   }, [facilities]);
 
-  // Compute certificate candidate users based on user profiles for selectedYear (zero login_logs reads)
+  // Compute certificate candidate users based on login logs and user profiles for selectedYear
   const certificateCandidates = useMemo(() => {
     const yr = parseInt(selectedYear, 10) || CURRENT_CALENDAR_YEAR;
-    const yrStr = String(yr);
     const isCurrentSelectedYear = yr === CURRENT_CALENDAR_YEAR;
+    
+    // 1. Group login logs by email for the selectedYear (Bangkok calendar)
+    const visitCountsByEmail: Record<string, { count: number; lastLogin: string; avatarUrl?: string; displayName?: string }> = {};
+    loginLogs.forEach((log) => {
+      if (!log.email) return;
+      const email = log.email.toLowerCase().trim();
+      const parts = log.loginTimestamp ? getBangkokDateParts(log.loginTimestamp) : null;
+      if (parts && parts.year === yr) {
+        if (!visitCountsByEmail[email]) {
+          visitCountsByEmail[email] = {
+            count: 1,
+            lastLogin: log.loginTimestamp,
+            avatarUrl: log.avatarUrl || '',
+            displayName: log.displayName || '',
+          };
+        } else {
+          visitCountsByEmail[email].count++;
+          if (new Date(log.loginTimestamp) > new Date(visitCountsByEmail[email].lastLogin)) {
+            visitCountsByEmail[email].lastLogin = log.loginTimestamp;
+            if (log.avatarUrl) visitCountsByEmail[email].avatarUrl = log.avatarUrl;
+          }
+        }
+      }
+    });
 
-    // 1. Gather all unique emails from profiles, teacher summaries, facilities, and privileges
+    // 2. Gather all unique emails from logs, profiles, teacher summaries, facilities, and privileges
     const allEmails = new Set<string>();
+    Object.keys(visitCountsByEmail).forEach((e) => allEmails.add(e));
     Object.keys(userProfilesMap).forEach((e) => allEmails.add(e.toLowerCase().trim()));
     teacherSummaries.forEach((t) => {
       if (t.email) allEmails.add(t.email.toLowerCase().trim());
@@ -937,20 +966,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (p.email) allEmails.add(p.email.toLowerCase().trim());
     });
 
-    // 2. Construct candidate list
+    // 3. Construct candidate list
     const candidates = Array.from(allEmails).map((email) => {
       const profile = userProfilesMap[email];
       const summary = teacherSummaries.find((t) => t.email?.toLowerCase().trim() === email);
       const priv = privilegeSummaries.find((p) => p.email?.toLowerCase().trim() === email);
-
+      const visitData = visitCountsByEmail[email] || { count: 0, lastLogin: '' };
+      
       // Determine real full name (เฉพาะชื่อ-นามสกุลจริงเท่านั้น)
-      const rawName = profile?.fullName || summary?.teacherName || priv?.name || profile?.displayName || '';
+      const rawName = profile?.fullName || summary?.teacherName || priv?.name || profile?.displayName || visitData.displayName || '';
       const realName = getCleanRealName(rawName, email);
-
+      
       const profileViews = profile?.stats?.totalViews || 0;
-      const yearStatViews = profile?.stats?.yearlyStats?.[yrStr];
-      const visits = typeof yearStatViews === 'number'
-        ? yearStatViews
+      const visits = visitData.count > 0
+        ? visitData.count
         : (isCurrentSelectedYear && profileViews > 0 ? profileViews : 0);
       const isEligible = visits >= 100;
       const progressPercent = Math.min(100, Math.round((visits / 100) * 100));
@@ -958,6 +987,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       const resolvedCandAvatar = resolveDisplayAvatarUrl({
         customPhotoUrl: profile?.photoURL,
         firestoreAvatarUrl: profile?.avatarUrl,
+        localCachedAvatarUrl: visitData.avatarUrl,
         fallbackSeedName: realName || email,
         size: 128,
       });
@@ -971,7 +1001,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         visits,
         isEligible,
         progressPercent,
-        lastLogin: profile?.updatedAt || '',
+        lastLogin: visitData.lastLogin,
       };
     });
 
@@ -981,7 +1011,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       if (!a.isEligible && b.isEligible) return 1;
       return b.visits - a.visits;
     });
-  }, [userProfilesMap, teacherSummaries, facilities, privilegeSummaries, selectedYear]);
+  }, [loginLogs, userProfilesMap, teacherSummaries, facilities, privilegeSummaries, selectedYear]);
 
   // Filtered certificate candidates based on status and search query
   const filteredCertificateCandidates = useMemo(() => {
@@ -1112,10 +1142,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Yearly Stats calculation (computed from user_profiles, innovations, and facilities — zero login_logs reads)
+  // Yearly Stats calculation
   const yearlyStats = useMemo(() => {
     const targetYear = parseInt(selectedYear) || 2026;
-    const targetYearStr = String(targetYear);
 
     const yearInnovations = innovations.filter(i => {
       const d = new Date(i.submittedAt);
@@ -1127,17 +1156,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       return !isNaN(d.getTime()) && d.getFullYear() === targetYear;
     });
 
-    let totalYearVisits = 0;
-    let uniqueVisitorCount = 0;
-    Object.values(userProfilesMap).forEach((prof) => {
-      const yrViews = typeof prof?.stats?.yearlyStats?.[targetYearStr] === 'number'
-        ? prof.stats.yearlyStats[targetYearStr]
-        : (targetYear === CURRENT_CALENDAR_YEAR ? (prof?.stats?.totalViews || 0) : 0);
-      if (yrViews > 0) {
-        totalYearVisits += yrViews;
-        uniqueVisitorCount += 1;
-      }
+    const yearLogs = loginLogs.filter(l => {
+      const parts = l.loginTimestamp ? getBangkokDateParts(l.loginTimestamp) : null;
+      return Boolean(parts && parts.year === targetYear);
     });
+
+    const uniqueVisitorEmails = new Set(yearLogs.map(l => l.email.trim().toLowerCase())).size;
 
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
@@ -1145,15 +1169,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     ];
 
     const monthlyBreakdown = monthNames.map((name, idx) => {
-      const monthPaddedKey = `${targetYear}-${String(idx + 1).padStart(2, '0')}`;
-      const monthShortKey = `${targetYear}-${idx + 1}`;
-      let visits = 0;
-      Object.values(userProfilesMap).forEach((prof) => {
-        const mStats = prof?.stats?.monthlyStats;
-        if (mStats) {
-          visits += Number(mStats[monthPaddedKey] ?? mStats[monthShortKey] ?? 0);
-        }
-      });
+      const visits = yearLogs.filter(l => {
+        const parts = getBangkokDateParts(l.loginTimestamp);
+        return parts ? parts.monthIndex === idx : false;
+      }).length;
       const mediaCount = yearInnovations.filter(i => {
         const d = new Date(i.submittedAt);
         return !isNaN(d.getTime()) && d.getMonth() === idx;
@@ -1174,6 +1193,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
 
     // Compute total unique registered user accounts across system
     const allSystemAccounts = new Set<string>();
+    loginLogs.forEach(l => {
+      if (l.email) allSystemAccounts.add(l.email.trim().toLowerCase());
+    });
     Object.keys(userProfilesMap).forEach(e => {
       if (e) allSystemAccounts.add(e.trim().toLowerCase());
     });
@@ -1186,18 +1208,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     privilegeSummaries.forEach(p => {
       if (p.email) allSystemAccounts.add(p.email.trim().toLowerCase());
     });
-    const totalAccountsCount = Math.max(allSystemAccounts.size, serverStats.totalUsersCount || 0);
+    const totalAccountsCount = allSystemAccounts.size;
 
     return {
       targetYear,
-      totalVisits: totalYearVisits,
-      uniqueVisitors: uniqueVisitorCount,
+      totalVisits: yearLogs.length,
+      uniqueVisitors: uniqueVisitorEmails,
       totalAccounts: totalAccountsCount,
       totalMedia: yearInnovations.length,
       totalFacilities: yearFacilities.length,
       monthlyBreakdown,
     };
-  }, [innovations, facilities, userProfilesMap, teacherSummaries, privilegeSummaries, serverStats.totalUsersCount, selectedYear]);
+  }, [innovations, facilities, loginLogs, userProfilesMap, teacherSummaries, privilegeSummaries, selectedYear]);
 
   // Handle Innovation Edit Save
   const handleSaveInnovationEdit = async () => {
@@ -1229,16 +1251,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Handle Innovation Delete (updates local React state directly — zero re-fetching)
+  // Handle Innovation Delete
   const handleDeleteInnovation = async () => {
     if (!deletingInnovationId) return;
-    const deletedId = deletingInnovationId;
     setIsDeletingInnovation(true);
-    const res = await deleteInnovationSubmission(deletedId, userEmail);
+    const res = await deleteInnovationSubmission(deletingInnovationId, userEmail);
     setIsDeletingInnovation(false);
     if (res.success) {
-      setInnovations((prev) => prev.filter((item) => item.id !== deletedId));
-      setTeacherMedia((prev) => prev.filter((w) => w.id !== `work_${deletedId}` && w.id !== deletedId));
       showToast('ลบข้อมูลสื่อออกจากระบบสำเร็จ');
       setDeletingInnovationId(null);
       setDeletingInnovationTitle('');
@@ -1273,15 +1292,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
     }
   };
 
-  // Handle Facility Delete (updates local React state directly — zero re-fetching)
+  // Handle Facility Delete
   const handleDeleteFacility = async () => {
     if (!deletingFacilityId) return;
-    const deletedId = deletingFacilityId;
     setIsDeletingFacility(true);
-    const res = await deleteFacilitySubmission(deletedId, userEmail);
+    const res = await deleteFacilitySubmission(deletingFacilityId, userEmail);
     setIsDeletingFacility(false);
     if (res.success) {
-      setFacilities((prev) => prev.filter((fac) => fac.id !== deletedId));
       showToast('ลบข้อมูลบันทึกแหล่งเรียนรู้ออกจากระบบสำเร็จ');
       setDeletingFacilityId(null);
       setDeletingFacilityTitle('');
@@ -1386,6 +1403,77 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
       setBanner2Title('พระราชดำรัสเกี่ยวกับการใช้ปัญญาประดิษฐ์ (AI)');
       setBannerStatusMsg('รีเซ็ตภาพป๊อปอัปกลับเป็นค่าเริ่มต้นเรียบร้อย');
       showToast('รีเซ็ตภาพป๊อปอัปเรียบร้อย');
+    }
+  };
+
+  // Visitor Logs Copy / Download
+  const handleCopyVisitorLogsTSV = async () => {
+    const tsv = generateLoginLogsTSV(filteredLoginLogs);
+    const ok = await copyToClipboard(tsv);
+    if (ok) {
+      showToast('คัดลอกสถิติผู้เข้าชมสำเร็จ! วางลง Google Sheets ได้ทันที (Ctrl+V)');
+    } else {
+      alert('ไม่สามารถคัดลอกได้อัตโนมัติ กรุณาดาวน์โหลดเป็น CSV แทน');
+    }
+  };
+
+  // Reset ONLY Admin's own visitor login logs to 0 (preserves all other users)
+  const handleResetAdminVisitorLogs = async () => {
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAdminLoginLogs(SUPER_ADMIN_EMAIL);
+      if (res.success) {
+        const normAdmin = SUPER_ADMIN_EMAIL.toLowerCase().trim();
+        setLoginLogs((prev) => prev.filter((l) => (l.email || '').trim().toLowerCase() !== normAdmin));
+        setUserProfilesMap((prev) => {
+          const cur = prev[normAdmin];
+          if (!cur) return prev;
+          return {
+            ...prev,
+            [normAdmin]: {
+              ...cur,
+              stats: { ...cur.stats, totalViews: 0, uniqueVisitors: 0 },
+            },
+          };
+        });
+        setShowResetConfirmModal(false);
+        showToast(`รีเซ็ตสถิติการเข้าชมของ Admin (${SUPER_ADMIN_EMAIL}) เป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
+    }
+  };
+
+  // Reset ALL visitor login logs (Admin + every user in system) to 0
+  const handleResetVisitorLogs = async () => {
+    setIsResettingLogs(true);
+    try {
+      const res = await resetAllLoginLogs();
+      if (res.success) {
+        setLoginLogs([]);
+        setUserProfilesMap((prev) => {
+          const next: Record<string, FullUserProfile> = {};
+          Object.entries(prev).forEach(([k, prof]) => {
+            next[k] = {
+              ...prof,
+              stats: { ...prof.stats, totalViews: 0, uniqueVisitors: 0 },
+            };
+          });
+          return next;
+        });
+        setShowResetConfirmModal(false);
+        showToast(`รีเซ็ตสถิติผู้เข้าชมทุกคนในระบบเป็น 0 เรียบร้อยแล้ว (ลบประวัติเดิม ${res.count} รายการ)`);
+      } else {
+        alert(res.error || 'เกิดข้อผิดพลาดในการรีเซ็ต');
+      }
+    } catch (err: any) {
+      alert('เกิดข้อผิดพลาด: ' + (err?.message || 'ไม่สามารถรีเซ็ตได้'));
+    } finally {
+      setIsResettingLogs(false);
     }
   };
 
@@ -1522,18 +1610,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             <button
               type="button"
               onClick={handleRefreshAllAdminData}
-              disabled={isRefreshingAll || refreshAllCooldownSec > 0}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isRefreshingAll}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
               title="ดึงข้อมูลล่าสุดจากฐานข้อมูล"
             >
               <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${isRefreshingAll ? 'animate-spin' : ''}`} />
-              <span>
-                {isRefreshingAll
-                  ? 'กำลังซิงค์...'
-                  : refreshAllCooldownSec > 0
-                  ? `ซิงค์ได้ใน ${refreshAllCooldownSec}ว`
-                  : 'รีเฟรชข้อมูล'}
-              </span>
+              <span>รีเฟรชข้อมูล</span>
             </button>
 
             <button
@@ -1561,6 +1643,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
           >
             <BarChart3 className="w-3.5 h-3.5" />
             <span>สถิติและสรุปประจำปี</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('visitors')}
+            className={`px-3.5 py-2 rounded-xl font-semibold flex items-center gap-1.5 whitespace-nowrap transition-all cursor-pointer ${
+              activeTab === 'visitors'
+                ? 'bg-blue-600 text-white shadow-md'
+                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>สถิติผู้เข้าชม ({loginLogs.length})</span>
           </button>
 
           <button
@@ -1605,7 +1700,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Layers className="w-3.5 h-3.5" />
-            <span>ข้อมูลการส่งสื่อ 5 ชิ้น ({stats.totalSubmissions})</span>
+            <span>ข้อมูลการส่งสื่อ 5 ชิ้น ({innovations.length})</span>
           </button>
 
           <button
@@ -1618,7 +1713,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <Users className="w-3.5 h-3.5" />
-            <span>สรุปรายชื่อครู ({stats.totalTeachers})</span>
+            <span>สรุปรายชื่อครู ({teacherSummaries.length})</span>
           </button>
 
           <button
@@ -1631,7 +1726,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
             }`}
           >
             <School className="w-3.5 h-3.5" />
-            <span>บันทึกแหล่งเรียนรู้ 33 แหล่ง ({stats.totalFacilities})</span>
+            <span>บันทึกแหล่งเรียนรู้ 33 แหล่ง ({facilities.length})</span>
           </button>
 
           <button
@@ -1972,6 +2067,320 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
             </div>
 
+          </div>
+        )}
+
+        {/* =========================================================================
+            TAB: ตารางสถิติผู้เข้าชมระบบ (Visitor Logs Table)
+           ========================================================================= */}
+        {activeTab === 'visitors' && (
+          <div className="space-y-4">
+            <div className="p-4 rounded-2xl bg-slate-900 border border-slate-800 flex flex-col lg:flex-row items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Clock className="w-4 h-4 text-blue-400" />
+                  <span>สถิติผู้เข้าชมระบบ (Visitor Statistics & Logs)</span>
+                  <span className="px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 text-[10px] font-semibold">
+                    {visitorYear === 'all' ? 'ทุกปี' : `พ.ศ. ${parseInt(visitorYear) + 543}`}: {filteredLoginLogs.length} รายการ
+                  </span>
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  บันทึกประวัติการเข้าใช้งานจริงตามอีเมล Google SSO สามารถกรองดูแยกตามปีได้ล่วงหน้า 10 ปี
+                </p>
+              </div>
+
+              <div className="flex items-center gap-2 w-full lg:w-auto justify-end flex-wrap">
+                {/* Year Dropdown Filter */}
+                <div className="flex items-center gap-1.5 bg-slate-800 px-3 py-1.5 rounded-xl border border-slate-700">
+                  <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                  <span className="text-xs text-slate-300">ปีที่เข้าชม:</span>
+                  <select
+                    value={visitorYear}
+                    onChange={(e) => setVisitorYear(e.target.value)}
+                    className="bg-transparent text-xs text-blue-300 font-bold focus:outline-none cursor-pointer"
+                  >
+                    <option value="all" className="bg-slate-900 text-white">ทุกปีการศึกษา (ทั้งหมด)</option>
+                    {ADVANCE_YEAR_OPTIONS.map((opt) => (
+                      <option key={opt.value} value={opt.value} className="bg-slate-900 text-white">
+                        {opt.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="relative flex-grow sm:flex-grow-0 sm:w-60">
+                  <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+                  <input
+                    type="text"
+                    value={visitorSearchTerm}
+                    onChange={(e) => setVisitorSearchTerm(e.target.value)}
+                    placeholder="ค้นหาอีเมล หรือชื่อผู้ใช้..."
+                    className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-slate-800 border border-slate-700 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleRefreshLoginLogs}
+                  disabled={isRefreshingLogs}
+                  className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                  title="ดึงประวัติการเข้าชมล่าสุด 30 รายการจากฐานข้อมูล"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingLogs ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช (30 ล่าสุด)</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleCopyVisitorLogsTSV}
+                  className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                  title="คัดลอกข้อมูลสถิติผู้เข้าชมเพื่อนำไปวางลง Google Sheets"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>คัดลอกลง Google Sheets</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => downloadFile(`ACU_สถิติผู้เข้าชมระบบ_${visitorYear === 'all' ? 'ทุกปี' : visitorYear}.csv`, generateLoginLogsCSV(filteredLoginLogs))}
+                  className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="ดาวน์โหลดไฟล์สถิติ CSV"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>ส่งออก CSV</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowResetConfirmModal(true)}
+                  className="px-3 py-1.5 rounded-xl bg-red-600/20 hover:bg-red-600/30 text-red-300 border border-red-500/30 text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="รีเซ็ตสถิติผู้เข้าชมทั้งหมดเป็น 0 เพื่อเริ่มนับใหม่ตามจริง"
+                >
+                  <RotateCcw className="w-3.5 h-3.5 text-red-400" />
+                  <span>รีเซ็ตสถิติเป็น 0</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick Year Pill Filter Bar */}
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-1 scrollbar-thin text-xs">
+              <span className="text-slate-400 font-medium whitespace-nowrap flex items-center gap-1 mr-1">
+                <Calendar className="w-3.5 h-3.5 text-blue-400" />
+                <span>แยกข้อมูลตามปี:</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => setVisitorYear('all')}
+                className={`px-3 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer ${
+                  visitorYear === 'all'
+                    ? 'bg-blue-600 text-white shadow-md'
+                    : 'bg-slate-800 text-slate-400 hover:text-white'
+                }`}
+              >
+                ทุกปี ({loginLogs.length})
+              </button>
+              {ADVANCE_YEAR_OPTIONS.map((opt) => {
+                const count = visitorYearlyBreakdown[opt.value] || 0;
+                const isSelected = visitorYear === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    onClick={() => setVisitorYear(opt.value)}
+                    className={`px-2.5 py-1 rounded-xl text-xs font-semibold whitespace-nowrap transition-all cursor-pointer flex items-center gap-1.5 ${
+                      isSelected
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : count > 0
+                        ? 'bg-slate-800 text-blue-300 border border-blue-500/30 hover:bg-slate-700'
+                        : 'bg-slate-900 text-slate-500 hover:text-slate-300 border border-slate-800'
+                    }`}
+                  >
+                    <span>พ.ศ. {opt.buddhistYear}</span>
+                    <span className={`text-[10px] px-1.5 py-0.2 rounded-full ${
+                      isSelected ? 'bg-white/20 text-white' : count > 0 ? 'bg-blue-500/20 text-blue-300 font-bold' : 'bg-slate-800 text-slate-500'
+                    }`}>
+                      {count}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {/* Quick KPI Stat Cards for Visitor Filter */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ยอดเข้าชมทั้งหมด</span>
+                <p className="text-xl font-bold text-blue-400 mt-0.5">{filteredLoginLogs.length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">{visitorYear === 'all' ? 'ทุกปีสะสม' : `ปี พ.ศ. ${parseInt(visitorYear) + 543}`}</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ผู้ใช้งานไม่ซ้ำ (Unique)</span>
+                <p className="text-xl font-bold text-teal-400 mt-0.5">{new Set(filteredLoginLogs.map(l => l.email.trim().toLowerCase())).size} <span className="text-xs font-normal text-slate-400">ท่าน</span></p>
+                <span className="text-[10px] text-slate-500">บัญชี Google SSO</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ผู้ดูแลระบบ (Admin)</span>
+                <p className="text-xl font-bold text-indigo-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">Super Admin</span>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-900 border border-slate-800">
+                <span className="text-[11px] text-slate-400">ครูและบุคลากร</span>
+                <p className="text-xl font-bold text-emerald-400 mt-0.5">{filteredLoginLogs.filter(l => l.email.trim().toLowerCase() !== SUPER_ADMIN_EMAIL.toLowerCase()).length} <span className="text-xs font-normal text-slate-400">ครั้ง</span></p>
+                <span className="text-[10px] text-slate-500">ผู้ใช้งานทั่วไป</span>
+              </div>
+            </div>
+
+            {/* Visitors Table */}
+            <div className="rounded-2xl bg-slate-900 border border-slate-800 overflow-hidden shadow-xl">
+              <div className="overflow-x-auto max-h-[600px] scrollbar-thin">
+                <table className="w-full text-left text-xs text-slate-300">
+                  <thead className="bg-slate-800/90 text-slate-400 font-semibold border-b border-slate-700 sticky top-0 z-10 backdrop-blur-sm">
+                    <tr>
+                      <th className="py-3 px-3.5 text-center w-12">ลำดับ</th>
+                      <th className="py-3 px-3.5">รูปโปรไฟล์</th>
+                      <th className="py-3 px-3.5">อีเมลผู้ใช้งาน (Google Account)</th>
+                      <th className="py-3 px-3.5">ชื่อ-นามสกุล / ชื่อผู้ใช้</th>
+                      <th className="py-3 px-3.5 text-center">บทบาท</th>
+                      <th className="py-3 px-3.5 text-center">วิธีเข้าสู่ระบบ</th>
+                      <th className="py-3 px-3.5 text-center">วันเดือนปี (พ.ศ.)</th>
+                      <th className="py-3 px-3.5 text-center">เวลา</th>
+                      <th className="py-3 px-3.5 text-center">สถานะ</th>
+                      <th className="py-3 px-3.5 text-center">จัดการบัญชี (เฉพาะ Admin)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {filteredLoginLogs.length === 0 ? (
+                      <tr>
+                        <td colSpan={9} className="py-12 text-center text-slate-500">
+                          {visitorSearchTerm ? 'ไม่พบข้อมูลที่ตรงกับคำค้นหา' : 'ยังไม่มีประวัติการเข้าชมระบบที่บันทึกไว้'}
+                        </td>
+                      </tr>
+                    ) : (
+                      filteredLoginLogs.map((log, index) => {
+                        const dateObj = new Date(log.loginTimestamp);
+                        const dateStr = isNaN(dateObj.getTime())
+                          ? '-'
+                          : dateObj.toLocaleDateString('th-TH', { day: '2-digit', month: 'short', year: 'numeric' });
+                        const timeStr = isNaN(dateObj.getTime())
+                          ? '-'
+                          : dateObj.toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+
+                        const isSuper = log.email.trim().toLowerCase() === SUPER_ADMIN_EMAIL.toLowerCase();
+
+                        const normEmail = log.email.trim().toLowerCase();
+                        const profileObj = userProfilesMap[normEmail];
+                        const userAvatar = resolveDisplayAvatarUrl({
+                          customPhotoUrl: profileObj?.photoURL,
+                          firestoreAvatarUrl: profileObj?.avatarUrl,
+                          localCachedAvatarUrl: sanitizeAvatarUrl(log.avatarUrl),
+                          fallbackSeedName: profileObj?.fullName || log.displayName || log.email.split('@')[0],
+                          size: 128,
+                        });
+
+                        return (
+                          <tr key={log.id || index} className="hover:bg-slate-800/40 transition-colors">
+                            <td className="py-3 px-3.5 text-center text-slate-400">{index + 1}</td>
+                            <td className="py-3 px-3.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => setViewUserProfileTarget({
+                                  email: log.email,
+                                  name: profileObj?.fullName || log.displayName,
+                                  avatarUrl: userAvatar,
+                                })}
+                                className="relative group inline-block focus:outline-none"
+                                title="คลิกเพื่อดูรูปโปรไฟล์และประวัติข้อมูลส่วนตัวของผู้ใช้งานนี้"
+                              >
+                                <img
+                                  src={userAvatar}
+                                  alt={log.displayName}
+                                  className="w-10 h-10 rounded-full object-cover border-2 border-slate-700 group-hover:border-sky-400 group-hover:scale-110 transition-all shadow-md bg-slate-800 cursor-pointer"
+                                  onError={(e) => {
+                                    const el = e.target as HTMLImageElement;
+                                    const fallback = buildFallbackAvatarUrl(profileObj?.fullName || log.displayName || log.email.split('@')[0], 128);
+                                    if (el.src !== fallback) el.src = fallback;
+                                  }}
+                                />
+                                <span className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full bg-blue-600 border border-slate-900 flex items-center justify-center text-white text-[9px] group-hover:bg-sky-400">
+                                  <Eye className="w-2.5 h-2.5" />
+                                </span>
+                              </button>
+                            </td>
+                            <td className="py-3 px-3.5 font-mono text-sky-300 font-medium">
+                              <button
+                                type="button"
+                                onClick={() => setViewUserProfileTarget({
+                                  email: log.email,
+                                  name: profileObj?.fullName || log.displayName,
+                                  avatarUrl: userAvatar,
+                                })}
+                                className="hover:underline text-left cursor-pointer"
+                                title="คลิกเพื่อดูโปรไฟล์ผู้ใช้งาน"
+                              >
+                                {log.email}
+                              </button>
+                            </td>
+                            <td className="py-3 px-3.5 text-white font-medium">
+                              <div className="flex items-center gap-1.5">
+                                <span>{log.displayName}</span>
+                                {profileObj?.nickname && (
+                                  <span className="text-[11px] text-sky-300">({profileObj.nickname})</span>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-3 px-3.5 text-center">
+                              <span className="px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 text-[11px]">
+                                {log.role === 'teacher' ? 'ครูผู้สอน' : log.role === 'student' ? 'นักเรียน' : 'ผู้ใช้งาน'}
+                              </span>
+                            </td>
+                            <td className="py-3 px-3.5 text-center text-slate-400 text-[11px]">{log.loginMethod}</td>
+                            <td className="py-3 px-3.5 text-center text-slate-300 whitespace-nowrap">{dateStr}</td>
+                            <td className="py-3 px-3.5 text-center font-mono text-slate-300 whitespace-nowrap">{timeStr}</td>
+                            <td className="py-3 px-3.5 text-center">
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[10px] font-semibold border border-emerald-500/30">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                                <span>เข้าสู่ระบบ</span>
+                              </span>
+                            </td>
+                            <td className="py-3 px-3.5 text-center">
+                              <div className="inline-flex items-center justify-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => setViewUserProfileTarget({
+                                    email: log.email,
+                                    name: profileObj?.fullName || log.displayName,
+                                    avatarUrl: userAvatar,
+                                  })}
+                                  className="px-2.5 py-1 rounded-lg text-xs font-bold bg-sky-600/20 hover:bg-sky-600 border border-sky-500/40 text-sky-300 hover:text-white transition-all inline-flex items-center gap-1 cursor-pointer"
+                                  title={`ดูโปรไฟล์ของ ${log.email}`}
+                                >
+                                  <Eye className="w-3 h-3" />
+                                  <span>ดูโปรไฟล์</span>
+                                </button>
+                                {isSuper ? (
+                                  <span className="text-[10px] text-amber-400/80 font-medium">บัญชีหลัก</span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDirectDeleteUser(log.email, log.displayName)}
+                                    disabled={isDeletingUserDirect}
+                                    className="px-2.5 py-1 rounded-lg text-xs font-bold bg-red-600/15 hover:bg-red-600 border border-red-500/40 hover:border-red-600 text-red-300 hover:text-white transition-all shadow-xs inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                    title={`ลบบัญชี ${log.email} ออกจากระบบถาวร`}
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                    <span>ลบบัญชี</span>
+                                  </button>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           </div>
         )}
 
@@ -2988,7 +3397,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                     : 'bg-slate-800 text-slate-400 hover:text-white'
                 }`}
               >
-                ทุกกลุ่มสาระ ({stats.totalSubmissions})
+                ทุกกลุ่มสาระ ({innovations.length})
               </button>
               {SUBJECT_GROUPS.map((sg) => {
                 const count = innovations.filter(i => (i.subjectGroup || 'กลุ่มสาระการเรียนรู้คณิตศาสตร์') === sg).length;
@@ -3223,20 +3632,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
               </div>
             </div>
 
-            {innovPagination.hasMore && (
-              <div className="flex justify-center pt-2">
-                <button
-                  type="button"
-                  onClick={() => Promise.all([loadMoreInnovations(), loadMoreTeacherMedia()])}
-                  disabled={innovPagination.isLoadingMore}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg transition-all cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${innovPagination.isLoadingMore ? 'animate-spin' : ''}`} />
-                  <span>{innovPagination.isLoadingMore ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (30 รายการถัดไป)'}</span>
-                </button>
-              </div>
-            )}
-
           </div>
         )}
 
@@ -3443,20 +3838,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
                 </table>
               </div>
             </div>
-
-            {innovPagination.hasMore && (
-              <div className="flex justify-center pt-2">
-                <button
-                  type="button"
-                  onClick={() => Promise.all([loadMoreInnovations(), loadMoreTeacherMedia()])}
-                  disabled={innovPagination.isLoadingMore}
-                  className="px-5 py-2.5 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg transition-all cursor-pointer disabled:opacity-50"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${innovPagination.isLoadingMore ? 'animate-spin' : ''}`} />
-                  <span>{innovPagination.isLoadingMore ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (ข้อมูลครูชุดถัดไป)'}</span>
-                </button>
-              </div>
-            )}
           </div>
         )}
 
@@ -4661,6 +5042,71 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         </div>
       )}
 
+      {/* =========================================================================
+          Reset Visitor Logs Confirmation Modal (Admin Self or All Users)
+         ========================================================================= */}
+      {showResetConfirmModal && (
+        <div
+          className="fixed inset-0 z-[170] flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-200"
+          onClick={() => !isResettingLogs && setShowResetConfirmModal(false)}
+        >
+          <div
+            className="relative w-full max-w-lg bg-slate-900 border border-red-500/40 rounded-3xl p-6 shadow-2xl text-white space-y-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-red-500/20 text-red-300 border border-red-500/30 flex items-center justify-center flex-shrink-0">
+                <RotateCcw className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-white">รีเซ็ตสถิติการเข้าชมเป็น 0</h3>
+                <p className="text-xs text-slate-400">เลือกขอบเขตการรีเซ็ต (ไม่กระทบข้อมูลสื่อและผลงานอื่น)</p>
+              </div>
+            </div>
+
+            <div className="p-4 rounded-2xl bg-slate-800/70 border border-slate-700/70 text-xs text-slate-300 space-y-2">
+              <p className="font-semibold text-amber-300 flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 text-amber-400" />
+                <span>โปรดเลือกการดำเนินการ (ไม่สามารถย้อนกลับประวัติการเข้าชมได้)</span>
+              </p>
+              <ul className="list-disc list-inside space-y-1 text-slate-300/90 pl-1 text-[11px]">
+                <li><strong>รีเซ็ตเฉพาะของ Admin (ฉัน)</strong>: ล้างสถิติการเข้าชมเฉพาะของ {SUPER_ADMIN_EMAIL} เป็น 0 โดยคงสถิติของคนอื่นไว้ตามเดิม</li>
+                <li><strong>รีเซ็ตทุกคนในระบบ</strong>: ล้างสถิติการเข้าชมของทั้ง Admin และผู้ใช้งานทุกคนในระบบเป็น 0 เพื่อเริ่มนับใหม่ทีละ 1</li>
+              </ul>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center justify-end gap-2">
+              <button
+                type="button"
+                disabled={isResettingLogs}
+                onClick={() => setShowResetConfirmModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-medium transition-colors cursor-pointer disabled:opacity-50"
+              >
+                ยกเลิก
+              </button>
+              <button
+                type="button"
+                onClick={handleResetAdminVisitorLogs}
+                disabled={isResettingLogs}
+                className="px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                <span>รีเซ็ตเฉพาะของฉัน (Admin) เป็น 0</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleResetVisitorLogs}
+                disabled={isResettingLogs}
+                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 shadow-md shadow-red-900/30"
+              >
+                <RotateCcw className={`w-3.5 h-3.5 ${isResettingLogs ? 'animate-spin' : ''}`} />
+                <span>{isResettingLogs ? 'กำลังรีเซ็ต...' : 'รีเซ็ตทุกคนในระบบเป็น 0'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Online Certificate Modal (สำหรับแอดมินตรวจสอบและสั่งพิมพ์เกียรติบัตร) */}
       {certificateTargetUser && (
         <OnlineCertificateModal
@@ -4692,21 +5138,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         isOpen={showUserManagementModal}
         onClose={() => setShowUserManagementModal(false)}
         userProfilesMap={userProfilesMap}
-        loginLogs={[]}
+        loginLogs={loginLogs}
         innovations={innovations}
         teacherMedia={teacherMedia}
         facilities={facilities}
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
-          const norm = deletedEmail.trim().toLowerCase();
-          setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
-          setTeacherMedia((prev) => prev.filter((m) => (m.submittedByEmail || m.userEmail || '').trim().toLowerCase() !== norm));
-          setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
-          setUserProfilesMap((prev) => {
-            const next = { ...prev };
-            delete next[norm];
-            return next;
-          });
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
         }}
         onOpenEmailAudit={() => {
@@ -4725,15 +5162,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ userEmail, onBac
         onClose={() => setShowEmailAuditModal(false)}
         adminEmail={SUPER_ADMIN_EMAIL}
         onUserDeleted={(deletedEmail) => {
-          const norm = deletedEmail.trim().toLowerCase();
-          setInnovations((prev) => prev.filter((i) => (i.userEmail || '').trim().toLowerCase() !== norm));
-          setTeacherMedia((prev) => prev.filter((m) => (m.submittedByEmail || m.userEmail || '').trim().toLowerCase() !== norm));
-          setFacilities((prev) => prev.filter((f) => (f.userEmail || '').trim().toLowerCase() !== norm));
-          setUserProfilesMap((prev) => {
-            const next = { ...prev };
-            delete next[norm];
-            return next;
-          });
           showToast(`ลบบัญชี ${deletedEmail} ออกจากทุกฐานข้อมูลสำเร็จเรียบร้อย`);
         }}
         onViewUserProfile={(targetEmail) => {

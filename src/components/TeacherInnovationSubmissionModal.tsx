@@ -43,13 +43,7 @@ import {
   isValidActiveMediaRecord,
   doesMediaRecordBelongToTeacher,
   extractMediaEmails,
-  getUnifiedTeacherMediaRecords,
-  fetchUserOwnMediaOnce,
-  subscribeInnovationsPagination,
-  loadMoreInnovations,
-  PaginationState,
-  getManualRefreshCooldownSeconds,
-  recordManualRefreshTimestamp
+  getUnifiedTeacherMediaRecords
 } from '../services/submissionService';
 import { resolveUserUid } from '../services/userProfileService';
 
@@ -98,8 +92,6 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
   const [copyNotice, setCopyNotice] = useState(false);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() => getManualRefreshCooldownSeconds('innovations_modal'));
-  const [innovPagination, setInnovPagination] = useState<PaginationState>({ hasMore: false, isLoadingMore: false });
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -115,36 +107,16 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     const unsubMedia = subscribeTeacherMedia((works) => {
       setTeacherMedia(works);
     });
-    const unsubPag = subscribeInnovationsPagination((pag) => {
-      setInnovPagination(pag);
-    });
-    fetchUserOwnMediaOnce(userEmail, false).catch(() => {});
     return () => {
       unsubAll();
       unsubMedia();
-      unsubPag();
     };
   }, [userEmail]);
 
-  useEffect(() => {
-    if (refreshCooldownSec <= 0) return;
-    const timer = setInterval(() => {
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('innovations_modal'));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [refreshCooldownSec]);
-
   const handleRefresh = async () => {
-    if (isRefreshing || refreshCooldownSec > 0) return;
     setIsRefreshing(true);
-    recordManualRefreshTimestamp('innovations_modal');
-    setRefreshCooldownSec(60);
     try {
-      await Promise.all([
-        refreshAllInnovations(true),
-        refreshTeacherMedia(true),
-        fetchUserOwnMediaOnce(userEmail, true),
-      ]);
+      await Promise.all([refreshAllInnovations(true), refreshTeacherMedia(true)]);
       setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
       setTimeout(() => setActionNotice(null), 2500);
     } finally {
@@ -359,8 +331,6 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
     }
     const res = await deleteInnovationSubmission(sub.id, userEmail);
     if (res.success) {
-      setAllSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
-      setTeacherMedia((prev) => prev.filter((w) => w.id !== `work_${sub.id}` && w.id !== sub.id));
       setActionNotice(`ลบสื่อชิ้นที่ ${sub.itemNumber} เรียบร้อยแล้ว`);
       setTimeout(() => setActionNotice(null), 3000);
     } else {
@@ -457,18 +427,12 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing || refreshCooldownSec > 0}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
               title="รีเฟรชข้อมูลการส่งสื่อล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">
-                {isRefreshing
-                  ? 'กำลังซิงค์...'
-                  : refreshCooldownSec > 0
-                  ? `ซิงค์ได้ใน ${refreshCooldownSec}ว`
-                  : 'รีเฟรช'}
-              </span>
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
             <button
               type="button"
@@ -1518,20 +1482,6 @@ export const TeacherInnovationSubmissionModal: React.FC<TeacherInnovationSubmiss
                           </div>
                         </div>
                       ))}
-
-                      {innovPagination.hasMore && (
-                        <div className="pt-2 flex justify-center">
-                          <button
-                            type="button"
-                            onClick={() => loadMoreInnovations()}
-                            disabled={innovPagination.isLoadingMore}
-                            className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold flex items-center gap-2 shadow-md transition-all cursor-pointer disabled:opacity-50"
-                          >
-                            <RefreshCw className={`w-3.5 h-3.5 ${innovPagination.isLoadingMore ? 'animate-spin' : ''}`} />
-                            <span>{innovPagination.isLoadingMore ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (30 รายการถัดไป)'}</span>
-                          </button>
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>

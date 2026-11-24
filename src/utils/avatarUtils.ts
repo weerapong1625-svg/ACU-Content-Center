@@ -1,9 +1,8 @@
 import { auth } from '../firebase';
 
-export const MAX_AVATAR_DIM = 150;
-export const DEFAULT_AVATAR_QUALITY = 0.65;
-export const TARGET_AVATAR_BYTES = 15 * 1024; // ~15KB target per user (180 teachers < 4MB total)
-export const MAX_AVATAR_BYTES = 18 * 1024; // Strictly under 18KB
+export const MAX_AVATAR_DIM = 200;
+export const DEFAULT_AVATAR_QUALITY = 0.75;
+export const MAX_AVATAR_BYTES = 80 * 1024; // Strictly under 80KB
 
 /**
  * Returns true if the URL is a temporary browser blob: URL (never persist or render across devices)
@@ -129,28 +128,9 @@ export function getDataUrlByteLength(dataUrl: string): number {
 }
 
 /**
- * Encode canvas into the smallest compact Data URL (WebP if browser supports it and smaller, else JPEG).
- */
-function encodeCompactCanvasDataUrl(canvas: HTMLCanvasElement, quality: number): string {
-  const jpegUrl = canvas.toDataURL('image/jpeg', quality);
-  try {
-    const webpUrl = canvas.toDataURL('image/webp', quality);
-    if (
-      webpUrl.startsWith('data:image/webp') &&
-      getDataUrlByteLength(webpUrl) < getDataUrlByteLength(jpegUrl)
-    ) {
-      return webpUrl;
-    }
-  } catch {
-    // Fallback cleanly to JPEG
-  }
-  return jpegUrl;
-}
-
-/**
  * Compress an uploaded image File on client-side using HTML5 <canvas>:
- * - Max 150x150px (aspect ratio preserved)
- * - WebP/JPEG compressed to ~15KB (strictly under 18KB so 180+ teachers use < 4MB total)
+ * - Max 200x200px (aspect ratio preserved)
+ * - JPEG quality 0.75 (automatically stepped down if needed so Base64 Data URL is strictly < 80KB)
  */
 export function compressAvatarFileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -199,29 +179,29 @@ export function compressAvatarFileToBase64(file: File): Promise<string> {
           ctx.fillStyle = '#ffffff';
           ctx.fillRect(0, 0, width, height);
           ctx.drawImage(img, 0, 0, width, height);
-          return encodeCompactCanvasDataUrl(canvas, quality);
+          return canvas.toDataURL('image/jpeg', quality);
         };
 
         try {
-          // Primary attempt: max 150x150px, WebP/JPEG quality 0.65
+          // Primary attempt: max 200x200px, JPEG quality 0.75
           let dataUrl = tryRender(MAX_AVATAR_DIM, DEFAULT_AVATAR_QUALITY);
 
-          // Step down quality if > ~15KB target
-          const qualitySteps = [0.55, 0.45, 0.35, 0.28];
+          // Step down quality if >= 78KB to guarantee strictly under 80KB Spark Plan budget
+          const qualitySteps = [0.65, 0.55, 0.45, 0.35];
           for (const q of qualitySteps) {
-            if (getDataUrlByteLength(dataUrl) <= TARGET_AVATAR_BYTES) break;
+            if (getDataUrlByteLength(dataUrl) < 78000) break;
             dataUrl = tryRender(MAX_AVATAR_DIM, q);
           }
 
-          // Final dimension fallback if still >= 18KB
-          const dimSteps = [128, 112, 96];
+          // Final dimension fallback if still >= 78KB
+          const dimSteps = [160, 128, 96];
           for (const d of dimSteps) {
-            if (getDataUrlByteLength(dataUrl) <= MAX_AVATAR_BYTES) break;
-            dataUrl = tryRender(d, 0.45);
+            if (getDataUrlByteLength(dataUrl) < 78000) break;
+            dataUrl = tryRender(d, 0.55);
           }
 
           if (getDataUrlByteLength(dataUrl) >= MAX_AVATAR_BYTES) {
-            dataUrl = tryRender(96, 0.32);
+            dataUrl = tryRender(96, 0.4);
           }
 
           resolve(dataUrl);

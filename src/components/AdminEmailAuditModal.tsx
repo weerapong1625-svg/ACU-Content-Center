@@ -86,25 +86,11 @@ export const AdminEmailAuditModal: React.FC<AdminEmailAuditModalProps> = ({
       });
 
       if (res.success) {
-        const normDeleted = targetEmail.trim().toLowerCase();
         if (onUserDeleted) {
           onUserDeleted(targetEmail);
         }
-        // Update auditResult state locally without re-fetching Firestore
-        setAuditResult((prev) => {
-          if (!prev) return prev;
-          const nextEmails = prev.emailsList.filter((e) => e.toLowerCase() !== normDeleted);
-          return {
-            ...prev,
-            emailsList: nextEmails,
-            scannedUniqueEmails: nextEmails.length,
-            discrepancies: prev.discrepancies.filter((d) => d.email.toLowerCase() !== normDeleted),
-            collectionCounts: {
-              ...prev.collectionCounts,
-              userProfiles: Math.max(0, prev.collectionCounts.userProfiles - 1),
-            },
-          };
-        });
+        // Refresh audit report
+        await handleRunAudit();
       } else {
         alert(res.error || 'ไม่สามารถลบบัญชีได้');
       }

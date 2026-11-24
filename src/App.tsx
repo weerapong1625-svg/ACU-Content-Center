@@ -30,7 +30,6 @@ import {
   syncUserAvatarOnAuthOrLogin,
 } from './services/userProfileService';
 import { sanitizeAvatarUrl } from './utils/avatarUtils';
-import { FirestoreDataProvider } from './context/FirestoreDataContext';
 
 export default function App() {
   // Check if session has expired prior to mount
@@ -74,15 +73,9 @@ export default function App() {
     }
   });
 
-  const [isAuthResolved, setIsAuthResolved] = useState<boolean>(false);
-
   // Sync profile picture on Firebase Auth state changes (`onAuthStateChanged`) without overwriting custom Firestore photoURL
   React.useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (firebaseUser) => {
-      setIsAuthResolved(true);
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('acu_auth_ready'));
-      }
       if (firebaseUser?.email) {
         const normEmail = firebaseUser.email.toLowerCase().trim();
         syncUserAvatarOnAuthOrLogin(normEmail, {
@@ -93,19 +86,15 @@ export default function App() {
         }).catch(() => {});
       }
     });
-    const timer = setTimeout(() => setIsAuthResolved(true), 1500);
-    return () => {
-      clearTimeout(timer);
-      unsubscribe();
-    };
+    return () => unsubscribe();
   }, []);
 
-  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated once auth resolves
+  // Flush pending login outbox and ensure user's profile/avatar cache is hydrated if needed
   React.useEffect(() => {
-    if (!loggedInUser || !isAuthResolved) return;
+    if (!loggedInUser) return;
     syncUserAvatarOnAuthOrLogin(loggedInUser, auth.currentUser, false).catch(() => {});
     flushPendingLoginLogs().catch(() => {});
-  }, [loggedInUser, isAuthResolved]);
+  }, [loggedInUser]);
 
   // Unified single-point visit recorder to guarantee consistent logging across devices
   const recordLoginVisit = useCallback((email: string, method: string, isExplicitLogin = false) => {
@@ -204,7 +193,7 @@ export default function App() {
     } catch {
       // ignore
     }
-    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, false).catch(() => {});
+    syncUserAvatarOnAuthOrLogin(normalized, auth.currentUser, true).catch(() => {});
     recordLoginVisit(normalized, loginMethod || 'Direct Login', true);
   };
 
@@ -230,7 +219,7 @@ export default function App() {
   // If user has logged in, show Page 2 (Role Selection Dashboard) with optional timeout warning
   if (loggedInUser) {
     return (
-      <FirestoreDataProvider userEmail={loggedInUser}>
+      <>
         <RoleSelectionDashboard
           userEmail={loggedInUser}
           onLogout={() => handleLogout('manual')}
@@ -242,16 +231,15 @@ export default function App() {
             onLogout={() => handleLogout('manual')}
           />
         )}
-      </FirestoreDataProvider>
+      </>
     );
   }
 
   return (
-    <FirestoreDataProvider userEmail={null}>
-      <div
-        id="main-login-viewport"
-        className="relative min-h-screen w-full flex flex-col justify-between overflow-x-hidden select-none bg-slate-900"
-      >
+    <div
+      id="main-login-viewport"
+      className="relative min-h-screen w-full flex flex-col justify-between overflow-x-hidden select-none bg-slate-900"
+    >
       {/* Background Layer: International Educational Aesthetic */}
       <div className="absolute inset-0 pointer-events-none z-0 overflow-hidden">
         {/* Academic Image Backdrop with 45% Gaussian blur (4.5px) and 45% opacity */}
@@ -446,8 +434,7 @@ export default function App() {
       {sessionTimedOut && (
         <SessionTimeoutModal onClose={() => setSessionTimedOut(false)} />
       )}
-      </div>
-    </FirestoreDataProvider>
+    </div>
   );
 }
 

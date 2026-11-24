@@ -10,13 +10,11 @@ import {
   deleteDoc, 
   writeBatch, 
   query, 
-  where,
   limit
 } from 'firebase/firestore';
 import { updateProfile } from 'firebase/auth';
 import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { removeUserCredential } from './authCredentialService';
-import { adjustServerStatsLocally } from './serverStatsService';
 import {
   isBlobUrl,
   isCustomAvatarUrl,
@@ -1341,7 +1339,7 @@ export async function resetUserProfileVisitStats(
       );
     } else {
       const profilesRef = collection(db, 'user_profiles');
-      const snap = await getDocs(query(profilesRef, limit(200)));
+      const snap = await getDocs(profilesRef);
       const batch = writeBatch(db);
       let count = 0;
       snap.docs.forEach((d) => {
@@ -1428,27 +1426,12 @@ export async function adjustUserSubmissionCount(
 
 // Smart-cached pool for `user_profiles` only (no collection-wide `users` query, no onSnapshot)
 const ALL_USER_PROFILES_CACHE_KEY = 'acu_cached_all_user_profiles_map';
-const ALL_USER_PROFILES_FETCHED_AT_KEY = 'acu_cached_all_user_profiles_fetched_at_v1';
-const USER_PROFILES_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const userProfilesListeners = new Set<(map: Record<string, FullUserProfile>) => void>();
 let sharedUserProfilesMap: Record<string, FullUserProfile> | null = null;
 let latestProfileDocsByEmail: Record<string, any> = {};
 let hasFetchedAllUserProfilesThisSession = false;
 let inFlightAllUserProfilesFetch: Promise<Record<string, FullUserProfile>> | null = null;
 let userProfilesWindowListenersAttached = false;
-
-function isAllUserProfilesCacheFresh(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    const ts = Number(localStorage.getItem(ALL_USER_PROFILES_FETCHED_AT_KEY) || 0);
-    if (!ts || isNaN(ts)) return false;
-    const raw = localStorage.getItem(ALL_USER_PROFILES_CACHE_KEY);
-    if (!raw) return false;
-    return Date.now() - ts < USER_PROFILES_CACHE_TTL_MS;
-  } catch {
-    return false;
-  }
-}
 
 function getStoredAllUserProfilesMap(): Record<string, FullUserProfile> {
   if (typeof window === 'undefined') return {};
@@ -1562,14 +1545,8 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
     ...getAllLocalUserProfilesMap(),
   };
 
-  if (
-    !forceRefresh &&
-    (hasFetchedAllUserProfilesThisSession || isAllUserProfilesCacheFresh())
-  ) {
-    if (!sharedUserProfilesMap && Object.keys(localFallback).length > 0) {
-      broadcastUserProfiles(localFallback);
-    }
-    return sharedUserProfilesMap || localFallback;
+  if (!forceRefresh && hasFetchedAllUserProfilesThisSession && sharedUserProfilesMap) {
+    return sharedUserProfilesMap;
   }
 
   if (!forceRefresh && inFlightAllUserProfilesFetch) {
@@ -1578,7 +1555,7 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
 
   inFlightAllUserProfilesFetch = (async () => {
     try {
-      const colQuery = query(collection(db, 'user_profiles'), limit(100));
+      const colQuery = query(collection(db, 'user_profiles'), limit(500));
       const snapshot = await getDocs(colQuery);
       const nextProfileDocs: Record<string, any> = {};
       snapshot.forEach((docSnap) => {
@@ -1592,11 +1569,6 @@ export async function refreshAllUserProfiles(forceRefresh = true): Promise<Recor
       });
       latestProfileDocsByEmail = nextProfileDocs;
       hasFetchedAllUserProfilesThisSession = true;
-      if (typeof window !== 'undefined') {
-        try {
-          localStorage.setItem(ALL_USER_PROFILES_FETCHED_AT_KEY, String(Date.now()));
-        } catch {}
-      }
       return rebuildAndBroadcastMergedProfiles();
     } catch (err) {
       if (isQuotaExceededError(err)) {
@@ -1782,37 +1754,8 @@ export async function deleteUserAccountCompletely(
             localStorage.setItem('acu_cached_facility_submissions', JSON.stringify(filtered));
           }
         }
-
-        // Purge from cached all user profiles map
-        const cachedProfiles = getStoredAllUserProfilesMap();
-        if (cachedProfiles[normTarget]) {
-          delete cachedProfiles[normTarget];
-          saveStoredAllUserProfilesMap(cachedProfiles);
-        }
-
-        // Purge shared ideas from local cache
-        const rawIdeas = localStorage.getItem('acu_cached_shared_ideas');
-        if (rawIdeas) {
-          const parsed = JSON.parse(rawIdeas);
-          if (Array.isArray(parsed)) {
-            const filtered = parsed.filter((i: any) => (i.creatorEmail || '').toLowerCase().trim() !== normTarget);
-            localStorage.setItem('acu_cached_shared_ideas', JSON.stringify(filtered));
-          }
-        }
-
-        // Purge reward claims from local cache
-        const rawClaims = localStorage.getItem('acu_cached_reward_claims');
-        if (rawClaims) {
-          const parsed = JSON.parse(rawClaims);
-          if (parsed && typeof parsed === 'object' && parsed[normTarget]) {
-            delete parsed[normTarget];
-            localStorage.setItem('acu_cached_reward_claims', JSON.stringify(parsed));
-          }
-        }
       }
-      delete latestProfileDocsByEmail[normTarget];
       removeUserCredential(normTarget);
-      rebuildAndBroadcastMergedProfiles();
     } catch (err) {
       console.warn('Could not clean local storage for user:', err);
     }
@@ -1831,13 +1774,15 @@ export async function deleteUserAccountCompletely(
       console.warn('Direct deleteDoc user_profiles notice:', err);
     }
 
-    // 4. Delete login logs for this user if requested (scoped where + limit)
+    // 4. Delete login logs for this user if requested
     if (options.deleteLogs) {
       try {
-        const logsSnap = await getDocs(
-          query(collection(db, 'login_logs'), where('email', '==', normTarget), limit(50))
-        );
-        const userLogDocs = logsSnap.docs;
+        const logsCol = collection(db, 'login_logs');
+        const logsSnap = await getDocs(logsCol);
+        const userLogDocs = logsSnap.docs.filter((d) => {
+          const email = (d.data().email || d.data().userEmail || '').trim().toLowerCase();
+          return email === normTarget;
+        });
 
         for (let i = 0; i < userLogDocs.length; i += 100) {
           const chunk = userLogDocs.slice(i, i + 100);
@@ -1851,17 +1796,15 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 5. Delete innovation submissions if requested (scoped where + limit(30))
+    // 5. Delete innovation submissions if requested
     if (options.deleteSubmissions) {
       try {
-        const innovSnap = await getDocs(
-          query(
-            collection(db, 'teacher_innovations_submissions'),
-            where('userEmail', '==', normTarget),
-            limit(30)
-          )
-        );
-        const userInnovDocs = innovSnap.docs;
+        const innovCol = collection(db, 'teacher_innovations_submissions');
+        const innovSnap = await getDocs(innovCol);
+        const userInnovDocs = innovSnap.docs.filter((d) => {
+          const email = (d.data().userEmail || d.data().email || d.data().teacherEmail || '').trim().toLowerCase();
+          return email === normTarget;
+        });
 
         for (let i = 0; i < userInnovDocs.length; i += 100) {
           const chunk = userInnovDocs.slice(i, i + 100);
@@ -1875,13 +1818,15 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 6. Delete facility records in system_test_submissions if requested (scoped where + limit(50))
+    // 6. Delete facility records in system_test_submissions if requested
     if (options.deleteFacilities || options.deleteSubmissions) {
       try {
-        const sysSnap = await getDocs(
-          query(collection(db, 'system_test_submissions'), where('userEmail', '==', normTarget), limit(50))
-        );
-        const userSysDocs = sysSnap.docs;
+        const sysCol = collection(db, 'system_test_submissions');
+        const sysSnap = await getDocs(sysCol);
+        const userSysDocs = sysSnap.docs.filter((d) => {
+          const email = (d.data().userEmail || d.data().email || '').trim().toLowerCase();
+          return email === normTarget;
+        });
 
         for (let i = 0; i < userSysDocs.length; i += 100) {
           const chunk = userSysDocs.slice(i, i + 100);
@@ -1895,17 +1840,15 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 7. Delete teacher media repository works if requested (scoped where + limit(30))
+    // 7. Delete teacher media repository works if requested
     if (options.deleteMedia) {
       try {
-        const mediaSnap = await getDocs(
-          query(
-            collection(db, 'teacher_media_repository'),
-            where('submittedByEmail', '==', normTarget),
-            limit(30)
-          )
-        );
-        const userMediaDocs = mediaSnap.docs;
+        const mediaCol = collection(db, 'teacher_media_repository');
+        const mediaSnap = await getDocs(mediaCol);
+        const userMediaDocs = mediaSnap.docs.filter((d) => {
+          const email = (d.data().submittedByEmail || d.data().userEmail || d.data().email || '').trim().toLowerCase();
+          return email === normTarget;
+        });
 
         for (let i = 0; i < userMediaDocs.length; i += 100) {
           const chunk = userMediaDocs.slice(i, i + 100);
@@ -1919,12 +1862,14 @@ export async function deleteUserAccountCompletely(
       }
     }
 
-    // 8. Delete shared ideas if present (scoped where + limit(30))
+    // 8. Delete shared teaching ideas if present
     try {
-      const sharedSnap = await getDocs(
-        query(collection(db, 'shared_ideas'), where('creatorEmail', '==', normTarget), limit(30))
-      );
-      const userSharedDocs = sharedSnap.docs;
+      const sharedCol = collection(db, 'shared_teaching_ideas');
+      const sharedSnap = await getDocs(sharedCol);
+      const userSharedDocs = sharedSnap.docs.filter((d) => {
+        const email = (d.data().authorEmail || d.data().email || d.data().userEmail || '').trim().toLowerCase();
+        return email === normTarget;
+      });
 
       for (let i = 0; i < userSharedDocs.length; i += 100) {
         const chunk = userSharedDocs.slice(i, i + 100);
@@ -1933,25 +1878,16 @@ export async function deleteUserAccountCompletely(
         await batch.commit();
       }
     } catch (err) {
-      console.warn('Could not clean shared ideas:', err);
+      console.warn('Could not clean shared teaching ideas:', err);
     }
 
-    adjustServerStatsLocally({
-      usersDelta: -1,
-      innovationsDelta: -deletedCounts.innovations,
-      teacherMediaDelta: -deletedCounts.teacherMedia,
-      facilitiesDelta: -deletedCounts.facilities,
-    });
-
-    // 9. Dispatch instant update events across all application components (NO collection re-fetching)
+    // 9. Dispatch instant update events across all application components
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent('acu_user_deleted', { detail: { email: normTarget } }));
       window.dispatchEvent(new CustomEvent('acu_login_logs_updated'));
       window.dispatchEvent(new CustomEvent('acu_innovations_changed'));
       window.dispatchEvent(new CustomEvent('acu_teacher_media_changed'));
       window.dispatchEvent(new CustomEvent('acu_facilities_changed'));
-      window.dispatchEvent(new CustomEvent('acu_shared_ideas_changed'));
-      window.dispatchEvent(new CustomEvent('acu_reward_claims_changed'));
     }
 
     return {
@@ -2029,22 +1965,22 @@ export async function auditAndSyncAllDatabaseEmails(adminEmail: string): Promise
   }
 
   try {
-    const safeGetDocs = async (colName: string, maxDocs: number) => {
+    const safeGetDocs = async (colName: string) => {
       try {
-        return await getDocs(query(collection(db, colName), limit(maxDocs)));
+        return await getDocs(collection(db, colName));
       } catch (e) {
         console.warn(`Could not getDocs for ${colName}:`, e);
         return { docs: [], size: 0 } as any;
       }
     };
 
-    // 1. Fetch bounded batches across active collections (login_logs fetch disabled for zero reads)
+    // 1. Fetch all documents across all 5 major collections safely
     const [profilesSnap, logsSnap, innovSnap, sysSnap, mediaSnap] = await Promise.all([
-      safeGetDocs('user_profiles', 100),
-      Promise.resolve({ docs: [], size: 0 } as any), // login_logs fetch disabled
-      safeGetDocs('teacher_innovations_submissions', 30),
-      safeGetDocs('system_test_submissions', 100),
-      safeGetDocs('teacher_media_repository', 30),
+      safeGetDocs('user_profiles'),
+      safeGetDocs('login_logs'),
+      safeGetDocs('teacher_innovations_submissions'),
+      safeGetDocs('system_test_submissions'),
+      safeGetDocs('teacher_media_repository'),
     ]);
 
     const deletedEmails = getDeletedUserEmails();

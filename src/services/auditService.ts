@@ -1,4 +1,4 @@
-import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, deleteDoc, writeBatch } from 'firebase/firestore';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch } from 'firebase/firestore';
 import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 import { sanitizeAvatarUrl } from '../utils/avatarUtils';
@@ -27,22 +27,10 @@ export interface UserProfileData {
   updatedAt?: string;
 }
 
-export interface SiteVisitSummary {
-  totalVisits: number;
-  dailyVisits: Record<string, number>;
-  monthlyVisits: Record<string, Record<string, number>>;
-  yearlyVisits: Record<string, number>;
-  updatedAt?: string;
-  resetAt?: string;
-}
-
 export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
-const LOGIN_LOGS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-export const LOGIN_LOGS_PAGE_LIMIT = 50;
-export const LOGIN_LOGS_PAGE_SIZE = LOGIN_LOGS_PAGE_LIMIT;
 
 // In-memory debounce map to prevent rapid duplicate logs for the same user on this device
 let lastLogTime = 0;
@@ -55,19 +43,6 @@ let hasFetchedLoginLogsFromServer = false;
 let inFlightLoginLogsFetch: Promise<LoginLogEntry[]> | null = null;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
-
-function isLoginLogsCacheFresh(): boolean {
-  if (typeof window === 'undefined') return false;
-  try {
-    const ts = Number(localStorage.getItem(LOGIN_LOGS_FETCHED_AT_KEY) || 0);
-    if (!ts || isNaN(ts)) return false;
-    const raw = localStorage.getItem(LOGIN_LOGS_STORAGE_KEY);
-    if (!raw) return false;
-    return Date.now() - ts < LOGIN_LOGS_CACHE_TTL_MS;
-  } catch {
-    return false;
-  }
-}
 
 const FAKE_SAMPLE_EMAILS = new Set([
   'kanda@acu.ac.th',
@@ -494,11 +469,13 @@ export async function resetAdminLoginLogs(
     // 3. Reset profile stats for admin
     await resetUserProfileVisitStats(normAdmin, normAdmin);
 
-    // 4. Delete Admin docs from Firestore login_logs (scoped query + limit)
+    // 4. Delete Admin docs from Firestore login_logs
     try {
       const logsRef = collection(db, 'login_logs');
-      const snapshot = await getDocs(query(logsRef, where('email', '==', normAdmin), limit(200)));
-      const docsToDelete = snapshot.docs;
+      const snapshot = await getDocs(logsRef);
+      const docsToDelete = snapshot.docs.filter(
+        d => ((d.data().email || d.data().userEmail || '') as string).toLowerCase().trim() === normAdmin
+      );
       if (docsToDelete.length > count) {
         count = docsToDelete.length;
       }
@@ -566,10 +543,10 @@ export async function resetOthersLoginLogs(
     // 3. Reset profile stats for others
     await resetUserProfileVisitStats('all_others', normAdmin);
 
-    // 4. Delete other users' docs from Firestore login_logs (bounded limit)
+    // 4. Delete other users' docs from Firestore login_logs
     try {
       const logsRef = collection(db, 'login_logs');
-      const snapshot = await getDocs(query(logsRef, limit(200)));
+      const snapshot = await getDocs(logsRef);
       const docsToDelete = snapshot.docs.filter(
         d => ((d.data().email || d.data().userEmail || '') as string).toLowerCase().trim() !== normAdmin
       );
@@ -644,8 +621,10 @@ export async function resetUserLoginLogsByEmail(
 
     try {
       const logsRef = collection(db, 'login_logs');
-      const snapshot = await getDocs(query(logsRef, where('email', '==', normTarget), limit(200)));
-      const docsToDelete = snapshot.docs;
+      const snapshot = await getDocs(logsRef);
+      const docsToDelete = snapshot.docs.filter(
+        d => ((d.data().email || d.data().userEmail || '') as string).toLowerCase().trim() === normTarget
+      );
       if (docsToDelete.length > count) {
         count = docsToDelete.length;
       }
@@ -702,10 +681,10 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
     // 3. Reset all user profile visit stats (never touches innovations/media)
     await resetUserProfileVisitStats('all');
 
-    // 4. Attempt to clear Firestore (bounded batch)
+    // 4. Attempt to clear Firestore
     try {
       const logsRef = collection(db, 'login_logs');
-      const snapshot = await getDocs(query(logsRef, limit(200)));
+      const snapshot = await getDocs(logsRef);
       const docs = snapshot.docs;
       if (docs.length > count) {
         count = docs.length;
@@ -765,28 +744,6 @@ export function deleteLoginLogsByEmail(targetEmail: string): void {
       .catch(() => {});
   } catch {
     // ignore
-  }
-}
-
-/**
- * Delete a single login log entry directly in local state/cache and Firestore with ZERO re-fetching.
- */
-export async function deleteSingleLoginLog(logId: string): Promise<{ success: boolean; error?: string }> {
-  if (!logId) return { success: false, error: 'ไม่พบรหัสประวัติการเข้าใช้งาน' };
-  try {
-    const current = sharedLatestLogs || getLocalLoginLogs();
-    const filtered = current.filter((l) => l.id !== logId && l.clientLogId !== logId);
-    savePendingLoginLogs(getPendingLoginLogs().filter((l) => l.id !== logId && l.clientLogId !== logId));
-    saveLocalLoginLogs(filtered, true);
-
-    try {
-      await deleteDoc(doc(db, 'login_logs', logId));
-    } catch (fsErr) {
-      console.warn('Could not delete single login log in Firestore:', fsErr);
-    }
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err?.message || 'ลบประวัติการเข้าใช้งานไม่สำเร็จ' };
   }
 }
 
@@ -873,24 +830,85 @@ function isAdminLogViewer(callerEmail?: string): boolean {
 }
 
 /**
- * Login logs fetching from Firestore is disabled on the frontend/Admin view to consume zero Firestore reads.
- * Returns locally cached logs only (no getDocs/onSnapshot queries against `login_logs`).
+ * One-time getDocs fetch of latest login logs (limit 30) — invoked ONLY when Admin opens the Login Logs tab
+ * or explicitly refreshes, and cached in memory + localStorage to protect Firestore daily read quotas.
+ * Regular users (Teachers/Students) NEVER read the login_logs collection.
  */
 export async function fetchAdminLoginLogsOnce(
-  _forceRefresh = false,
-  _maxCount = LOGIN_LOGS_PAGE_LIMIT,
-  _callerEmail?: string
+  forceRefresh = false,
+  maxCount = 30,
+  callerEmail?: string
 ): Promise<LoginLogEntry[]> {
+  const safeLimit = Math.min(Math.max(1, maxCount), 30);
   const localFallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-  if (!sharedLatestLogs && localFallback.length > 0) {
-    broadcastLogsToListeners(localFallback);
+
+  if (!isAdminLogViewer(callerEmail)) {
+    return localFallback;
   }
-  return sharedLatestLogs || localFallback;
+
+  if (!forceRefresh && hasFetchedLoginLogsFromServer && sharedLatestLogs) {
+    return sharedLatestLogs;
+  }
+
+  if (!forceRefresh && inFlightLoginLogsFetch) {
+    return inFlightLoginLogsFetch;
+  }
+
+  inFlightLoginLogsFetch = (async () => {
+    try {
+      await flushPendingLoginLogs();
+
+      const logsRef = collection(db, 'login_logs');
+      let snapshot;
+      try {
+        snapshot = await getDocs(query(logsRef, orderBy('loginTimestamp', 'desc'), limit(safeLimit)));
+      } catch {
+        try {
+          snapshot = await getDocs(query(logsRef, orderBy('createdAt', 'desc'), limit(safeLimit)));
+        } catch {
+          snapshot = await getDocs(query(logsRef, limit(safeLimit)));
+        }
+      }
+
+      const fsLogs: LoginLogEntry[] = [];
+      const confirmedIds = new Set<string>();
+      snapshot.forEach((docSnap) => {
+        const mapped = mapLoginLogSnapshot(docSnap);
+        confirmedIds.add(docSnap.id);
+        if (mapped.clientLogId) confirmedIds.add(String(mapped.clientLogId));
+        fsLogs.push(mapped);
+      });
+
+      hasFetchedLoginLogsFromServer = true;
+      removePendingLoginLogByIds(confirmedIds);
+
+      const remainingPending = getPendingLoginLogs();
+      const merged = mergeLogs(fsLogs, remainingPending);
+      try {
+        localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(Date.now()));
+      } catch {}
+      saveLocalLoginLogs(merged, false);
+      broadcastLogsToListeners(merged);
+      return merged;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('Login logs one-time fetch fallback (using cached logs):', err);
+      broadcastLogsToListeners(localFallback);
+      return localFallback;
+    } finally {
+      inFlightLoginLogsFetch = null;
+    }
+  })();
+
+  return inFlightLoginLogsFetch;
 }
 
 /**
  * Zero-read local subscription to login logs (emits cached/memory logs and local updates).
  * Does NOT open any Firestore onSnapshot listener or issue background queries.
+ * Admin Logs tab explicitly calls fetchAdminLoginLogsOnce() on tab open / refresh.
  */
 export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void): () => void {
   logListeners.add(callback);
@@ -905,48 +923,14 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
 }
 
 /**
- * Zero-read compatibility helpers for SiteVisitSummary & login logs pagination (no Firestore reads).
+ * Flush pending login logs and optionally fetch latest 30 logs when explicitly forced by Admin
  */
-export function getLocalSiteSummary(): SiteVisitSummary | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem('acu_site_visit_summary_v1');
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as SiteVisitSummary) : null;
-  } catch {
-    return null;
-  }
-}
-
-export function subscribeSiteSummary(callback: (summary: SiteVisitSummary | null) => void): () => void {
-  callback(getLocalSiteSummary());
-  return () => {};
-}
-
-export async function fetchSiteSummaryOnce(_force = false): Promise<SiteVisitSummary | null> {
-  return getLocalSiteSummary();
-}
-
-export function getHasMoreLoginLogs(): boolean {
-  return false;
-}
-
-export function subscribeLoginLogsPagination(callback: (hasMore: boolean) => void): () => void {
-  callback(false);
-  return () => {};
-}
-
-export async function loadMoreAdminLoginLogs(_callerEmail?: string): Promise<LoginLogEntry[]> {
-  return sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-}
-
-/**
- * Flush pending login logs without issuing Firestore read queries against `login_logs`
- */
-export async function syncLoginLogsFromServer(_force = false): Promise<LoginLogEntry[]> {
+export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   try {
     await flushPendingLoginLogs();
+    if (force) {
+      return await fetchAdminLoginLogsOnce(true, 30);
+    }
   } catch {
     // non-fatal fallback to local cache
   }
@@ -1022,11 +1006,11 @@ export function generateLoginLogsCSV(logs: LoginLogEntry[]): string {
  * Fetch latest login logs for the Admin System Test dashboard (reuses cached logs unless forceRefresh=true)
  */
 export async function fetchRecentLoginLogs(
-  maxCount = LOGIN_LOGS_PAGE_LIMIT,
+  maxCount = 30,
   forceRefresh = false,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeCount = Math.min(Math.max(1, maxCount), LOGIN_LOGS_PAGE_LIMIT);
+  const safeCount = Math.min(Math.max(1, maxCount), 30);
   const logs = await fetchAdminLoginLogsOnce(forceRefresh, safeCount, callerEmail);
   return logs.slice(0, safeCount);
 }

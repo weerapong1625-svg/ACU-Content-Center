@@ -31,19 +31,8 @@ import {
   deleteTeacherMedia,
   addTeacherMediaDirectly,
   canUserModify,
-  SUBJECT_GROUPS,
-  subscribeTeacherMediaPagination,
-  loadMoreTeacherMedia,
-  PaginationState,
-  getManualRefreshCooldownSeconds,
-  recordManualRefreshTimestamp
+  SUBJECT_GROUPS 
 } from '../services/submissionService';
-import {
-  DashboardServerStats,
-  getCachedServerStats,
-  subscribeDashboardServerStats,
-  fetchDashboardServerStats
-} from '../services/serverStatsService';
 
 interface TeacherMediaRepositoryModalProps {
   userEmail: string;
@@ -113,9 +102,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
   const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<TeacherMediaWork | null>(null);
   const [isDeletingTarget, setIsDeletingTarget] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() => getManualRefreshCooldownSeconds('teacher_media'));
-  const [paginationState, setPaginationState] = useState<PaginationState>({ hasMore: false, isLoadingMore: false });
-  const [serverStats, setServerStats] = useState<DashboardServerStats>(() => getCachedServerStats());
 
   // Edit item state
   const [editingItem, setEditingItem] = useState<TeacherMediaWork | null>(null);
@@ -178,48 +164,25 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
     const unsub = subscribeTeacherMedia((items) => {
       setRawMediaList(items);
     });
-    const unsubPag = subscribeTeacherMediaPagination((pag) => {
-      setPaginationState(pag);
-    });
-    const unsubStats = subscribeDashboardServerStats((st) => {
-      setServerStats(st);
-    });
-    return () => {
-      unsub();
-      unsubPag();
-      unsubStats();
-    };
+    return () => unsub();
   }, []);
 
-  useEffect(() => {
-    if (refreshCooldownSec <= 0) return;
-    const timer = setInterval(() => {
-      setRefreshCooldownSec(getManualRefreshCooldownSeconds('teacher_media'));
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [refreshCooldownSec]);
-
   const handleRefreshMedia = async () => {
-    if (isRefreshing || refreshCooldownSec > 0) return;
     setIsRefreshing(true);
-    recordManualRefreshTimestamp('teacher_media');
-    setRefreshCooldownSec(60);
     try {
-      await Promise.all([refreshTeacherMedia(true), fetchDashboardServerStats(true)]);
+      await refreshTeacherMedia(true);
       showSuccessFeedback('อัปเดตคลังสื่อล่าสุดเรียบร้อยแล้ว');
     } finally {
       setIsRefreshing(false);
     }
   };
 
-  const totalServerMediaCount = Math.max(serverStats.totalTeacherMediaCount || 0, rawMediaList.length);
-
   // Compute sorted/shuffled list in memory in 0ms without re-subscribing to Firestore
   const mediaList = useMemo(() => {
     if (sortOrder === 'shuffle') {
       return shuffleWithSeed(rawMediaList, shuffleSeed).slice(0, MAX_MEDIA_DISPLAY_LIMIT);
     }
-    return rawMediaList;
+    return rawMediaList.slice(0, MAX_MEDIA_DISPLAY_LIMIT);
   }, [rawMediaList, sortOrder, shuffleSeed]);
 
   const handleStartEdit = (item: TeacherMediaWork) => {
@@ -446,7 +409,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
                   {sortOrder === 'newest' ? (
                     <>
                       <Sparkles className="w-3 h-3 text-emerald-400" />
-                      <span>แสดงสื่อล่าสุด ({rawMediaList.length} จาก {totalServerMediaCount} รายการ)</span>
+                      <span>แสดงสื่อล่าสุดทันที ({rawMediaList.length} รายการ)</span>
                     </>
                   ) : (
                     <>
@@ -494,18 +457,12 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
             <button
               type="button"
               onClick={handleRefreshMedia}
-              disabled={isRefreshing || refreshCooldownSec > 0}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
               title="รีเฟรชข้อมูลคลังสื่อล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">
-                {isRefreshing
-                  ? 'กำลังซิงค์...'
-                  : refreshCooldownSec > 0
-                  ? `ซิงค์ได้ใน ${refreshCooldownSec}ว`
-                  : 'รีเฟรช'}
-              </span>
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
 
             <button
@@ -799,20 +756,6 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
               <p className="text-sm">ไม่พบสื่อที่ตรงกับเงื่อนไขการค้นหา</p>
             </div>
           )}
-
-          {paginationState.hasMore && (
-            <div className="pt-3 flex justify-center">
-              <button
-                type="button"
-                onClick={() => loadMoreTeacherMedia()}
-                disabled={paginationState.isLoadingMore}
-                className="px-5 py-2.5 rounded-xl bg-purple-600 hover:bg-purple-500 text-white text-xs font-bold flex items-center gap-2 shadow-lg transition-all cursor-pointer disabled:opacity-50"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${paginationState.isLoadingMore ? 'animate-spin' : ''}`} />
-                <span>{paginationState.isLoadingMore ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (30 รายการถัดไป)'}</span>
-              </button>
-            </div>
-          )}
         </div>
 
         {/* Footer */}
@@ -820,7 +763,7 @@ export const TeacherMediaRepositoryModal: React.FC<TeacherMediaRepositoryModalPr
           <div className="flex items-center gap-2 flex-wrap">
             <span>แสดงสื่อในคลัง: <strong className="text-purple-300">{filteredList.length}</strong> รายการ</span>
             <span className="text-slate-600">•</span>
-            <span className="text-slate-400">โหลดแล้ว {rawMediaList.length} จากทั้งหมด {totalServerMediaCount} รายการ</span>
+            <span className="text-slate-400">สุ่มแสดงผลอัตโนมัติประจำวัน (ไม่เกิน {MAX_MEDIA_DISPLAY_LIMIT} สื่อ จากทั้งหมด {rawMediaList.length} รายการ)</span>
           </div>
           <span>เฉพาะเจ้าของผลงาน หรือ Admin เท่านั้นที่แก้ไข/ลบได้</span>
         </div>
