@@ -61,13 +61,13 @@ export function getInitialLogoUrl(): string {
  * Fetch school logo once from Firestore (respecting 24h localStorage cache unless force=true)
  */
 export async function fetchSchoolLogoOnce(force = false): Promise<string> {
-  if (inFlightLogoFetch) {
-    return inFlightLogoFetch;
-  }
-
   const cached = readCachedLogoEntry();
   if (!force && (sessionLogoFetched || isLogoCacheFresh(cached))) {
     return cached?.logoUrl || DEFAULT_LOGO_IMAGE;
+  }
+
+  if (!force && inFlightLogoFetch) {
+    return inFlightLogoFetch;
   }
 
   inFlightLogoFetch = (async () => {

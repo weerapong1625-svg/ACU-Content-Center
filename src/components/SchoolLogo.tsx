@@ -1,13 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ACUEmblemVector } from './ACUEmblemVector';
 import { 
+  getInitialLogoUrl, 
+  subscribeSchoolLogo, 
   saveSchoolLogo, 
   resetSchoolLogo, 
   isSuperAdmin,
   SUPER_ADMIN_EMAIL,
   DEFAULT_LOGO_IMAGE 
 } from '../services/logoService';
-import { useFirestoreData } from '../context/FirestoreDataContext';
 import { Camera, RefreshCw, X, Check, ShieldAlert } from 'lucide-react';
 
 interface SchoolLogoProps {
@@ -28,8 +29,7 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   size = 'md',
   currentUserEmail,
 }) => {
-  const { schoolLogoUrl } = useFirestoreData();
-  const [logoUrl, setLogoUrl] = useState<string>(schoolLogoUrl);
+  const [logoUrl, setLogoUrl] = useState<string>(getInitialLogoUrl());
   const [imgFailed, setImgFailed] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
@@ -51,11 +51,14 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
 
   const canEdit = isSuperAdmin(activeEmail);
 
-  // Sync logo from centralized global state
+  // Subscribe to real-time updates from Firestore & local custom events
   useEffect(() => {
-    setLogoUrl(schoolLogoUrl);
-    setImgFailed(false);
-  }, [schoolLogoUrl]);
+    const unsubscribe = subscribeSchoolLogo((updatedUrl) => {
+      setLogoUrl(updatedUrl);
+      setImgFailed(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
   // Listen for global open admin modal request from anywhere in the app
   useEffect(() => {
@@ -123,56 +126,44 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   };
 
   const handleSaveLogo = async () => {
-    if (!newImagePreview || isSaving) return;
+    if (!newImagePreview) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setStatusMessage(null);
     setErrorMessage(null);
 
-    try {
-      // 1. Immediately reflect visually for zero latency
-      setLogoUrl(newImagePreview);
+    // 1. Immediately reflect visually for zero latency
+    setLogoUrl(newImagePreview);
 
-      const res = await saveSchoolLogo(newImagePreview, emailToUse);
-      if (res.success) {
-        setLogoUrl(newImagePreview);
-        setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-        setTimeout(() => {
-          setIsAdminModalOpen(false);
-          setNewImagePreview(null);
-          setStatusMessage(null);
-        }, 900);
-      } else {
-        setErrorMessage(res.message);
-      }
-    } catch {
-      setErrorMessage('เกิดข้อผิดพลาดในการบันทึกโลโก้');
-    } finally {
-      setIsSaving(false);
+    const res = await saveSchoolLogo(newImagePreview, emailToUse);
+    setIsSaving(false);
+    if (res.success) {
+      setLogoUrl(newImagePreview);
+      setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+      setTimeout(() => {
+        setIsAdminModalOpen(false);
+        setNewImagePreview(null);
+        setStatusMessage(null);
+      }, 900);
+    } else {
+      setErrorMessage(res.message);
     }
   };
 
   const handleResetConfirm = async () => {
-    if (isSaving) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setErrorMessage(null);
-    try {
-      setLogoUrl(DEFAULT_LOGO_IMAGE);
-      const res = await resetSchoolLogo(emailToUse);
-      if (res.success) {
-        setConfirmResetOpen(false);
-        setNewImagePreview(null);
-        setIsAdminModalOpen(false);
-      } else {
-        setConfirmResetOpen(false);
-        setErrorMessage(res.message);
-      }
-    } catch {
+    setLogoUrl(DEFAULT_LOGO_IMAGE);
+    const res = await resetSchoolLogo(emailToUse);
+    setIsSaving(false);
+    if (res.success) {
       setConfirmResetOpen(false);
-      setErrorMessage('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้');
-    } finally {
-      setIsSaving(false);
+      setNewImagePreview(null);
+      setIsAdminModalOpen(false);
+    } else {
+      setConfirmResetOpen(false);
+      setErrorMessage(res.message);
     }
   };
 

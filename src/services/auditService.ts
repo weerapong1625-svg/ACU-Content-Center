@@ -1,5 +1,5 @@
-import { collection, serverTimestamp, getDocs, query, orderBy, limit, startAfter, where, doc, setDoc, getDoc, writeBatch, increment, type DocumentData, type QueryDocumentSnapshot } from 'firebase/firestore';
-import { db, auth, isQuotaExceededError, notifyQuotaExceeded, waitForAuthReady, isAuthReady } from '../firebase';
+import { collection, serverTimestamp, getDocs, query, orderBy, limit, where, doc, setDoc, getDoc, writeBatch } from 'firebase/firestore';
+import { db, auth, isQuotaExceededError, notifyQuotaExceeded } from '../firebase';
 import { getDeletedUserEmails, resetUserProfileVisitStats } from './userProfileService';
 import { sanitizeAvatarUrl } from '../utils/avatarUtils';
 
@@ -31,21 +31,6 @@ export const LOGIN_LOGS_STORAGE_KEY = 'acu_persistent_login_logs';
 const PENDING_LOGIN_LOGS_KEY = 'acu_pending_login_logs';
 const DEVICE_ID_STORAGE_KEY = 'acu_device_id';
 const LOGIN_LOGS_FETCHED_AT_KEY = 'acu_login_logs_fetched_at';
-export const LOGIN_LOGS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for login_logs getDocs
-export const LOGIN_LOGS_PAGE_SIZE = 24;
-const LOGIN_LOGS_PAGINATION_KEY = 'acu_login_logs_pagination_v1';
-export const SITE_SUMMARY_CACHE_KEY = 'acu_site_summary_cache';
-export const VISITOR_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours TTL for lightweight site_summary counter
-
-export interface SiteVisitSummary {
-  totalVisits: number;
-  yearlyVisits: Record<string, number>;
-  monthlyVisits: Record<string, Record<string, number>>;
-  dailyVisits: Record<string, number>;
-  updatedAt?: string;
-  resetAt?: string;
-  cachedAt?: number;
-}
 
 // In-memory debounce map to prevent rapid duplicate logs for the same user on this device
 let lastLogTime = 0;
@@ -53,23 +38,11 @@ let lastLogEmail = '';
 
 // Shared local listener registry (zero Firestore onSnapshot reads)
 const logListeners = new Set<(logs: LoginLogEntry[]) => void>();
-const loginLogsPaginationListeners = new Set<(hasMore: boolean) => void>();
 let sharedLatestLogs: LoginLogEntry[] | null = null;
 let hasFetchedLoginLogsFromServer = false;
-let lastLoginLogsFetchedAt = 0;
 let inFlightLoginLogsFetch: Promise<LoginLogEntry[]> | null = null;
-let inFlightLoadMoreLoginLogs: Promise<LoginLogEntry[]> | null = null;
-let loginLogsLastDoc: QueryDocumentSnapshot<DocumentData> | null = null;
-let loginLogsLastCursor: string | null = null;
-let hasMoreLoginLogsState = false;
 let isFlushingPendingLogs = false;
 let windowSyncListenersAttached = false;
-
-// Shared lightweight summary counter cache (system_settings/site_summary -> 1 getDoc read per 2 min)
-const siteSummaryListeners = new Set<(summary: SiteVisitSummary | null) => void>();
-let sharedSiteSummary: SiteVisitSummary | null = null;
-let inFlightSiteSummaryFetch: Promise<SiteVisitSummary | null> | null = null;
-let siteSummaryWindowListenerAttached = false;
 
 const FAKE_SAMPLE_EMAILS = new Set([
   'kanda@acu.ac.th',
@@ -264,140 +237,6 @@ function broadcastLogsToListeners(logs: LoginLogEntry[]): void {
   });
 }
 
-export function getLocalSiteSummary(): SiteVisitSummary | null {
-  if (sharedSiteSummary) return sharedSiteSummary;
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(SITE_SUMMARY_CACHE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as SiteVisitSummary;
-      if (parsed && typeof parsed.totalVisits === 'number') {
-        sharedSiteSummary = parsed;
-        return parsed;
-      }
-    }
-  } catch {}
-  return null;
-}
-
-function saveLocalSiteSummary(summary: SiteVisitSummary, allowZeroReset = false): void {
-  const existing = getLocalSiteSummary();
-  if (!allowZeroReset && summary.totalVisits === 0 && !summary.resetAt && existing && existing.totalVisits > 0) {
-    return;
-  }
-  const stamped: SiteVisitSummary = {
-    ...summary,
-    cachedAt: summary.cachedAt ?? Date.now(),
-  };
-  sharedSiteSummary = stamped;
-  if (typeof window !== 'undefined') {
-    try {
-      localStorage.setItem(SITE_SUMMARY_CACHE_KEY, JSON.stringify(stamped));
-      window.dispatchEvent(new CustomEvent('acu_site_summary_updated', { detail: stamped }));
-    } catch {}
-  }
-  siteSummaryListeners.forEach((cb) => {
-    try {
-      cb(stamped);
-    } catch {}
-  });
-}
-
-function isSiteSummaryFresh(summary: SiteVisitSummary | null): boolean {
-  if (!summary || typeof summary.cachedAt !== 'number') return false;
-  return Date.now() - summary.cachedAt < VISITOR_CACHE_TTL_MS;
-}
-
-/**
- * Fetch lightweight summary counter (`system_settings/site_summary`) via a single getDoc read.
- * Cached in localStorage for 2 minutes; NEVER overwrites positive local counts with 0 on failure/empty.
- */
-export async function fetchSiteSummaryOnce(forceRefresh = false): Promise<SiteVisitSummary | null> {
-  if (inFlightSiteSummaryFetch) {
-    return inFlightSiteSummaryFetch;
-  }
-  const cached = getLocalSiteSummary();
-  if (!forceRefresh && isSiteSummaryFresh(cached)) {
-    return cached;
-  }
-
-  inFlightSiteSummaryFetch = (async () => {
-    try {
-      await waitForAuthReady();
-      const ref = doc(db, 'system_settings', 'site_summary');
-      const snap = await getDoc(ref);
-      if (snap.exists()) {
-        const d = snap.data() as Partial<SiteVisitSummary>;
-        const fetched: SiteVisitSummary = {
-          totalVisits: typeof d.totalVisits === 'number' ? d.totalVisits : 0,
-          yearlyVisits: d.yearlyVisits && typeof d.yearlyVisits === 'object' ? d.yearlyVisits : {},
-          monthlyVisits: d.monthlyVisits && typeof d.monthlyVisits === 'object' ? d.monthlyVisits : {},
-          dailyVisits: d.dailyVisits && typeof d.dailyVisits === 'object' ? d.dailyVisits : {},
-          updatedAt: d.updatedAt || new Date().toISOString(),
-          resetAt: d.resetAt,
-          cachedAt: Date.now(),
-        };
-        if (fetched.totalVisits > 0 || Boolean(fetched.resetAt) || !cached || cached.totalVisits === 0) {
-          saveLocalSiteSummary(fetched, Boolean(fetched.resetAt));
-          return fetched;
-        }
-      }
-      return cached;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        notifyQuotaExceeded();
-      }
-      console.warn('[Firestore] fetchSiteSummaryOnce failed, falling back to localStorage:', err);
-      return cached;
-    } finally {
-      inFlightSiteSummaryFetch = null;
-    }
-  })();
-
-  return inFlightSiteSummaryFetch;
-}
-
-export function subscribeSiteSummary(
-  callback: (summary: SiteVisitSummary | null) => void
-): () => void {
-  siteSummaryListeners.add(callback);
-
-  if (typeof window !== 'undefined' && !siteSummaryWindowListenerAttached) {
-    siteSummaryWindowListenerAttached = true;
-    window.addEventListener('acu_site_summary_updated', (e: Event) => {
-      const detail = (e as CustomEvent<SiteVisitSummary>)?.detail;
-      if (detail) {
-        sharedSiteSummary = detail;
-        siteSummaryListeners.forEach((cb) => {
-          try {
-            cb(detail);
-          } catch {}
-        });
-      }
-    });
-  }
-
-  const initial = getLocalSiteSummary();
-  if (initial) {
-    callback(initial);
-  }
-
-  if (!isSiteSummaryFresh(initial)) {
-    fetchSiteSummaryOnce(false)
-      .then((res) => {
-        if (!res) return;
-        if (res.totalVisits > 0 || Boolean(res.resetAt) || !initial || initial.totalVisits === 0) {
-          callback(res);
-        }
-      })
-      .catch(() => {});
-  }
-
-  return () => {
-    siteSummaryListeners.delete(callback);
-  };
-}
-
 /**
  * Synchronously read authentic login logs from localStorage (strictly genuine logs only)
  */
@@ -570,68 +409,7 @@ export async function logUserLogin(data: {
     console.warn('Could not save local log:', localErr);
   }
 
-  const bkkParts = getBangkokDateParts(nowDate) || {
-    year: nowDate.getFullYear(),
-    monthIndex: nowDate.getMonth(),
-    day: nowDate.getDate(),
-    dateKey: nowIso.split('T')[0],
-  };
-  const yearKey = String(bkkParts.year);
-  const monthKey = String(bkkParts.monthIndex);
-  const dateKey = bkkParts.dateKey;
-
-  // Immediately update local site summary cache & broadcast so active React state reflects +1 right away
-  try {
-    const prevSum = getLocalSiteSummary() || {
-      totalVisits: 0,
-      yearlyVisits: {},
-      monthlyVisits: {},
-      dailyVisits: {},
-    };
-    const nextYearCount = (prevSum.yearlyVisits?.[yearKey] || 0) + 1;
-    const prevYearMonths = prevSum.monthlyVisits?.[yearKey] || {};
-    const nextMonthCount = (prevYearMonths[monthKey] || 0) + 1;
-    const nextDailyCount = (prevSum.dailyVisits?.[dateKey] || 0) + 1;
-    saveLocalSiteSummary({
-      ...prevSum,
-      totalVisits: (prevSum.totalVisits || 0) + 1,
-      yearlyVisits: { ...(prevSum.yearlyVisits || {}), [yearKey]: nextYearCount },
-      monthlyVisits: {
-        ...(prevSum.monthlyVisits || {}),
-        [yearKey]: { ...prevYearMonths, [monthKey]: nextMonthCount },
-      },
-      dailyVisits: { ...(prevSum.dailyVisits || {}), [dateKey]: nextDailyCount },
-      updatedAt: nowIso,
-      cachedAt: Date.now(),
-    });
-  } catch {}
-
-  // Immediately update local user profile visit stats cache & notify mounted profile UI
-  try {
-    if (typeof window !== 'undefined') {
-      const profKey = `acu_user_full_profile_${normEmail}`;
-      const rawProf = localStorage.getItem(profKey);
-      if (rawProf) {
-        const parsed = JSON.parse(rawProf);
-        if (parsed && parsed.stats) {
-          const nextTotal = (parsed.stats.totalViews || 0) + 1;
-          const prevYearly = parsed.stats.yearlyStats || {};
-          const nextYearlyVal = (prevYearly[yearKey] || 0) + 1;
-          parsed.stats = {
-            ...parsed.stats,
-            totalViews: nextTotal,
-            yearlyStats: { ...prevYearly, [yearKey]: nextYearlyVal },
-          };
-          parsed.updatedAt = nowIso;
-          localStorage.setItem(profKey, JSON.stringify(parsed));
-          window.dispatchEvent(new CustomEvent('acu_user_profile_updated', { detail: parsed }));
-          window.dispatchEvent(new CustomEvent('acu_user_profiles_changed', { detail: parsed }));
-        }
-      }
-    }
-  } catch {}
-
-  // 2. Persist log + atomic increment(1) summary counters in Firestore
+  // 2. Persist to Firestore using deterministic doc ID (idempotent across retries)
   try {
     const docRef = doc(db, 'login_logs', logId);
     await setDoc(docRef, {
@@ -639,35 +417,6 @@ export async function logUserLogin(data: {
       createdAt: serverTimestamp(),
     });
     removePendingLoginLogByIds(new Set([logId]));
-
-    // Atomic increment(1) on lightweight site summary counter (system_settings/site_summary)
-    setDoc(
-      doc(db, 'system_settings', 'site_summary'),
-      {
-        totalVisits: increment(1),
-        yearlyVisits: { [yearKey]: increment(1) },
-        monthlyVisits: { [yearKey]: { [monthKey]: increment(1) } },
-        dailyVisits: { [dateKey]: increment(1) },
-        updatedAt: nowIso,
-      },
-      { merge: true }
-    ).catch(() => {});
-
-    // Atomic increment(1) on user's own profile visit counters
-    const safeDocId = encodeURIComponent(normEmail);
-    setDoc(
-      doc(db, 'user_profiles', safeDocId),
-      {
-        email: normEmail,
-        stats: {
-          totalViews: increment(1),
-          yearlyStats: { [yearKey]: increment(1) },
-        },
-        updatedAt: nowIso,
-      },
-      { merge: true }
-    ).catch(() => {});
-
     return logId;
   } catch (err) {
     console.warn('Login log Firestore write queued in outbox for retry:', err);
@@ -910,21 +659,8 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
     lastLogTime = 0;
     savePendingLoginLogs([]);
 
-    // 1. Clear local storage & site summary cache immediately (0ms)
+    // 1. Clear local storage immediately (0ms)
     saveLocalLoginLogs([], true);
-    const resetAtIso = new Date().toISOString();
-    saveLocalSiteSummary(
-      {
-        totalVisits: 0,
-        yearlyVisits: {},
-        monthlyVisits: {},
-        dailyVisits: {},
-        updatedAt: resetAtIso,
-        resetAt: resetAtIso,
-        cachedAt: Date.now(),
-      },
-      true
-    );
 
     // 2. Clear all sessionStorage visit flags
     if (typeof window !== 'undefined') {
@@ -942,18 +678,8 @@ export async function resetAllLoginLogs(): Promise<{ success: boolean; count: nu
       }
     }
 
-    // 3. Reset all user profile visit stats & site summary doc (never touches innovations/media)
+    // 3. Reset all user profile visit stats (never touches innovations/media)
     await resetUserProfileVisitStats('all');
-    try {
-      await setDoc(doc(db, 'system_settings', 'site_summary'), {
-        totalVisits: 0,
-        yearlyVisits: {},
-        monthlyVisits: {},
-        dailyVisits: {},
-        updatedAt: resetAtIso,
-        resetAt: resetAtIso,
-      });
-    } catch {}
 
     // 4. Attempt to clear Firestore
     try {
@@ -1103,112 +829,45 @@ function isAdminLogViewer(callerEmail?: string): boolean {
   return candidates.some((em) => (em || '').trim().toLowerCase() === adminEmail);
 }
 
-interface StoredLoginLogsPagination {
-  hasMore: boolean;
-  lastCursor: string | null;
-  ordered: boolean;
-}
-
-function readStoredLoginLogsPagination(): StoredLoginLogsPagination | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = localStorage.getItem(LOGIN_LOGS_PAGINATION_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' ? (parsed as StoredLoginLogsPagination) : null;
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredLoginLogsPagination(meta: StoredLoginLogsPagination): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(LOGIN_LOGS_PAGINATION_KEY, JSON.stringify(meta));
-  } catch {
-    // ignore
-  }
-}
-
-export function getHasMoreLoginLogs(): boolean {
-  const stored = readStoredLoginLogsPagination();
-  return stored ? Boolean(stored.hasMore) : hasMoreLoginLogsState;
-}
-
-export function subscribeLoginLogsPagination(cb: (hasMore: boolean) => void): () => void {
-  loginLogsPaginationListeners.add(cb);
-  cb(getHasMoreLoginLogs());
-  return () => {
-    loginLogsPaginationListeners.delete(cb);
-  };
-}
-
-function notifyLoginLogsPagination(): void {
-  const hasMore = getHasMoreLoginLogs();
-  loginLogsPaginationListeners.forEach((cb) => {
-    try {
-      cb(hasMore);
-    } catch {}
-  });
-}
-
 /**
- * One-time paginated getDocs fetch of latest login logs (limit 24) — invoked ONLY when Admin opens
+ * One-time getDocs fetch of latest login logs (limit 30) — invoked ONLY when Admin opens the Login Logs tab
  * or explicitly refreshes, and cached in memory + localStorage to protect Firestore daily read quotas.
  * Regular users (Teachers/Students) NEVER read the login_logs collection.
  */
 export async function fetchAdminLoginLogsOnce(
   forceRefresh = false,
-  maxCount = LOGIN_LOGS_PAGE_SIZE,
+  maxCount = 30,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeLimit = Math.min(Math.max(1, maxCount), LOGIN_LOGS_PAGE_SIZE);
+  const safeLimit = Math.min(Math.max(1, maxCount), 30);
   const localFallback = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
 
   if (!isAdminLogViewer(callerEmail)) {
     return localFallback;
   }
 
-  if (inFlightLoginLogsFetch) {
-    return inFlightLoginLogsFetch;
+  if (!forceRefresh && hasFetchedLoginLogsFromServer && sharedLatestLogs) {
+    return sharedLatestLogs;
   }
 
-  const storedFetchedAt =
-    lastLoginLogsFetchedAt ||
-    (typeof window !== 'undefined' ? Number(localStorage.getItem(LOGIN_LOGS_FETCHED_AT_KEY) || 0) : 0);
-  const hasStoredLogs =
-    typeof window !== 'undefined' && localStorage.getItem(LOGIN_LOGS_STORAGE_KEY) !== null;
-  const isLogsCacheFresh =
-    storedFetchedAt > 0 && Date.now() - storedFetchedAt < LOGIN_LOGS_CACHE_TTL_MS;
-
-  if (!forceRefresh && isLogsCacheFresh && (hasStoredLogs || (hasFetchedLoginLogsFromServer && sharedLatestLogs))) {
-    hasFetchedLoginLogsFromServer = true;
-    broadcastLogsToListeners(localFallback);
-    return localFallback;
+  if (!forceRefresh && inFlightLoginLogsFetch) {
+    return inFlightLoginLogsFetch;
   }
 
   inFlightLoginLogsFetch = (async () => {
     try {
-      await waitForAuthReady();
       await flushPendingLoginLogs();
 
       const logsRef = collection(db, 'login_logs');
       let snapshot;
-      let usedTimestampOrder = true;
       try {
         snapshot = await getDocs(query(logsRef, orderBy('loginTimestamp', 'desc'), limit(safeLimit)));
       } catch {
-        usedTimestampOrder = false;
         try {
           snapshot = await getDocs(query(logsRef, orderBy('createdAt', 'desc'), limit(safeLimit)));
         } catch {
           snapshot = await getDocs(query(logsRef, limit(safeLimit)));
         }
-      }
-
-      if (snapshot.empty && (snapshot.metadata?.fromCache || !isAuthReady()) && localFallback.length > 0) {
-        broadcastLogsToListeners(localFallback);
-        return localFallback;
       }
 
       const fsLogs: LoginLogEntry[] = [];
@@ -1220,43 +879,23 @@ export async function fetchAdminLoginLogsOnce(
         fsLogs.push(mapped);
       });
 
-      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : null;
-      const lastCursorVal =
-        fsLogs.length > 0 ? (fsLogs[fsLogs.length - 1].loginTimestamp || null) : null;
-      loginLogsLastDoc = lastSnap;
-      loginLogsLastCursor = lastCursorVal;
-      hasMoreLoginLogsState = snapshot.docs.length === safeLimit && usedTimestampOrder;
-      writeStoredLoginLogsPagination({
-        hasMore: hasMoreLoginLogsState,
-        lastCursor: lastCursorVal,
-        ordered: usedTimestampOrder,
-      });
-      notifyLoginLogsPagination();
-
       hasFetchedLoginLogsFromServer = true;
-      lastLoginLogsFetchedAt = Date.now();
       removePendingLoginLogByIds(confirmedIds);
 
       const remainingPending = getPendingLoginLogs();
       const merged = mergeLogs(fsLogs, remainingPending);
-      if (merged.length > 0 || localFallback.length === 0) {
-        try {
-          localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(lastLoginLogsFetchedAt));
-        } catch {}
-        saveLocalLoginLogs(merged, false);
-        broadcastLogsToListeners(merged);
-        return merged;
-      }
-      broadcastLogsToListeners(localFallback);
-      return localFallback;
+      try {
+        localStorage.setItem(LOGIN_LOGS_FETCHED_AT_KEY, String(Date.now()));
+      } catch {}
+      saveLocalLoginLogs(merged, false);
+      broadcastLogsToListeners(merged);
+      return merged;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('[Firestore] fetchAdminLoginLogsOnce failed, falling back to localStorage:', err);
-      if (localFallback.length > 0) {
-        broadcastLogsToListeners(localFallback);
-      }
+      console.warn('Login logs one-time fetch fallback (using cached logs):', err);
+      broadcastLogsToListeners(localFallback);
       return localFallback;
     } finally {
       inFlightLoginLogsFetch = null;
@@ -1264,89 +903,6 @@ export async function fetchAdminLoginLogsOnce(
   })();
 
   return inFlightLoginLogsFetch;
-}
-
-/**
- * Load next batch of 24 login logs using Firestore startAfter() (Admin only)
- */
-export async function loadMoreAdminLoginLogs(callerEmail?: string): Promise<LoginLogEntry[]> {
-  const existing = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
-
-  if (!isAdminLogViewer(callerEmail)) {
-    return existing;
-  }
-
-  if (inFlightLoadMoreLoginLogs) {
-    return inFlightLoadMoreLoginLogs;
-  }
-
-  const storedMeta = readStoredLoginLogsPagination();
-  const fallbackCursor =
-    loginLogsLastCursor ||
-    storedMeta?.lastCursor ||
-    (existing.length > 0 ? existing[existing.length - 1].loginTimestamp : null);
-  const canContinue = loginLogsLastDoc !== null || (Boolean(storedMeta?.ordered) && Boolean(fallbackCursor));
-
-  if (!canContinue) {
-    hasMoreLoginLogsState = false;
-    writeStoredLoginLogsPagination({ hasMore: false, lastCursor: fallbackCursor, ordered: false });
-    notifyLoginLogsPagination();
-    return existing;
-  }
-
-  inFlightLoadMoreLoginLogs = (async () => {
-    try {
-      await waitForAuthReady();
-      const logsRef = collection(db, 'login_logs');
-      const pagedQuery = loginLogsLastDoc
-        ? query(logsRef, orderBy('loginTimestamp', 'desc'), startAfter(loginLogsLastDoc), limit(LOGIN_LOGS_PAGE_SIZE))
-        : query(logsRef, orderBy('loginTimestamp', 'desc'), startAfter(fallbackCursor!), limit(LOGIN_LOGS_PAGE_SIZE));
-
-      const snapshot = await getDocs(pagedQuery);
-      const nextLogs: LoginLogEntry[] = [];
-      const confirmedIds = new Set<string>();
-      snapshot.forEach((docSnap) => {
-        const mapped = mapLoginLogSnapshot(docSnap);
-        confirmedIds.add(docSnap.id);
-        if (mapped.clientLogId) confirmedIds.add(String(mapped.clientLogId));
-        nextLogs.push(mapped);
-      });
-
-      const lastSnap = snapshot.docs.length > 0 ? snapshot.docs[snapshot.docs.length - 1] : loginLogsLastDoc;
-      const lastCursorVal =
-        nextLogs.length > 0
-          ? (nextLogs[nextLogs.length - 1].loginTimestamp || fallbackCursor)
-          : fallbackCursor;
-      loginLogsLastDoc = lastSnap;
-      loginLogsLastCursor = lastCursorVal;
-      hasMoreLoginLogsState = snapshot.docs.length === LOGIN_LOGS_PAGE_SIZE;
-      writeStoredLoginLogsPagination({
-        hasMore: hasMoreLoginLogsState,
-        lastCursor: lastCursorVal,
-        ordered: true,
-      });
-      notifyLoginLogsPagination();
-      removePendingLoginLogByIds(confirmedIds);
-
-      if (nextLogs.length > 0) {
-        const merged = mergeLogs(existing, nextLogs);
-        saveLocalLoginLogs(merged, false);
-        broadcastLogsToListeners(merged);
-        return merged;
-      }
-      return existing;
-    } catch (err) {
-      if (isQuotaExceededError(err)) {
-        notifyQuotaExceeded();
-      }
-      console.warn('[Firestore] loadMoreAdminLoginLogs failed, preserving loaded logs:', err);
-      return existing;
-    } finally {
-      inFlightLoadMoreLoginLogs = null;
-    }
-  })();
-
-  return inFlightLoadMoreLoginLogs;
 }
 
 /**
@@ -1358,10 +914,7 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
   logListeners.add(callback);
   ensureLocalLogWindowSync();
 
-  const initial =
-    sharedLatestLogs && sharedLatestLogs.length > 0
-      ? sharedLatestLogs
-      : mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
+  const initial = sharedLatestLogs || mergeLogs(getLocalLoginLogs(), getPendingLoginLogs());
   callback(initial);
 
   return () => {
@@ -1370,13 +923,13 @@ export function subscribeAllLoginLogs(callback: (logs: LoginLogEntry[]) => void)
 }
 
 /**
- * Flush pending login logs and optionally fetch latest 24 logs when explicitly forced by Admin
+ * Flush pending login logs and optionally fetch latest 30 logs when explicitly forced by Admin
  */
 export async function syncLoginLogsFromServer(force = false): Promise<LoginLogEntry[]> {
   try {
     await flushPendingLoginLogs();
     if (force) {
-      return await fetchAdminLoginLogsOnce(true, LOGIN_LOGS_PAGE_SIZE);
+      return await fetchAdminLoginLogsOnce(true, 30);
     }
   } catch {
     // non-fatal fallback to local cache
@@ -1453,11 +1006,11 @@ export function generateLoginLogsCSV(logs: LoginLogEntry[]): string {
  * Fetch latest login logs for the Admin System Test dashboard (reuses cached logs unless forceRefresh=true)
  */
 export async function fetchRecentLoginLogs(
-  maxCount = LOGIN_LOGS_PAGE_SIZE,
+  maxCount = 30,
   forceRefresh = false,
   callerEmail?: string
 ): Promise<LoginLogEntry[]> {
-  const safeCount = Math.min(Math.max(1, maxCount), LOGIN_LOGS_PAGE_SIZE);
+  const safeCount = Math.min(Math.max(1, maxCount), 30);
   const logs = await fetchAdminLoginLogsOnce(forceRefresh, safeCount, callerEmail);
   return logs.slice(0, safeCount);
 }
@@ -1485,81 +1038,20 @@ export async function saveUserProfile(profile: UserProfileData): Promise<boolean
   }
 }
 
-const inFlightUserProfileFetches = new Map<string, Promise<UserProfileData | null>>();
-
 /**
- * Fetch user profile from Firestore (deduplicated in-flight + 6h localStorage TTL)
+ * Fetch user profile from Firestore
  */
-export async function fetchUserProfile(email: string, forceRefresh = false): Promise<UserProfileData | null> {
-  const normEmail = (email || '').toLowerCase().trim();
-  if (!normEmail) return null;
-
-  const existingInFlight = inFlightUserProfileFetches.get(normEmail);
-  if (existingInFlight) {
-    return existingInFlight;
-  }
-
-  const safeDocId = encodeURIComponent(normEmail);
-  const localProfileKey = `acu_user_full_profile_${normEmail}`;
-  const docCacheKey = `acu_profile_doc_cache_${safeDocId}`;
-  let cachedFallback: UserProfileData | null = null;
-  let isFreshCache = false;
+export async function fetchUserProfile(email: string): Promise<UserProfileData | null> {
   try {
-    const rawDoc = localStorage.getItem(docCacheKey);
-    if (rawDoc) {
-      const parsedDoc = JSON.parse(rawDoc);
-      if (parsedDoc?.data) {
-        cachedFallback = {
-          email: parsedDoc.data.email || normEmail,
-          displayName: parsedDoc.data.displayName || parsedDoc.data.fullName || normEmail.split('@')[0],
-          avatarUrl: parsedDoc.data.avatarUrl || parsedDoc.data.photoURL || '',
-          updatedAt: parsedDoc.data.updatedAt,
-        };
-      }
-      if (!forceRefresh && typeof parsedDoc?.cachedAt === 'number' && Date.now() - parsedDoc.cachedAt < LOGIN_LOGS_CACHE_TTL_MS) {
-        isFreshCache = true;
-      }
+    const safeDocId = encodeURIComponent(email.toLowerCase().trim());
+    const profileRef = doc(db, 'user_profiles', safeDocId);
+    const snapshot = await getDoc(profileRef);
+    if (snapshot.exists()) {
+      return snapshot.data() as UserProfileData;
     }
-    if (!cachedFallback) {
-      const raw = localStorage.getItem(localProfileKey);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && parsed.email) {
-          cachedFallback = {
-            email: parsed.email,
-            displayName: parsed.displayName || parsed.fullName || normEmail.split('@')[0],
-            avatarUrl: parsed.avatarUrl || parsed.photoURL || '',
-            updatedAt: parsed.updatedAt,
-          };
-        }
-      }
-    }
-  } catch {}
-
-  if (isFreshCache && cachedFallback) {
-    return cachedFallback;
+    return null;
+  } catch (err) {
+    console.error('Failed to fetch user profile from Firestore:', err);
+    return null;
   }
-
-  const promise = (async () => {
-    try {
-      const profileRef = doc(db, 'user_profiles', safeDocId);
-      const snapshot = await getDoc(profileRef);
-      if (snapshot.exists()) {
-        const data = snapshot.data() as UserProfileData;
-        try {
-          localStorage.setItem(docCacheKey, JSON.stringify({ data, cachedAt: Date.now() }));
-        } catch {}
-        return data;
-      }
-      return cachedFallback;
-    } catch (err) {
-      console.warn('[Firestore] fetchUserProfile failed, falling back to localStorage:', err);
-      return cachedFallback;
-    } finally {
-      inFlightUserProfileFetches.delete(normEmail);
-    }
-  })();
-
-  inFlightUserProfileFetches.set(normEmail, promise);
-  return promise;
 }

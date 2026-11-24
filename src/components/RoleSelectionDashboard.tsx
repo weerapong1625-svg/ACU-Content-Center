@@ -28,15 +28,13 @@ import {
 import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
-  LOGIN_LOGS_PAGE_SIZE,
-  fetchRecentLoginLogs,
-  getLocalLoginLogs,
-  LoginLogEntry
+  fetchRecentLoginLogs, 
+  LoginLogEntry, 
+  fetchUserProfile 
 } from '../services/auditService';
 import { UserProfileModal } from './UserProfileModal';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
-import { getCachedUserProfile, FullUserProfile } from '../services/userProfileService';
-import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
+import { getCachedUserProfile, FullUserProfile, subscribeFullUserProfile } from '../services/userProfileService';
 import { TeacherDashboard } from './TeacherDashboard';
 import { AdminDashboard } from './AdminDashboard';
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
@@ -63,7 +61,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
   const [showAdminPasswordModal, setShowAdminPasswordModal] = useState(false);
   const [adminPasswordInput, setAdminPasswordInput] = useState('');
   const [adminPasswordError, setAdminPasswordError] = useState<string | null>(null);
-  const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>(() => getLocalLoginLogs());
+  const [recentLogs, setRecentLogs] = useState<LoginLogEntry[]>([]);
   const [isLoadingLogs, setIsLoadingLogs] = useState(false);
   const [activeTab, setActiveTab] = useState<'overview' | 'content'>('overview');
 
@@ -122,34 +120,29 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     }
   };
 
-  const { currentUserProfile } = useFirestoreData();
-  const {
-    isSyncing: isSyncingSystemLogs,
-    cooldownSeconds: systemLogsCooldown,
-    isDisabled: isSystemLogsRefreshDisabled,
-    triggerSync: triggerSystemLogsSync,
-    getButtonLabel: getSystemLogsButtonLabel,
-  } = useSyncButtonState('system_test_logs');
-
-  // Synchronize local display fields from centralized root user profile (zero extra Firestore reads)
+  // Synchronize profile real-time from Firestore across all devices (mobile & desktop)
   useEffect(() => {
-    if (!currentUserProfile) return;
-    const nextAvatar = sanitizeAvatarUrl(currentUserProfile.photoURL || currentUserProfile.avatarUrl);
-    setAvatarUrl(nextAvatar);
-    try {
-      const norm = userEmail.toLowerCase().trim();
-      if (nextAvatar) {
-        localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
-      } else {
-        localStorage.removeItem(`acu_user_avatar_${norm}`);
+    const unsubscribe = subscribeFullUserProfile(userEmail, (fullProf) => {
+      const nextAvatar = sanitizeAvatarUrl(fullProf.photoURL || fullProf.avatarUrl);
+      setAvatarUrl(nextAvatar);
+      try {
+        const norm = userEmail.toLowerCase().trim();
+        if (nextAvatar) {
+          localStorage.setItem(`acu_user_avatar_${norm}`, nextAvatar);
+        } else {
+          localStorage.removeItem(`acu_user_avatar_${norm}`);
+        }
+      } catch {
+        // ignore
       }
-    } catch {
-      // ignore
-    }
-    setProfileName(currentUserProfile.fullName || currentUserProfile.displayName || userName);
-    setProfileNickname(currentUserProfile.nickname || '');
-    if (currentUserProfile.school) setProfileSchool(currentUserProfile.school);
-  }, [currentUserProfile, userEmail, userName]);
+      setProfileName(fullProf.fullName || fullProf.displayName || userName);
+      setProfileNickname(fullProf.nickname || '');
+      if (fullProf.school) setProfileSchool(fullProf.school);
+    });
+    return () => {
+      unsubscribe();
+    };
+  }, [userEmail, userName]);
 
   // Format current login time
   const [loginTimeStr, setLoginTimeStr] = useState('');
@@ -172,29 +165,17 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     if (!isSuperAdmin(userEmail)) return;
     setShowSystemTestModal(true);
     setIsLoadingLogs(true);
-    try {
-      const logs = await fetchRecentLoginLogs(LOGIN_LOGS_PAGE_SIZE, false, userEmail);
-      setRecentLogs((prev) => (Array.isArray(logs) && (logs.length > 0 || prev.length === 0) ? logs : prev));
-    } catch (err) {
-      console.warn('[RoleSelectionDashboard] Failed to load recent login logs, preserving cached logs:', err);
-    } finally {
-      setIsLoadingLogs(false);
-    }
+    const logs = await fetchRecentLoginLogs(30, false, userEmail);
+    setRecentLogs(logs);
+    setIsLoadingLogs(false);
   };
 
   const handleRefreshSystemTestLogs = async () => {
-    if (!isSuperAdmin(userEmail) || isSystemLogsRefreshDisabled) return;
-    await triggerSystemLogsSync(async () => {
-      setIsLoadingLogs(true);
-      try {
-        const logs = await fetchRecentLoginLogs(LOGIN_LOGS_PAGE_SIZE, true, userEmail);
-        setRecentLogs((prev) => (Array.isArray(logs) && (logs.length > 0 || prev.length === 0) ? logs : prev));
-      } catch (err) {
-        console.warn('[RoleSelectionDashboard] Failed to refresh login logs, preserving cached logs:', err);
-      } finally {
-        setIsLoadingLogs(false);
-      }
-    });
+    if (!isSuperAdmin(userEmail)) return;
+    setIsLoadingLogs(true);
+    const logs = await fetchRecentLoginLogs(30, true, userEmail);
+    setRecentLogs(logs);
+    setIsLoadingLogs(false);
   };
 
   const handleOpenAdminPortal = () => {
@@ -669,12 +650,11 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                 <button
                   type="button"
                   onClick={handleRefreshSystemTestLogs}
-                  disabled={isSystemLogsRefreshDisabled || isLoadingLogs}
-                  className="text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  title={systemLogsCooldown > 0 ? `รอ ${systemLogsCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชประวัติจากฐานข้อมูล'}
+                  disabled={isLoadingLogs}
+                  className="text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
-                  <RefreshCw className={`w-3 h-3 ${isSyncingSystemLogs || isLoadingLogs ? 'animate-spin' : ''}`} />
-                  <span>{getSystemLogsButtonLabel('รีเฟรช')}</span>
+                  <RefreshCw className={`w-3 h-3 ${isLoadingLogs ? 'animate-spin' : ''}`} />
+                  <span>รีเฟรช</span>
                 </button>
               </div>
 

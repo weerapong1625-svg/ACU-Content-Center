@@ -45,7 +45,6 @@ import {
   buildFallbackAvatarUrl,
   isUiAvatarPlaceholder,
 } from '../utils/avatarUtils';
-import { useFirestoreData } from '../context/FirestoreDataContext';
 
 interface AdminUserManagementModalProps {
   isOpen: boolean;
@@ -102,14 +101,6 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
   const [internalInnovations, setInternalInnovations] = useState<InnovationSubmission[]>([]);
   const [internalTeacherMedia, setInternalTeacherMedia] = useState<TeacherMediaWork[]>([]);
   const [internalFacilities, setInternalFacilities] = useState<FacilitySubmission[]>([]);
-
-  const {
-    hasMoreUserProfiles,
-    isLoadingMore,
-    loadMoreUserProfiles,
-    adminServerCounts,
-  } = useFirestoreData();
-  const isLoadingMoreProfiles = isLoadingMore('userProfiles');
 
   useEffect(() => {
     if (!isOpen) return;
@@ -616,26 +607,6 @@ export const AdminUserManagementModal: React.FC<AdminUserManagementModalProps> =
                   </div>
                 );
               })}
-            </div>
-          )}
-
-          {hasMoreUserProfiles && (
-            <div className="mt-5 flex flex-col items-center justify-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => loadMoreUserProfiles()}
-                disabled={isLoadingMoreProfiles}
-                className="px-6 py-2.5 rounded-xl bg-sky-600/20 hover:bg-sky-600/35 border border-sky-500/40 text-sky-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isLoadingMoreProfiles ? 'animate-spin' : ''}`} />
-                <span>{isLoadingMoreProfiles ? 'กำลังโหลด...' : 'โหลดเพิ่มเติม (รายชื่อผู้ใช้ 24 รายการถัดไป)'}</span>
-              </button>
-              <span className="text-[11px] text-slate-400">
-                โหลดโปรไฟล์แล้ว {Object.keys(activeProfilesMap).length}
-                {adminServerCounts.totalTeachers > Object.keys(activeProfilesMap).length
-                  ? ` / ${adminServerCounts.totalTeachers}`
-                  : ''} บัญชี
-              </span>
             </div>
           )}
         </div>

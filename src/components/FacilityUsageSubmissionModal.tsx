@@ -31,11 +31,13 @@ import {
   saveFacilitySubmission, 
   updateFacilitySubmission,
   deleteFacilitySubmission,
+  subscribeUserSubmissions, 
+  subscribeAllSubmissions, 
+  refreshAllFacilities,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
   canUserModify
 } from '../services/submissionService';
-import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 
 interface FacilityUsageSubmissionModalProps {
   userEmail: string;
@@ -75,46 +77,45 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
 
   // Status & Submit State
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
   const [submitSuccessMsg, setSubmitSuccessMsg] = useState<string | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
   const [showAllUsersForAdmin, setShowAllUsersForAdmin] = useState(isAdmin);
 
-  const { facilities: allSubmissions, ensureFacilitiesLoaded, syncFacilities } = useFirestoreData();
-  const {
-    isSyncing: isRefreshing,
-    cooldownSeconds: refreshCooldown,
-    isDisabled: isRefreshDisabled,
-    triggerSync: triggerFacilitySync,
-    getButtonLabel: getRefreshLabel,
-  } = useSyncButtonState('facility_submissions');
-
-  const userSubmissions = React.useMemo(() => {
-    const normEmail = userEmail.trim().toLowerCase();
-    if (!normEmail) return [];
-    return allSubmissions
-      .filter((item) => (item.userEmail || '').trim().toLowerCase() === normEmail)
-      .sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
-  }, [allSubmissions, userEmail]);
+  // Submissions lists (Real-time from Firestore Project: System Test)
+  const [userSubmissions, setUserSubmissions] = useState<FacilitySubmission[]>([]);
+  const [allSubmissions, setAllSubmissions] = useState<FacilitySubmission[]>([]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Sync user submissions in real-time
   useEffect(() => {
-    ensureFacilitiesLoaded();
-  }, [ensureFacilitiesLoaded]);
+    const unsub = subscribeUserSubmissions(userEmail, (data) => {
+      setUserSubmissions(data);
+    });
+    return () => unsub();
+  }, [userEmail]);
+
+  // Sync all submissions for Google Sheets export
+  useEffect(() => {
+    const unsub = subscribeAllSubmissions((data) => {
+      setAllSubmissions(data);
+    });
+    return () => unsub();
+  }, []);
 
   const handleRefresh = async () => {
-    if (isRefreshDisabled) return;
-    const { executed } = await triggerFacilitySync(async () => {
-      await syncFacilities();
-    });
-    if (executed) {
-      setActionNotice('ซิงค์ข้อมูลล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
-      setTimeout(() => setActionNotice(null), 3000);
+    setIsRefreshing(true);
+    try {
+      await refreshAllFacilities(true);
+      setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
+      setTimeout(() => setActionNotice(null), 2500);
+    } finally {
+      setIsRefreshing(false);
     }
   };
 
@@ -170,7 +171,6 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   // Handle Form Submission
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmitting) return;
 
     if (!teacherName.trim()) {
       alert('กรุณากรอก ชื่อ - สกุล (ครูผู้สอน)');
@@ -185,60 +185,58 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     setIsSubmitting(true);
     setSubmitSuccessMsg(null);
 
-    try {
-      if (editingId) {
-        const result = await updateFacilitySubmission(
-          editingId,
-          {
-            teacherName: teacherName.trim(),
-            subjectGroup,
-            learningCenter,
-            periods: selectedPeriods,
-            usageDateTime,
-            feedback: feedback.trim(),
-            imageUrl: imagePreview || undefined,
-          },
-          userEmail
-        );
+    if (editingId) {
+      const result = await updateFacilitySubmission(
+        editingId,
+        {
+          teacherName: teacherName.trim(),
+          subjectGroup,
+          learningCenter,
+          periods: selectedPeriods,
+          usageDateTime,
+          feedback: feedback.trim(),
+          imageUrl: imagePreview || undefined,
+        },
+        userEmail
+      );
 
-        if (result.success) {
-          setActionNotice(`บันทึกการแก้ไขข้อมูลการใช้ ${learningCenter} เรียบร้อยแล้ว`);
-          setEditingId(null);
-          setFeedback('');
-          setImagePreview(null);
-          setActiveTab('status');
-          setTimeout(() => setActionNotice(null), 3000);
-        } else {
-          alert(result.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
-        }
-        return;
-      }
-
-      const result = await saveFacilitySubmission({
-        teacherName: teacherName.trim(),
-        subjectGroup,
-        learningCenter,
-        periods: selectedPeriods,
-        usageDateTime,
-        feedback: feedback.trim(),
-        imageUrl: imagePreview || undefined,
-        userEmail,
-      });
+      setIsSubmitting(false);
 
       if (result.success) {
-        setSubmitSuccessMsg(`บันทึกข้อมูลการใช้ ${learningCenter} ลงระบบเรียบร้อยแล้ว (รหัส: ${result.id})`);
+        setActionNotice(`บันทึกการแก้ไขข้อมูลการใช้ ${learningCenter} เรียบร้อยแล้ว`);
+        setEditingId(null);
         setFeedback('');
         setImagePreview(null);
-        setTimeout(() => {
-          setActiveTab('status');
-        }, 1500);
+        setActiveTab('status');
+        setTimeout(() => setActionNotice(null), 3000);
       } else {
-        alert(result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
+        alert(result.error || 'เกิดข้อผิดพลาดในการแก้ไขข้อมูล');
       }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการบันทึกข้อมูล');
-    } finally {
-      setIsSubmitting(false);
+      return;
+    }
+
+    const result = await saveFacilitySubmission({
+      teacherName: teacherName.trim(),
+      subjectGroup,
+      learningCenter,
+      periods: selectedPeriods,
+      usageDateTime,
+      feedback: feedback.trim(),
+      imageUrl: imagePreview || undefined,
+      userEmail,
+    });
+
+    setIsSubmitting(false);
+
+    if (result.success) {
+      setSubmitSuccessMsg(`บันทึกข้อมูลการใช้ ${learningCenter} ลงระบบเรียบร้อยแล้ว (รหัส: ${result.id})`);
+      setFeedback('');
+      setImagePreview(null);
+      setTimeout(() => {
+        setActiveTab('status');
+      }, 1500);
+    } else {
+      alert(result.error || 'เกิดข้อผิดพลาดในการบันทึกข้อมูล');
     }
   };
 
@@ -261,23 +259,15 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   };
 
   const handleDelete = async (sub: FacilitySubmission) => {
-    if (deletingId) return;
     if (!window.confirm(`คุณแน่ใจหรือไม่ว่าต้องการลบบันทึกการใช้ "${sub.learningCenter}" (${sub.usageDateTime.replace('T', ' ')})?`)) {
       return;
     }
-    setDeletingId(sub.id);
-    try {
-      const res = await deleteFacilitySubmission(sub.id, userEmail);
-      if (res.success) {
-        setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
-        setTimeout(() => setActionNotice(null), 3000);
-      } else {
-        alert(res.error || 'ไม่สามารถลบข้อมูลได้');
-      }
-    } catch {
-      alert('เกิดข้อผิดพลาดในการลบข้อมูล');
-    } finally {
-      setDeletingId(null);
+    const res = await deleteFacilitySubmission(sub.id, userEmail);
+    if (res.success) {
+      setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
+      setTimeout(() => setActionNotice(null), 3000);
+    } else {
+      alert(res.error || 'ไม่สามารถลบข้อมูลได้');
     }
   };
 
@@ -369,14 +359,12 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshDisabled}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              title={refreshCooldown > 0 ? `รอ ${refreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด'}
+              disabled={isRefreshing}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className={isRefreshing || refreshCooldown > 0 ? '' : 'hidden sm:inline'}>
-                {getRefreshLabel('รีเฟรช')}
-              </span>
+              <span className="hidden sm:inline">รีเฟรช</span>
             </button>
             <button
               type="button"
@@ -831,13 +819,12 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
 
                           <button
                             type="button"
-                            disabled={Boolean(deletingId)}
                             onClick={() => handleDelete(sub)}
-                            className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium cursor-pointer"
+                            className="px-2.5 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-xs flex items-center gap-1 transition-colors font-medium"
                             title="ลบข้อมูล"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
-                            <span>{deletingId === sub.id ? 'กำลังลบ...' : 'ลบ'}</span>
+                            <span>ลบ</span>
                           </button>
                         </>
                       )}
@@ -958,9 +945,8 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
                             </button>
                             <button
                               type="button"
-                              disabled={Boolean(deletingId)}
                               onClick={() => handleDelete(row)}
-                              className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 disabled:opacity-50 text-rose-300 border border-rose-500/30 cursor-pointer"
+                              className="p-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30"
                               title="Admin: ลบบันทึกนี้"
                             >
                               <Trash2 className="w-3 h-3" />
