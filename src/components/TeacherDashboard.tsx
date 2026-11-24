@@ -63,6 +63,7 @@ import {
   InnovationSubmission,
   TeacherMediaWork,
   getUnifiedTeacherMediaRecords,
+  fetchUserOwnMediaOnce,
 } from '../services/submissionService';
 
 interface TeacherDashboardProps {
@@ -110,6 +111,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     const unsubMedia = subscribeTeacherMedia((works) => {
       setTeacherMedia(works);
     });
+    fetchUserOwnMediaOnce(userEmail, false).catch(() => {});
     return () => {
       unsubInnos();
       unsubMedia();

@@ -9,6 +9,9 @@ import {
   where, 
   orderBy,
   limit,
+  startAfter,
+  QueryDocumentSnapshot,
+  DocumentData,
   updateDoc, 
   increment 
 } from 'firebase/firestore';
@@ -23,6 +26,7 @@ import {
   resolveUserUid,
   setCachedUserProfile,
 } from './userProfileService';
+import { adjustServerStatsLocally } from './serverStatsService';
 
 export const ADMIN_TARGET_EMAIL = 'weerapong1625@acu.ac.th';
 
@@ -232,6 +236,71 @@ export const INNOVATIONS_STORAGE_KEY = 'acu_cached_innovations_submissions';
 export const TEACHER_MEDIA_STORAGE_KEY = 'acu_cached_teacher_media';
 export const FACILITY_STORAGE_KEY = 'acu_cached_facility_submissions';
 export const SHARED_IDEAS_STORAGE_KEY = 'acu_cached_shared_ideas';
+
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+export const PAGE_LIMIT_30 = 30;
+export const MANUAL_REFRESH_COOLDOWN_MS = 60_000;
+
+const INNOVATIONS_FETCHED_AT_KEY = 'acu_cached_innovations_fetched_at_v1';
+const TEACHER_MEDIA_FETCHED_AT_KEY = 'acu_cached_teacher_media_fetched_at_v1';
+const FACILITY_FETCHED_AT_KEY = 'acu_cached_facilities_fetched_at_v1';
+const SHARED_IDEAS_FETCHED_AT_KEY = 'acu_cached_shared_ideas_fetched_at_v1';
+const USER_OWN_MEDIA_FETCHED_AT_PREFIX = 'acu_user_own_media_fetched_at_v1_';
+
+const manualRefreshMemoryMap = new Map<string, number>();
+
+export function getManualRefreshCooldownSeconds(scope = 'global'): number {
+  const key = `acu_manual_refresh_ts_${scope}`;
+  let lastTs = manualRefreshMemoryMap.get(key) || 0;
+  if (typeof window !== 'undefined') {
+    try {
+      const stored = Number(localStorage.getItem(key) || 0);
+      if (!isNaN(stored) && stored > lastTs) {
+        lastTs = stored;
+      }
+    } catch {}
+  }
+  if (!lastTs) return 0;
+  const elapsed = Date.now() - lastTs;
+  if (elapsed >= MANUAL_REFRESH_COOLDOWN_MS) return 0;
+  return Math.ceil((MANUAL_REFRESH_COOLDOWN_MS - elapsed) / 1000);
+}
+
+export function recordManualRefreshTimestamp(scope = 'global'): void {
+  const key = `acu_manual_refresh_ts_${scope}`;
+  const now = Date.now();
+  manualRefreshMemoryMap.set(key, now);
+  if (typeof window !== 'undefined') {
+    try {
+      localStorage.setItem(key, String(now));
+    } catch {}
+  }
+}
+
+function isLocalCacheFresh(fetchedAtKey: string, dataKey: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const ts = Number(localStorage.getItem(fetchedAtKey) || 0);
+    if (!ts || isNaN(ts)) return false;
+    const raw = localStorage.getItem(dataKey);
+    if (!raw) return false;
+    return Date.now() - ts < CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
+
+function markLocalCacheFetched(fetchedAtKey: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(fetchedAtKey, String(Date.now()));
+  } catch {}
+}
+
+export interface PaginationState {
+  hasMore: boolean;
+  isLoadingMore: boolean;
+}
 
 /**
  * Legacy hardcoded seed IDs that previously caused false "submitted" status
@@ -915,6 +984,14 @@ export async function saveInnovationSubmission(data: {
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
+    adjustServerStatsLocally({
+      innovationsDelta: 1,
+      teacherMediaDelta: 1,
+      facilitiesDelta: 1,
+      mediaType: data.mediaType,
+      productionType: data.productionType,
+      subjectGroup: selectedSubjectGroup,
+    });
 
     return { success: true, id };
   } catch (error: any) {
@@ -1063,7 +1140,8 @@ async function syncUserProfileSlotOnDelete(
     try {
       const q = query(
         collection(db, INNOVATIONS_COLLECTION),
-        where('userEmail', '==', normEmail)
+        where('userEmail', '==', normEmail),
+        limit(PAGE_LIMIT_30)
       );
       const snap = await getDocs(q);
       snap.forEach((d) => {
@@ -1165,13 +1243,22 @@ export async function deleteInnovationSubmission(
         } catch {}
       }
 
+      const itemToDelete = cachedItem;
       saveStoredInnovations(cachedList.filter((item) => item.id !== id));
       saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
-      if (cachedItem) {
-        await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
+      if (itemToDelete) {
+        await syncUserProfileSlotOnDelete(ownerEmail, itemToDelete.itemNumber);
         if (ownerEmail) {
-          await adjustUserSubmissionCount(ownerEmail, -1, cachedItem.uid);
+          await adjustUserSubmissionCount(ownerEmail, -1, itemToDelete.uid);
         }
+        adjustServerStatsLocally({
+          innovationsDelta: -1,
+          teacherMediaDelta: -1,
+          facilitiesDelta: -1,
+          mediaType: itemToDelete.mediaType,
+          productionType: itemToDelete.productionType,
+          subjectGroup: itemToDelete.subjectGroup,
+        });
       }
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
@@ -1205,7 +1292,7 @@ export async function deleteInnovationSubmission(
       // ignore
     }
 
-    // Delete from local caches immediately
+    // Delete from local caches immediately (NO re-fetching)
     try {
       saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
       saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
@@ -1216,6 +1303,14 @@ export async function deleteInnovationSubmission(
     if (ownerEmail) {
       await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
     }
+    adjustServerStatsLocally({
+      innovationsDelta: -1,
+      teacherMediaDelta: -1,
+      facilitiesDelta: -1,
+      mediaType: currentData.mediaType,
+      productionType: currentData.productionType,
+      subjectGroup: currentData.subjectGroup,
+    });
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -1228,6 +1323,16 @@ export async function deleteInnovationSubmission(
       addDeletedMediaIds([id, `work_${id}`]);
       saveStoredInnovations(getStoredInnovations().filter((item) => item.id !== id));
       saveStoredTeacherMedia(getStoredTeacherMedia().filter((m) => m.id !== `work_${id}` && m.id !== id));
+      if (cachedItem) {
+        adjustServerStatsLocally({
+          innovationsDelta: -1,
+          teacherMediaDelta: -1,
+          facilitiesDelta: -1,
+          mediaType: cachedItem.mediaType,
+          productionType: cachedItem.productionType,
+          subjectGroup: cachedItem.subjectGroup,
+        });
+      }
       notifyInnovationsChanged();
       notifyTeacherMediaChanged();
       return { success: true };
@@ -1237,12 +1342,39 @@ export async function deleteInnovationSubmission(
   }
 }
 
-// Smart-cached shared pool for teacher_innovations_submissions (no onSnapshot; protects Firestore read quotas)
+// Smart-cached shared pool for teacher_innovations_submissions (strict limit(30) + startAfter() pagination)
 const allInnovationsListeners = new Set<(submissions: InnovationSubmission[]) => void>();
+const innovationsPaginationListeners = new Set<(state: PaginationState) => void>();
 let sharedLatestInnovations: InnovationSubmission[] | null = null;
 let hasFetchedInnovationsThisSession = false;
 let inFlightInnovationsFetch: Promise<InnovationSubmission[]> | null = null;
+let inFlightLoadMoreInnovations: Promise<InnovationSubmission[]> | null = null;
+let innovationsLastDocSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
+let innovationsPaginationState: PaginationState = { hasMore: true, isLoadingMore: false };
 let innovationsWindowListenerAttached = false;
+const sessionUserOwnMediaFetched = new Set<string>();
+const inFlightUserOwnMediaFetches = new Map<string, Promise<void>>();
+
+function updateInnovationsPaginationState(patch: Partial<PaginationState>): void {
+  innovationsPaginationState = { ...innovationsPaginationState, ...patch };
+  innovationsPaginationListeners.forEach((cb) => {
+    try {
+      cb(innovationsPaginationState);
+    } catch {}
+  });
+}
+
+export function getInnovationsPaginationState(): PaginationState {
+  return innovationsPaginationState;
+}
+
+export function subscribeInnovationsPagination(cb: (state: PaginationState) => void): () => void {
+  innovationsPaginationListeners.add(cb);
+  cb(innovationsPaginationState);
+  return () => {
+    innovationsPaginationListeners.delete(cb);
+  };
+}
 
 function broadcastAllInnovations(list: InnovationSubmission[]): void {
   sharedLatestInnovations = list;
@@ -1273,13 +1405,115 @@ function ensureInnovationsWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for teacher_innovations_submissions (deduplicated per session unless forceRefresh=true)
+ * Fetch a specific teacher's own submissions (scoped single-field where + limit(30)) with 6h TTL cache
+ */
+export async function fetchUserOwnMediaOnce(
+  userEmail: string,
+  forceRefresh = false
+): Promise<void> {
+  const normEmail = (userEmail || '').trim().toLowerCase();
+  if (!normEmail) return;
+
+  const ttlKey = `${USER_OWN_MEDIA_FETCHED_AT_PREFIX}${normEmail}`;
+  if (!forceRefresh) {
+    if (sessionUserOwnMediaFetched.has(normEmail)) return;
+    if (typeof window !== 'undefined') {
+      try {
+        const ts = Number(localStorage.getItem(ttlKey) || 0);
+        if (ts && Date.now() - ts < CACHE_TTL_MS) {
+          sessionUserOwnMediaFetched.add(normEmail);
+          return;
+        }
+      } catch {}
+    }
+    const existing = inFlightUserOwnMediaFetches.get(normEmail);
+    if (existing) return existing;
+  }
+
+  const run = (async () => {
+    try {
+      const [innovSnap, mediaSnap] = await Promise.all([
+        getDocs(
+          query(
+            collection(db, INNOVATIONS_COLLECTION),
+            where('userEmail', '==', normEmail),
+            limit(PAGE_LIMIT_30)
+          )
+        ),
+        getDocs(
+          query(
+            collection(db, TEACHER_MEDIA_COLLECTION),
+            where('submittedByEmail', '==', normEmail),
+            limit(PAGE_LIMIT_30)
+          )
+        ),
+      ]);
+
+      const innovMap = new Map<string, InnovationSubmission>();
+      getSortedStoredInnovations().forEach((item) => innovMap.set(item.id, item));
+      innovSnap.forEach((docSnap) => {
+        const data = docSnap.data() as InnovationSubmission;
+        const docId = data?.id || docSnap.id;
+        if (!isMediaIdBlocked(docId) && !isMediaIdBlocked(docSnap.id) && data?.isDeleted !== true) {
+          innovMap.set(docId, { ...data, id: docId });
+        }
+      });
+      const mergedInnovs = Array.from(innovMap.values()).sort(
+        (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+      );
+      saveStoredInnovations(mergedInnovs);
+      broadcastAllInnovations(mergedInnovs);
+
+      const mediaMap = new Map<string, TeacherMediaWork>();
+      getFilteredStoredTeacherMedia().forEach((m) => mediaMap.set(m.id, m));
+      mediaSnap.forEach((docSnap) => {
+        const data = docSnap.data() as TeacherMediaWork;
+        const docId = data?.id || docSnap.id;
+        if (!isMediaIdBlocked(docId) && data?.isDeleted !== true && data?.title?.trim()) {
+          mediaMap.set(docId, { ...data, id: docId });
+        }
+      });
+      const mergedMedia = Array.from(mediaMap.values()).sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+      saveStoredTeacherMedia(mergedMedia);
+      broadcastTeacherMedia(mergedMedia);
+
+      sessionUserOwnMediaFetched.add(normEmail);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(ttlKey, String(Date.now()));
+        } catch {}
+      }
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('fetchUserOwnMediaOnce fallback (preserving cached items):', err);
+    } finally {
+      inFlightUserOwnMediaFetches.delete(normEmail);
+    }
+  })();
+
+  inFlightUserOwnMediaFetches.set(normEmail, run);
+  return run;
+}
+
+/**
+ * One-time getDocs fetch for teacher_innovations_submissions (strict limit(30), 6h TTL cache)
  */
 export async function refreshAllInnovations(forceRefresh = true): Promise<InnovationSubmission[]> {
   const localFallback = sharedLatestInnovations || getSortedStoredInnovations();
 
-  if (!forceRefresh && hasFetchedInnovationsThisSession && sharedLatestInnovations) {
-    return sharedLatestInnovations;
+  if (
+    !forceRefresh &&
+    (hasFetchedInnovationsThisSession ||
+      isLocalCacheFresh(INNOVATIONS_FETCHED_AT_KEY, INNOVATIONS_STORAGE_KEY))
+  ) {
+    if (!sharedLatestInnovations && localFallback.length > 0) {
+      broadcastAllInnovations(localFallback);
+    }
+    return sharedLatestInnovations || localFallback;
   }
 
   if (!forceRefresh && inFlightInnovationsFetch) {
@@ -1288,8 +1522,19 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
 
   inFlightInnovationsFetch = (async () => {
     try {
-      const colQuery = query(collection(db, INNOVATIONS_COLLECTION), limit(500));
-      const snapshot = await getDocs(colQuery);
+      let snapshot;
+      try {
+        snapshot = await getDocs(
+          query(
+            collection(db, INNOVATIONS_COLLECTION),
+            orderBy('submittedAt', 'desc'),
+            limit(PAGE_LIMIT_30)
+          )
+        );
+      } catch {
+        snapshot = await getDocs(query(collection(db, INNOVATIONS_COLLECTION), limit(PAGE_LIMIT_30)));
+      }
+
       const liveList: InnovationSubmission[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as InnovationSubmission;
@@ -1302,15 +1547,22 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
       liveList.sort(
         (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
       );
+      innovationsLastDocSnapshot = snapshot.docs[snapshot.docs.length - 1] || null;
+      updateInnovationsPaginationState({
+        hasMore: snapshot.docs.length >= PAGE_LIMIT_30,
+        isLoadingMore: false,
+      });
+
       hasFetchedInnovationsThisSession = true;
       saveStoredInnovations(liveList);
+      markLocalCacheFetched(INNOVATIONS_FETCHED_AT_KEY);
       broadcastAllInnovations(liveList);
       return liveList;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllInnovations fallback to local cache:', err);
+      console.warn('refreshAllInnovations fallback to preserved local cache:', err);
       broadcastAllInnovations(localFallback);
       return localFallback;
     } finally {
@@ -1319,6 +1571,76 @@ export async function refreshAllInnovations(forceRefresh = true): Promise<Innova
   })();
 
   return inFlightInnovationsFetch;
+}
+
+/**
+ * Load next batch of 30 innovation submissions via startAfter() cursor
+ */
+export async function loadMoreInnovations(): Promise<InnovationSubmission[]> {
+  const currentList = sharedLatestInnovations || getSortedStoredInnovations();
+  if (!innovationsPaginationState.hasMore) {
+    return currentList;
+  }
+  if (inFlightLoadMoreInnovations) {
+    return inFlightLoadMoreInnovations;
+  }
+
+  updateInnovationsPaginationState({ isLoadingMore: true });
+
+  inFlightLoadMoreInnovations = (async () => {
+    try {
+      const colRef = collection(db, INNOVATIONS_COLLECTION);
+      const cursor =
+        innovationsLastDocSnapshot ||
+        (currentList.length > 0 ? currentList[currentList.length - 1].submittedAt : null);
+
+      if (!cursor) {
+        return await refreshAllInnovations(true);
+      }
+
+      const nextQuery = query(
+        colRef,
+        orderBy('submittedAt', 'desc'),
+        startAfter(cursor),
+        limit(PAGE_LIMIT_30)
+      );
+      const snapshot = await getDocs(nextQuery);
+      const map = new Map<string, InnovationSubmission>();
+      currentList.forEach((item) => map.set(item.id, item));
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as InnovationSubmission;
+        const docId = data?.id || docSnap.id;
+        if (!isMediaIdBlocked(docId) && !isMediaIdBlocked(docSnap.id) && data?.isDeleted !== true) {
+          map.set(docId, { ...data, id: docId });
+        }
+      });
+
+      const merged = Array.from(map.values()).sort(
+        (a, b) => new Date(b.submittedAt || 0).getTime() - new Date(a.submittedAt || 0).getTime()
+      );
+      innovationsLastDocSnapshot = snapshot.docs[snapshot.docs.length - 1] || innovationsLastDocSnapshot;
+      updateInnovationsPaginationState({
+        hasMore: snapshot.docs.length >= PAGE_LIMIT_30,
+        isLoadingMore: false,
+      });
+
+      saveStoredInnovations(merged);
+      broadcastAllInnovations(merged);
+      return merged;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('loadMoreInnovations fallback to existing list:', err);
+      updateInnovationsPaginationState({ isLoadingMore: false });
+      return currentList;
+    } finally {
+      inFlightLoadMoreInnovations = null;
+    }
+  })();
+
+  return inFlightLoadMoreInnovations;
 }
 
 /**
@@ -1337,6 +1659,10 @@ export function subscribeUserInnovations(
   const normTargetEmail = (userEmail || '').trim().toLowerCase();
   const targetUid = normTargetEmail ? resolveUserUid(normTargetEmail) : '';
   const normTargetName = (teacherName || '').trim();
+
+  if (normTargetEmail) {
+    fetchUserOwnMediaOnce(normTargetEmail, false).catch(() => {});
+  }
 
   const filterUserItems = (items: InnovationSubmission[]): InnovationSubmission[] => {
     return items
@@ -1358,7 +1684,7 @@ export function subscribeUserInnovations(
 }
 
 /**
- * Smart-cached subscription to ALL innovation submissions (serves local cache immediately, fetches once per page load).
+ * Smart-cached subscription to ALL innovation submissions (serves local cache immediately, fetches once per 6h TTL).
  */
 export function subscribeAllInnovations(
   callback: (submissions: InnovationSubmission[]) => void
@@ -1529,6 +1855,7 @@ export async function saveFacilitySubmission(data: {
     });
 
     notifyFacilitiesChanged();
+    adjustServerStatsLocally({ facilitiesDelta: 1 });
     return { success: true, id };
   } catch (error: any) {
     notifyFacilitiesChanged();
@@ -1601,6 +1928,7 @@ export async function deleteFacilitySubmission(
 
     await deleteDoc(docRef);
     saveStoredFacilities(getStoredFacilities().filter((f) => f.id !== id));
+    adjustServerStatsLocally({ facilitiesDelta: -1 });
     notifyFacilitiesChanged();
     return { success: true };
   } catch (err: any) {
@@ -1638,13 +1966,20 @@ function ensureFacilitiesWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for facility usage records (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for facility usage records (6h localStorage TTL + bounded limit)
  */
 export async function refreshAllFacilities(forceRefresh = true): Promise<FacilitySubmission[]> {
   const localFallback = sharedLatestFacilities || getStoredFacilities();
 
-  if (!forceRefresh && hasFetchedFacilitiesThisSession && sharedLatestFacilities) {
-    return sharedLatestFacilities;
+  if (
+    !forceRefresh &&
+    (hasFetchedFacilitiesThisSession ||
+      isLocalCacheFresh(FACILITY_FETCHED_AT_KEY, FACILITY_STORAGE_KEY))
+  ) {
+    if (!sharedLatestFacilities && localFallback.length > 0) {
+      broadcastAllFacilities(localFallback);
+    }
+    return sharedLatestFacilities || localFallback;
   }
 
   if (!forceRefresh && inFlightFacilitiesFetch) {
@@ -1653,7 +1988,7 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
 
   inFlightFacilitiesFetch = (async () => {
     try {
-      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(500));
+      const colQuery = query(collection(db, SYSTEM_TEST_COLLECTION), limit(100));
       const snapshot = await getDocs(colQuery);
       const deletedUsers = getDeletedUserEmails();
       const list: FacilitySubmission[] = [];
@@ -1666,13 +2001,14 @@ export async function refreshAllFacilities(forceRefresh = true): Promise<Facilit
       list.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedFacilitiesThisSession = true;
       saveStoredFacilities(list);
+      markLocalCacheFetched(FACILITY_FETCHED_AT_KEY);
       broadcastAllFacilities(list);
       return list;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshAllFacilities fallback to local cache:', err);
+      console.warn('refreshAllFacilities fallback to preserved local cache:', err);
       broadcastAllFacilities(localFallback);
       return localFallback;
     } finally {
@@ -1782,10 +2118,35 @@ export function exportToGoogleSheetsCSV(submissions: FacilitySubmission[]): stri
 export const INITIAL_TEACHER_WORKS: TeacherMediaWork[] = [];
 
 const teacherMediaListeners = new Set<(works: TeacherMediaWork[]) => void>();
+const teacherMediaPaginationListeners = new Set<(state: PaginationState) => void>();
 let sharedLatestTeacherMedia: TeacherMediaWork[] | null = null;
 let hasFetchedTeacherMediaThisSession = false;
 let inFlightTeacherMediaFetch: Promise<TeacherMediaWork[]> | null = null;
+let inFlightLoadMoreTeacherMedia: Promise<TeacherMediaWork[]> | null = null;
+let teacherMediaLastDocSnapshot: QueryDocumentSnapshot<DocumentData> | null = null;
+let teacherMediaPaginationState: PaginationState = { hasMore: true, isLoadingMore: false };
 let teacherMediaWindowListenerAttached = false;
+
+function updateTeacherMediaPaginationState(patch: Partial<PaginationState>): void {
+  teacherMediaPaginationState = { ...teacherMediaPaginationState, ...patch };
+  teacherMediaPaginationListeners.forEach((cb) => {
+    try {
+      cb(teacherMediaPaginationState);
+    } catch {}
+  });
+}
+
+export function getTeacherMediaPaginationState(): PaginationState {
+  return teacherMediaPaginationState;
+}
+
+export function subscribeTeacherMediaPagination(cb: (state: PaginationState) => void): () => void {
+  teacherMediaPaginationListeners.add(cb);
+  cb(teacherMediaPaginationState);
+  return () => {
+    teacherMediaPaginationListeners.delete(cb);
+  };
+}
 
 function broadcastTeacherMedia(works: TeacherMediaWork[]): void {
   sharedLatestTeacherMedia = works;
@@ -1822,13 +2183,20 @@ function ensureTeacherMediaWindowListeners(): void {
 }
 
 /**
- * One-time getDocs fetch for teacher_media_repository (deduplicated per session unless forceRefresh=true)
+ * One-time getDocs fetch for teacher_media_repository (strict limit(30) + 6h localStorage TTL)
  */
 export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherMediaWork[]> {
   const localFallback = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
 
-  if (!forceRefresh && hasFetchedTeacherMediaThisSession && sharedLatestTeacherMedia) {
-    return sharedLatestTeacherMedia;
+  if (
+    !forceRefresh &&
+    (hasFetchedTeacherMediaThisSession ||
+      isLocalCacheFresh(TEACHER_MEDIA_FETCHED_AT_KEY, TEACHER_MEDIA_STORAGE_KEY))
+  ) {
+    if (!sharedLatestTeacherMedia && localFallback.length > 0) {
+      broadcastTeacherMedia(localFallback);
+    }
+    return sharedLatestTeacherMedia || localFallback;
   }
 
   if (!forceRefresh && inFlightTeacherMediaFetch) {
@@ -1837,8 +2205,19 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
 
   inFlightTeacherMediaFetch = (async () => {
     try {
-      const colQuery = query(collection(db, TEACHER_MEDIA_COLLECTION), limit(500));
-      const snapshot = await getDocs(colQuery);
+      let snapshot;
+      try {
+        snapshot = await getDocs(
+          query(
+            collection(db, TEACHER_MEDIA_COLLECTION),
+            orderBy('createdAt', 'desc'),
+            limit(PAGE_LIMIT_30)
+          )
+        );
+      } catch {
+        snapshot = await getDocs(query(collection(db, TEACHER_MEDIA_COLLECTION), limit(PAGE_LIMIT_30)));
+      }
+
       const liveList: TeacherMediaWork[] = [];
       snapshot.forEach((docSnap) => {
         const data = docSnap.data() as TeacherMediaWork;
@@ -1851,15 +2230,22 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
       );
 
       realWorks.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+      teacherMediaLastDocSnapshot = snapshot.docs[snapshot.docs.length - 1] || null;
+      updateTeacherMediaPaginationState({
+        hasMore: snapshot.docs.length >= PAGE_LIMIT_30,
+        isLoadingMore: false,
+      });
+
       hasFetchedTeacherMediaThisSession = true;
       saveStoredTeacherMedia(realWorks);
+      markLocalCacheFetched(TEACHER_MEDIA_FETCHED_AT_KEY);
       broadcastTeacherMedia(realWorks);
       return realWorks;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshTeacherMedia fallback:', err);
+      console.warn('refreshTeacherMedia fallback to preserved local cache:', err);
       broadcastTeacherMedia(localFallback);
       return localFallback;
     } finally {
@@ -1871,7 +2257,77 @@ export async function refreshTeacherMedia(forceRefresh = true): Promise<TeacherM
 }
 
 /**
- * Smart-cached subscription to Teacher Media Repository (serves localStorage immediately, fetches once per page load).
+ * Load next batch of 30 teacher media works via startAfter() cursor
+ */
+export async function loadMoreTeacherMedia(): Promise<TeacherMediaWork[]> {
+  const currentList = sharedLatestTeacherMedia || getFilteredStoredTeacherMedia();
+  if (!teacherMediaPaginationState.hasMore) {
+    return currentList;
+  }
+  if (inFlightLoadMoreTeacherMedia) {
+    return inFlightLoadMoreTeacherMedia;
+  }
+
+  updateTeacherMediaPaginationState({ isLoadingMore: true });
+
+  inFlightLoadMoreTeacherMedia = (async () => {
+    try {
+      const colRef = collection(db, TEACHER_MEDIA_COLLECTION);
+      const cursor =
+        teacherMediaLastDocSnapshot ||
+        (currentList.length > 0 ? currentList[currentList.length - 1].createdAt : null);
+
+      if (!cursor) {
+        return await refreshTeacherMedia(true);
+      }
+
+      const nextQuery = query(
+        colRef,
+        orderBy('createdAt', 'desc'),
+        startAfter(cursor),
+        limit(PAGE_LIMIT_30)
+      );
+      const snapshot = await getDocs(nextQuery);
+      const map = new Map<string, TeacherMediaWork>();
+      currentList.forEach((item) => map.set(item.id, item));
+
+      snapshot.forEach((docSnap) => {
+        const data = docSnap.data() as TeacherMediaWork;
+        const docId = data?.id || docSnap.id;
+        if (!isMediaIdBlocked(docId) && data?.isDeleted !== true && data?.title?.trim().length > 0) {
+          map.set(docId, { ...data, id: docId });
+        }
+      });
+
+      const merged = Array.from(map.values()).sort(
+        (a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime()
+      );
+      teacherMediaLastDocSnapshot = snapshot.docs[snapshot.docs.length - 1] || teacherMediaLastDocSnapshot;
+      updateTeacherMediaPaginationState({
+        hasMore: snapshot.docs.length >= PAGE_LIMIT_30,
+        isLoadingMore: false,
+      });
+
+      saveStoredTeacherMedia(merged);
+      broadcastTeacherMedia(merged);
+      return merged;
+    } catch (err) {
+      if (isQuotaExceededError(err)) {
+        notifyQuotaExceeded();
+      }
+      console.warn('loadMoreTeacherMedia fallback to existing list:', err);
+      updateTeacherMediaPaginationState({ isLoadingMore: false });
+      return currentList;
+    } finally {
+      inFlightLoadMoreTeacherMedia = null;
+    }
+  })();
+
+  return inFlightLoadMoreTeacherMedia;
+}
+
+/**
+ * Smart-cached subscription to Teacher Media Repository (serves localStorage immediately, fetches once per 6h TTL).
  */
 export function subscribeTeacherMedia(
   callback: (works: TeacherMediaWork[]) => void
@@ -1925,6 +2381,7 @@ export async function updateTeacherMedia(
 /**
  * Delete teacher's media item.
  * Admin can delete any (including their own); creator can delete their own.
+ * Strictly updates local state & cache directly with ZERO collection re-fetching.
  */
 export async function deleteTeacherMedia(
   id: string,
@@ -1954,6 +2411,14 @@ export async function deleteTeacherMedia(
           await syncUserProfileSlotOnDelete(ownerEmail, cachedItem.itemNumber);
           await adjustUserSubmissionCount(ownerEmail, -1, cachedItem.uid);
         }
+        adjustServerStatsLocally({
+          teacherMediaDelta: -1,
+          innovationsDelta: id.startsWith('work_') ? -1 : 0,
+          facilitiesDelta: id.startsWith('work_') ? -1 : 0,
+          mediaType: cachedItem?.mediaType,
+          productionType: cachedItem?.productionType,
+          subjectGroup: cachedItem?.subjectGroup,
+        });
         notifyInnovationsChanged();
         notifyTeacherMediaChanged();
         return { success: true };
@@ -1983,6 +2448,14 @@ export async function deleteTeacherMedia(
       await syncUserProfileSlotOnDelete(ownerEmail, currentData.itemNumber);
       await adjustUserSubmissionCount(ownerEmail, -1, currentData.uid);
     }
+    adjustServerStatsLocally({
+      teacherMediaDelta: -1,
+      innovationsDelta: id.startsWith('work_') ? -1 : 0,
+      facilitiesDelta: id.startsWith('work_') ? -1 : 0,
+      mediaType: currentData.mediaType,
+      productionType: currentData.productionType,
+      subjectGroup: currentData.subjectGroup,
+    });
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -1996,7 +2469,7 @@ export async function deleteTeacherMedia(
 /**
  * Strictly remove ONLY Admin's (weerapong1625@acu.ac.th) own media submissions and reset
  * ONLY Admin's own 5-item innovation slots in user_profiles to pending.
- * NEVER touches any other user's data.
+ * Uses strictly scoped single-field where + limit(30) queries and updates local state directly.
  */
 export async function clearAdminOwnMedia(
   adminEmail: string
@@ -2010,42 +2483,43 @@ export async function clearAdminOwnMedia(
   let deletedCount = 0;
 
   try {
-    // 1. Delete only weerapong1625@acu.ac.th's docs in teacher_innovations_submissions
-    const innovSnap = await getDocs(collection(db, INNOVATIONS_COLLECTION));
+    // 1. Delete only weerapong1625@acu.ac.th's docs in teacher_innovations_submissions (scoped + limit)
+    const innovSnap = await getDocs(
+      query(collection(db, INNOVATIONS_COLLECTION), where('userEmail', '==', targetAdmin), limit(PAGE_LIMIT_30))
+    );
+    let innovRemoved = 0;
     for (const d of innovSnap.docs) {
-      const data = d.data() as InnovationSubmission;
-      const docOwner = (data?.userEmail || '').trim().toLowerCase();
-      if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
-        addDeletedMediaIds([d.id, `work_${d.id}`]);
-        await deleteDoc(d.ref);
-        deletedCount++;
-        try {
-          await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${d.id}`));
-        } catch {}
-        try {
-          await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${d.id}`));
-        } catch {}
-      }
+      addDeletedMediaIds([d.id, `work_${d.id}`]);
+      await deleteDoc(d.ref);
+      deletedCount++;
+      innovRemoved++;
+      try {
+        await deleteDoc(doc(db, SYSTEM_TEST_COLLECTION, `test_${d.id}`));
+      } catch {}
+      try {
+        await deleteDoc(doc(db, TEACHER_MEDIA_COLLECTION, `work_${d.id}`));
+      } catch {}
     }
 
-    // 2. Delete only weerapong1625@acu.ac.th's docs in teacher_media_repository
-    const mediaSnap = await getDocs(collection(db, TEACHER_MEDIA_COLLECTION));
+    // 2. Delete only weerapong1625@acu.ac.th's docs in teacher_media_repository (scoped + limit)
+    const mediaSnap = await getDocs(
+      query(collection(db, TEACHER_MEDIA_COLLECTION), where('submittedByEmail', '==', targetAdmin), limit(PAGE_LIMIT_30))
+    );
+    let mediaRemoved = 0;
     for (const d of mediaSnap.docs) {
-      const data = d.data() as TeacherMediaWork;
-      const docOwner = (data?.submittedByEmail || '').trim().toLowerCase();
-      if (docOwner === targetAdmin || LEGACY_FAKE_SEED_IDS.has(d.id)) {
-        addDeletedMediaIds([d.id]);
-        await deleteDoc(d.ref);
-        deletedCount++;
-      }
+      addDeletedMediaIds([d.id]);
+      await deleteDoc(d.ref);
+      deletedCount++;
+      mediaRemoved++;
     }
 
-    // 3. Delete only weerapong1625@acu.ac.th's Innovation_5_Items docs in system_test_submissions
-    const sysSnap = await getDocs(collection(db, SYSTEM_TEST_COLLECTION));
+    // 3. Delete only weerapong1625@acu.ac.th's Innovation_5_Items docs in system_test_submissions (scoped + limit)
+    const sysSnap = await getDocs(
+      query(collection(db, SYSTEM_TEST_COLLECTION), where('userEmail', '==', targetAdmin), limit(PAGE_LIMIT_30))
+    );
     for (const d of sysSnap.docs) {
       const data = d.data() as any;
-      const docOwner = (data?.userEmail || '').trim().toLowerCase();
-      if (docOwner === targetAdmin && (data?.sourceModule === 'Innovation_5_Items' || d.id.startsWith('test_innov_'))) {
+      if (data?.sourceModule === 'Innovation_5_Items' || d.id.startsWith('test_innov_')) {
         await deleteDoc(d.ref);
       }
     }
@@ -2096,6 +2570,12 @@ export async function clearAdminOwnMedia(
         }
       }
     } catch {}
+
+    adjustServerStatsLocally({
+      innovationsDelta: innovRemoved > 0 ? -innovRemoved : 0,
+      teacherMediaDelta: -(innovRemoved + mediaRemoved),
+      facilitiesDelta: innovRemoved > 0 ? -innovRemoved : 0,
+    });
 
     notifyInnovationsChanged();
     notifyTeacherMediaChanged();
@@ -2182,6 +2662,7 @@ export async function addTeacherMediaDirectly(data: {
     const docRef = doc(db, TEACHER_MEDIA_COLLECTION, id);
     await setDoc(docRef, payload);
     await adjustUserSubmissionCount(normalizedEmail, 1, resolvedUid);
+    adjustServerStatsLocally({ teacherMediaDelta: 1 });
     notifyTeacherMediaChanged();
     return { success: true, id };
   } catch (err: any) {
@@ -2391,8 +2872,15 @@ function ensureSharedIdeasWindowListeners(): void {
 export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIdeaItem[]> {
   const localFallback = sharedLatestIdeas || getStoredSharedIdeas();
 
-  if (!forceRefresh && hasFetchedSharedIdeasThisSession && sharedLatestIdeas) {
-    return sharedLatestIdeas;
+  if (
+    !forceRefresh &&
+    (hasFetchedSharedIdeasThisSession ||
+      isLocalCacheFresh(SHARED_IDEAS_FETCHED_AT_KEY, SHARED_IDEAS_STORAGE_KEY))
+  ) {
+    if (!sharedLatestIdeas && localFallback.length > 0) {
+      broadcastSharedIdeas(localFallback);
+    }
+    return sharedLatestIdeas || localFallback;
   }
 
   if (!forceRefresh && inFlightSharedIdeasFetch) {
@@ -2401,7 +2889,7 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
 
   inFlightSharedIdeasFetch = (async () => {
     try {
-      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(500));
+      const colQuery = query(collection(db, SHARED_IDEAS_COLLECTION), limit(100));
       const snapshot = await getDocs(colQuery);
       const liveList: SharedIdeaItem[] = [];
       snapshot.forEach((docSnap) => {
@@ -2421,13 +2909,14 @@ export async function refreshSharedIdeas(forceRefresh = true): Promise<SharedIde
       finalIdeas.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
       hasFetchedSharedIdeasThisSession = true;
       saveStoredSharedIdeas(finalIdeas);
+      markLocalCacheFetched(SHARED_IDEAS_FETCHED_AT_KEY);
       broadcastSharedIdeas(finalIdeas);
       return finalIdeas;
     } catch (err) {
       if (isQuotaExceededError(err)) {
         notifyQuotaExceeded();
       }
-      console.warn('refreshSharedIdeas fallback to cache/seed:', err);
+      console.warn('refreshSharedIdeas fallback to preserved cache/seed:', err);
       broadcastSharedIdeas(localFallback);
       return localFallback;
     } finally {

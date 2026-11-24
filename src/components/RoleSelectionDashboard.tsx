@@ -28,7 +28,7 @@ import {
 import { SchoolLogo } from './SchoolLogo';
 import { 
   logUserLogin, 
-  fetchRecentLoginLogs, 
+  getLocalLoginLogs, 
   LoginLogEntry, 
   fetchUserProfile 
 } from '../services/auditService';
@@ -165,16 +165,14 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
     if (!isSuperAdmin(userEmail)) return;
     setShowSystemTestModal(true);
     setIsLoadingLogs(true);
-    const logs = await fetchRecentLoginLogs(30, false, userEmail);
-    setRecentLogs(logs);
+    setRecentLogs(getLocalLoginLogs().slice(0, 50));
     setIsLoadingLogs(false);
   };
 
   const handleRefreshSystemTestLogs = async () => {
-    if (!isSuperAdmin(userEmail)) return;
+    if (!isSuperAdmin(userEmail) || isLoadingLogs) return;
     setIsLoadingLogs(true);
-    const logs = await fetchRecentLoginLogs(30, true, userEmail);
-    setRecentLogs(logs);
+    setRecentLogs(getLocalLoginLogs().slice(0, 50));
     setIsLoadingLogs(false);
   };
 
@@ -654,7 +652,7 @@ export const RoleSelectionDashboard: React.FC<RoleSelectionDashboardProps> = ({
                   className="text-blue-400 hover:text-blue-300 flex items-center gap-1 cursor-pointer disabled:opacity-50"
                 >
                   <RefreshCw className={`w-3 h-3 ${isLoadingLogs ? 'animate-spin' : ''}`} />
-                  <span>รีเฟรช</span>
+                  <span>{isLoadingLogs ? 'กำลังซิงค์...' : 'รีเฟรช (50 ล่าสุด)'}</span>
                 </button>
               </div>
 

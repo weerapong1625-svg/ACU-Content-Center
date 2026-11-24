@@ -137,11 +137,26 @@ export interface TeacherPrivilegeAdminItem {
 
 const CLAIMS_COLLECTION = 'reward_privilege_claims';
 const CLAIMS_STORAGE_KEY = 'acu_cached_reward_claims';
+const CLAIMS_FETCHED_AT_KEY = 'acu_cached_reward_claims_fetched_at_v1';
+const CLAIMS_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 let sessionClaimsListFetched = false;
 let inFlightClaimsListFetch: Promise<Record<string, RewardClaimRecord>> | null = null;
 const sessionSingleClaimFetched = new Set<string>();
 const inFlightSingleClaimFetches = new Map<string, Promise<RewardClaimRecord | null>>();
+
+function isClaimsCacheFresh(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const ts = Number(localStorage.getItem(CLAIMS_FETCHED_AT_KEY) || 0);
+    if (!ts || isNaN(ts)) return false;
+    const raw = localStorage.getItem(CLAIMS_STORAGE_KEY);
+    if (!raw) return false;
+    return Date.now() - ts < CLAIMS_CACHE_TTL_MS;
+  } catch {
+    return false;
+  }
+}
 
 function notifyRewardClaimsChanged(): void {
   try {
@@ -243,7 +258,7 @@ export async function refreshRewardClaims(
 ): Promise<Record<string, RewardClaimRecord>> {
   const localFallback = getStoredRewardClaimsMap();
 
-  if (!forceRefresh && sessionClaimsListFetched) {
+  if (!forceRefresh && (sessionClaimsListFetched || isClaimsCacheFresh())) {
     return localFallback;
   }
 
@@ -253,7 +268,7 @@ export async function refreshRewardClaims(
 
   inFlightClaimsListFetch = (async () => {
     try {
-      const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(500)));
+      const snap = await getDocs(query(collection(db, CLAIMS_COLLECTION), limit(100)));
       const deletedUsers = getDeletedUserEmails();
       const map: Record<string, RewardClaimRecord> = {};
       snap.forEach((d) => {
@@ -267,6 +282,11 @@ export async function refreshRewardClaims(
       });
       sessionClaimsListFetched = true;
       saveStoredRewardClaimsMap(map);
+      if (typeof window !== 'undefined') {
+        try {
+          localStorage.setItem(CLAIMS_FETCHED_AT_KEY, String(Date.now()));
+        } catch {}
+      }
       notifyRewardClaimsChanged();
       return map;
     } catch (err) {

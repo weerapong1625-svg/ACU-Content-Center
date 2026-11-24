@@ -36,7 +36,9 @@ import {
   refreshAllFacilities,
   exportToGoogleSheetsCSV,
   ADMIN_TARGET_EMAIL,
-  canUserModify
+  canUserModify,
+  getManualRefreshCooldownSeconds,
+  recordManualRefreshTimestamp
 } from '../services/submissionService';
 
 interface FacilityUsageSubmissionModalProps {
@@ -81,6 +83,7 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const [copySuccess, setCopySuccess] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() => getManualRefreshCooldownSeconds('facilities'));
 
   // Admin permission check
   const isAdmin = userEmail.trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
@@ -108,8 +111,19 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     return () => unsub();
   }, []);
 
+  useEffect(() => {
+    if (refreshCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('facilities'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshCooldownSec]);
+
   const handleRefresh = async () => {
+    if (isRefreshing || refreshCooldownSec > 0) return;
     setIsRefreshing(true);
+    recordManualRefreshTimestamp('facilities');
+    setRefreshCooldownSec(60);
     try {
       await refreshAllFacilities(true);
       setActionNotice('อัปเดตข้อมูลล่าสุดเรียบร้อยแล้ว');
@@ -264,6 +278,8 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
     }
     const res = await deleteFacilitySubmission(sub.id, userEmail);
     if (res.success) {
+      setUserSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
+      setAllSubmissions((prev) => prev.filter((item) => item.id !== sub.id));
       setActionNotice(`ลบบันทึกข้อมูลเรียบร้อยแล้ว`);
       setTimeout(() => setActionNotice(null), 3000);
     } else {
@@ -359,12 +375,18 @@ export const FacilityUsageSubmissionModal: React.FC<FacilityUsageSubmissionModal
             <button
               type="button"
               onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              disabled={isRefreshing || refreshCooldownSec > 0}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               title="รีเฟรชข้อมูลแหล่งเรียนรู้ล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className="hidden sm:inline">
+                {isRefreshing
+                  ? 'กำลังซิงค์...'
+                  : refreshCooldownSec > 0
+                  ? `ซิงค์ได้ใน ${refreshCooldownSec}ว`
+                  : 'รีเฟรช'}
+              </span>
             </button>
             <button
               type="button"

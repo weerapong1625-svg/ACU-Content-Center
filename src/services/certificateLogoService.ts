@@ -66,13 +66,13 @@ export function getInitialCertificateLogoUrl(): string {
  * One-time getDoc fetch for certificate logo with 24h localStorage cache
  */
 export async function fetchCertificateLogoOnce(force = false): Promise<string> {
+  if (inFlightCertLogoFetch) {
+    return inFlightCertLogoFetch;
+  }
+
   const cached = readCachedCertLogoEntry();
   if (!force && (sessionCertLogoFetched || isCertLogoCacheFresh(cached))) {
     return getInitialCertificateLogoUrl();
-  }
-
-  if (!force && inFlightCertLogoFetch) {
-    return inFlightCertLogoFetch;
   }
 
   inFlightCertLogoFetch = (async () => {

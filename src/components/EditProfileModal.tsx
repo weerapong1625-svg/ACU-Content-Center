@@ -85,7 +85,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
 
   if (!isOpen) return null;
 
-  // Handle local file upload and compress to persistent Base64 JPEG (<80KB, max 200x200px)
+  // Handle local file upload and compress to persistent Base64 JPEG/WebP (~15KB, max 150x150px)
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
     const file = e.target.files?.[0];
@@ -281,7 +281,7 @@ export const EditProfileModal: React.FC<EditProfileModalProps> = ({
                   คลิกเพื่อเลือกไฟล์รูปภาพจากอุปกรณ์ของคุณ
                 </p>
                 <p className="text-xs text-slate-400 mt-1">
-                  รองรับไฟล์ PNG, JPG, JPEG, WebP หรือ GIF (ขนาดไม่เกิน 8MB)
+                  รองรับ PNG, JPG, WebP (บีบอัดอัตโนมัติเหลือ ~15KB ขนาด 150×150px เพื่อประหยัดพื้นที่และซิงค์ข้ามอุปกรณ์รวดเร็ว)
                 </p>
               </div>
 

@@ -12,13 +12,12 @@ import {
   ShieldCheck
 } from 'lucide-react';
 import { 
-  subscribeCriteriaPoster, 
   saveCriteriaPoster, 
   resetCriteriaPoster,
-  getInitialCriteriaPosterUrl,
   ADMIN_TARGET_EMAIL,
   DEFAULT_CRITERIA_POSTER
 } from '../services/submissionService';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 
 interface MediaTypesPopupModalProps {
   userEmail?: string | null;
@@ -35,7 +34,8 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   userEmail,
   onClose 
 }) => {
-  const [posterUrl, setPosterUrl] = useState<string>(getInitialCriteriaPosterUrl());
+  const { criteriaPosterUrl } = useFirestoreData();
+  const [posterUrl, setPosterUrl] = useState<string>(criteriaPosterUrl);
   const [zoomLevel, setZoomLevel] = useState(1);
   const [isAdminUploadOpen, setIsAdminUploadOpen] = useState(false);
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
@@ -59,13 +59,9 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
 
   const isAdmin = (activeEmail || '').trim().toLowerCase() === ADMIN_TARGET_EMAIL.toLowerCase();
 
-  // Real-time subscription to criteria poster
   useEffect(() => {
-    const unsub = subscribeCriteriaPoster((url) => {
-      setPosterUrl(url);
-    });
-    return () => unsub();
-  }, []);
+    setPosterUrl(criteriaPosterUrl);
+  }, [criteriaPosterUrl]);
 
   const handleZoomIn = () => setZoomLevel((prev) => Math.min(prev + 0.25, 2.5));
   const handleZoomOut = () => setZoomLevel((prev) => Math.max(prev - 0.25, 0.75));
@@ -118,44 +114,55 @@ export const MediaTypesPopupModal: React.FC<MediaTypesPopupModalProps> = ({
   };
 
   const handleSavePoster = async () => {
-    if (!newImagePreview) return;
+    if (!newImagePreview || isSaving) return;
     setIsSaving(true);
     setSaveSuccessNotice(null);
     setErrorNotice(null);
 
-    // 1. Immediately reflect the change on the screen
-    setPosterUrl(newImagePreview);
-
-    const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
-    const res = await saveCriteriaPoster(newImagePreview, emailToUse);
-    setIsSaving(false);
-
-    if (res.success) {
+    try {
+      // 1. Immediately reflect the change on the screen
       setPosterUrl(newImagePreview);
-      setSaveSuccessNotice('บันทึกภาพเกณฑ์/ประเภทสื่อลงระบบสำเร็จ ภาพเปลี่ยนทันที');
-      setTimeout(() => {
-        setIsAdminUploadOpen(false);
-        setNewImagePreview(null);
-        setSaveSuccessNotice(null);
-      }, 900);
-    } else {
-      setErrorNotice(res.message);
+
+      const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
+      const res = await saveCriteriaPoster(newImagePreview, emailToUse);
+
+      if (res.success) {
+        setPosterUrl(newImagePreview);
+        setSaveSuccessNotice('บันทึกภาพเกณฑ์/ประเภทสื่อลงระบบสำเร็จ ภาพเปลี่ยนทันที');
+        setTimeout(() => {
+          setIsAdminUploadOpen(false);
+          setNewImagePreview(null);
+          setSaveSuccessNotice(null);
+        }, 900);
+      } else {
+        setErrorNotice(res.message);
+      }
+    } catch {
+      setErrorNotice('เกิดข้อผิดพลาดในการบันทึกภาพเกณฑ์');
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleResetConfirm = async () => {
+    if (isSaving) return;
     const emailToUse = (activeEmail && activeEmail.includes('@')) ? activeEmail : ADMIN_TARGET_EMAIL;
     setIsSaving(true);
     setErrorNotice(null);
-    setPosterUrl(DEFAULT_CRITERIA_POSTER);
-    const res = await resetCriteriaPoster(emailToUse);
-    setIsSaving(false);
-    setConfirmResetOpen(false);
-    if (res.success) {
-      setNewImagePreview(null);
-      setIsAdminUploadOpen(false);
-    } else {
-      setErrorNotice(res.message);
+    try {
+      setPosterUrl(DEFAULT_CRITERIA_POSTER);
+      const res = await resetCriteriaPoster(emailToUse);
+      setConfirmResetOpen(false);
+      if (res.success) {
+        setNewImagePreview(null);
+        setIsAdminUploadOpen(false);
+      } else {
+        setErrorNotice(res.message);
+      }
+    } catch {
+      setErrorNotice('เกิดข้อผิดพลาดในการรีเซ็ตภาพเกณฑ์');
+    } finally {
+      setIsSaving(false);
     }
   };
 

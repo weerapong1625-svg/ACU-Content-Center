@@ -40,6 +40,8 @@ import {
   deleteSharedIdea,
   canUserModify,
   SharedIdeaItem,
+  getManualRefreshCooldownSeconds,
+  recordManualRefreshTimestamp
 } from '../services/submissionService';
 
 interface IdeaBankModalProps {
@@ -255,6 +257,7 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
   const [actionNotice, setActionNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [refreshCooldownSec, setRefreshCooldownSec] = useState<number>(() => getManualRefreshCooldownSeconds('ideas'));
 
   const showNotice = (type: 'success' | 'error', message: string) => {
     setActionNotice({ type, message });
@@ -271,8 +274,19 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (refreshCooldownSec <= 0) return;
+    const timer = setInterval(() => {
+      setRefreshCooldownSec(getManualRefreshCooldownSeconds('ideas'));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [refreshCooldownSec]);
+
   const handleRefreshIdeas = async () => {
+    if (isRefreshing || refreshCooldownSec > 0) return;
     setIsRefreshing(true);
+    recordManualRefreshTimestamp('ideas');
+    setRefreshCooldownSec(60);
     try {
       await refreshSharedIdeas(true);
       showNotice('success', 'อัปเดตคลังไอเดียล่าสุดเรียบร้อยแล้ว');
@@ -453,6 +467,7 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
     const res = await deleteSharedIdea(raw.id, userEmail);
     setConfirmDeleteId(null);
     if (res.success) {
+      setFirestoreIdeas((prev) => prev.filter((item) => item.id !== raw.id));
       showNotice('success', 'ลบรายการเรียบร้อยแล้ว');
     } else {
       showNotice('error', res.error || 'ไม่สามารถลบข้อมูลได้');
@@ -496,12 +511,18 @@ export const IdeaBankModal: React.FC<IdeaBankModalProps> = ({ userEmail = '', on
             <button
               type="button"
               onClick={handleRefreshIdeas}
-              disabled={isRefreshing}
-              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+              disabled={isRefreshing || refreshCooldownSec > 0}
+              className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
               title="รีเฟรชข้อมูลคลังไอเดียล่าสุด"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin' : ''}`} />
-              <span className="hidden sm:inline">รีเฟรช</span>
+              <span className="hidden sm:inline">
+                {isRefreshing
+                  ? 'กำลังซิงค์...'
+                  : refreshCooldownSec > 0
+                  ? `ซิงค์ได้ใน ${refreshCooldownSec}ว`
+                  : 'รีเฟรช'}
+              </span>
             </button>
 
             <button

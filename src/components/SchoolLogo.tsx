@@ -1,14 +1,13 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { ACUEmblemVector } from './ACUEmblemVector';
 import { 
-  getInitialLogoUrl, 
-  subscribeSchoolLogo, 
   saveSchoolLogo, 
   resetSchoolLogo, 
   isSuperAdmin,
   SUPER_ADMIN_EMAIL,
   DEFAULT_LOGO_IMAGE 
 } from '../services/logoService';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import { Camera, RefreshCw, X, Check, ShieldAlert } from 'lucide-react';
 
 interface SchoolLogoProps {
@@ -29,7 +28,8 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   size = 'md',
   currentUserEmail,
 }) => {
-  const [logoUrl, setLogoUrl] = useState<string>(getInitialLogoUrl());
+  const { schoolLogoUrl } = useFirestoreData();
+  const [logoUrl, setLogoUrl] = useState<string>(schoolLogoUrl);
   const [imgFailed, setImgFailed] = useState(false);
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [newImagePreview, setNewImagePreview] = useState<string | null>(null);
@@ -51,14 +51,11 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
 
   const canEdit = isSuperAdmin(activeEmail);
 
-  // Subscribe to real-time updates from Firestore & local custom events
+  // Sync logo from centralized global state
   useEffect(() => {
-    const unsubscribe = subscribeSchoolLogo((updatedUrl) => {
-      setLogoUrl(updatedUrl);
-      setImgFailed(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    setLogoUrl(schoolLogoUrl);
+    setImgFailed(false);
+  }, [schoolLogoUrl]);
 
   // Listen for global open admin modal request from anywhere in the app
   useEffect(() => {
@@ -126,44 +123,56 @@ export const SchoolLogo: React.FC<SchoolLogoProps> = ({
   };
 
   const handleSaveLogo = async () => {
-    if (!newImagePreview) return;
+    if (!newImagePreview || isSaving) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setStatusMessage(null);
     setErrorMessage(null);
 
-    // 1. Immediately reflect visually for zero latency
-    setLogoUrl(newImagePreview);
-
-    const res = await saveSchoolLogo(newImagePreview, emailToUse);
-    setIsSaving(false);
-    if (res.success) {
+    try {
+      // 1. Immediately reflect visually for zero latency
       setLogoUrl(newImagePreview);
-      setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
-      setTimeout(() => {
-        setIsAdminModalOpen(false);
-        setNewImagePreview(null);
-        setStatusMessage(null);
-      }, 900);
-    } else {
-      setErrorMessage(res.message);
+
+      const res = await saveSchoolLogo(newImagePreview, emailToUse);
+      if (res.success) {
+        setLogoUrl(newImagePreview);
+        setStatusMessage('บันทึกโลโก้สำเร็จ ระบบอัปเดตตรงกันทุกหน้า');
+        setTimeout(() => {
+          setIsAdminModalOpen(false);
+          setNewImagePreview(null);
+          setStatusMessage(null);
+        }, 900);
+      } else {
+        setErrorMessage(res.message);
+      }
+    } catch {
+      setErrorMessage('เกิดข้อผิดพลาดในการบันทึกโลโก้');
+    } finally {
+      setIsSaving(false);
     }
   };
 
   const handleResetConfirm = async () => {
+    if (isSaving) return;
     const emailToUse = (activeEmail && isSuperAdmin(activeEmail)) ? activeEmail : SUPER_ADMIN_EMAIL;
     setIsSaving(true);
     setErrorMessage(null);
-    setLogoUrl(DEFAULT_LOGO_IMAGE);
-    const res = await resetSchoolLogo(emailToUse);
-    setIsSaving(false);
-    if (res.success) {
+    try {
+      setLogoUrl(DEFAULT_LOGO_IMAGE);
+      const res = await resetSchoolLogo(emailToUse);
+      if (res.success) {
+        setConfirmResetOpen(false);
+        setNewImagePreview(null);
+        setIsAdminModalOpen(false);
+      } else {
+        setConfirmResetOpen(false);
+        setErrorMessage(res.message);
+      }
+    } catch {
       setConfirmResetOpen(false);
-      setNewImagePreview(null);
-      setIsAdminModalOpen(false);
-    } else {
-      setConfirmResetOpen(false);
-      setErrorMessage(res.message);
+      setErrorMessage('เกิดข้อผิดพลาดในการรีเซ็ตโลโก้');
+    } finally {
+      setIsSaving(false);
     }
   };
 

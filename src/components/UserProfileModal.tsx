@@ -28,13 +28,20 @@ import {
   RotateCcw,
   Printer,
   Trash2,
-  Gift
+  Gift,
+  Youtube,
+  HardDrive,
+  Palette,
+  Globe
 } from 'lucide-react';
+import {
+  detectMediaLinkCategory,
+  resolveDisplayThumbnailUrl,
+} from '../utils/mediaThumbnailUtils';
 import { SpecialPrivilegesModal } from './SpecialPrivilegesModal';
 import { 
   FullUserProfile, 
   InnovationItem, 
-  fetchFullUserProfile, 
   subscribeFullUserProfile,
   saveFullUserProfile, 
   saveUserPhotoToFirestore,
@@ -52,25 +59,25 @@ import {
 } from '../utils/avatarUtils';
 import { SUPER_ADMIN_EMAIL, isSuperAdmin } from '../services/logoService';
 import { 
-  subscribeAllInnovations,
   deleteInnovationSubmission,
   deleteTeacherMedia,
   InnovationSubmission,
-  subscribeTeacherMedia, 
   TeacherMediaWork,
   isValidActiveMediaRecord,
   doesMediaRecordBelongToTeacher,
   getUnifiedTeacherMediaRecords,
-  syncUserSubmissionCountIfOutOfSync
+  syncUserSubmissionCountIfOutOfSync,
 } from '../services/submissionService';
 import { 
-  subscribeAllLoginLogs, 
+  getLocalSiteSummary,
+  SiteVisitSummary,
   LoginLogEntry, 
   resetAllLoginLogs,
   resetAdminLoginLogs,
   resetUserLoginLogsByEmail,
   getBangkokDateParts
 } from '../services/auditService';
+import { useFirestoreData, useSyncButtonState } from '../context/FirestoreDataContext';
 import { EditProfileModal } from './EditProfileModal';
 import { OnlineCertificateModal } from './OnlineCertificateModal';
 
@@ -142,6 +149,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   
   // Status states
   const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [isSavingInnovationItem, setIsSavingInnovationItem] = useState<boolean>(false);
   const [saveSuccess, setSaveSuccess] = useState<boolean>(false);
   const [showAvatarEditModal, setShowAvatarEditModal] = useState<boolean>(false);
   const [editingInnovationId, setEditingInnovationId] = useState<number | null>(null);
@@ -155,34 +163,84 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   const [isSubmittingPraise, setIsSubmittingPraise] = useState<boolean>(false);
   const [praiseSuccessNotice, setPraiseSuccessNotice] = useState<string | null>(null);
 
-  // Real-time verified login logs & Year selector (aligned to Asia/Bangkok)
-  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>([]);
+  const {
+    userEmail: rootUserEmail,
+    currentUserProfile: rootUserProfile,
+    innovations: globalInnovations,
+    teacherMedia: globalTeacherMedia,
+    siteSummary: globalSiteSummary,
+    loginLogs: globalLoginLogs,
+    ensureTeacherCoreLoaded,
+    ensureSiteSummaryLoaded,
+    syncProfileStats,
+  } = useFirestoreData();
+  const {
+    isSyncing: isManualRefreshing,
+    cooldownSeconds: manualRefreshCooldown,
+    isDisabled: isManualRefreshDisabled,
+    triggerSync: triggerProfileSync,
+    getButtonLabel: getProfileRefreshLabel,
+  } = useSyncButtonState('user_profile_stats');
+
+  // Verified login logs & Year selector (strictly read from centralized global state)
+  const [loginLogs, setLoginLogs] = useState<LoginLogEntry[]>(() => globalLoginLogs);
+  const [siteSummary, setSiteSummary] = useState<SiteVisitSummary | null>(() => globalSiteSummary || getLocalSiteSummary());
   const [selectedYear, setSelectedYear] = useState<string>(() => String(getBangkokDateParts()?.year || new Date().getFullYear()));
-  const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>([]);
-  const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>([]);
+  const [teacherMediaList, setTeacherMediaList] = useState<TeacherMediaWork[]>(() => globalTeacherMedia);
+  const [allInnovationsList, setAllInnovationsList] = useState<InnovationSubmission[]>(() => globalInnovations);
   const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null);
   const [isResettingLogs, setIsResettingLogs] = useState<boolean>(false);
   const [resetLogsSuccess, setResetLogsSuccess] = useState<string | null>(null);
+  const [refreshCooldownNotice, setRefreshCooldownNotice] = useState<string | null>(null);
   const [showCertificateModal, setShowCertificateModal] = useState<boolean>(false);
   const [showPrivilegesModal, setShowPrivilegesModal] = useState<boolean>(false);
 
-  // Subscribe to real-time login logs
+  // Hydrate centralized streams once when modal opens (zero duplicate mounts/fetches)
   useEffect(() => {
     if (!isOpen) return;
-    const unsub = subscribeAllLoginLogs((logs) => {
-      setLoginLogs(logs);
-    });
-    return () => unsub();
-  }, [isOpen]);
+    ensureTeacherCoreLoaded();
+    ensureSiteSummaryLoaded();
+  }, [isOpen, ensureTeacherCoreLoaded, ensureSiteSummaryLoaded]);
 
-  // Subscribe to real-time teacher media repository for kudos/likes counting
   useEffect(() => {
-    if (!isOpen) return;
-    const unsub = subscribeTeacherMedia((works) => {
-      setTeacherMediaList(works);
+    if (globalLoginLogs.length > 0) {
+      setLoginLogs(globalLoginLogs);
+    }
+  }, [globalLoginLogs]);
+
+  useEffect(() => {
+    if (globalSiteSummary) {
+      setSiteSummary((prev: SiteVisitSummary | null) => {
+        if (!prev) return globalSiteSummary;
+        if ((globalSiteSummary.totalVisits || 0) === 0 && !globalSiteSummary.resetAt && (prev.totalVisits || 0) > 0) {
+          return prev;
+        }
+        return globalSiteSummary;
+      });
+    }
+  }, [globalSiteSummary]);
+
+  useEffect(() => {
+    if (globalTeacherMedia.length > 0 || teacherMediaList.length === 0) {
+      setTeacherMediaList(globalTeacherMedia);
+    }
+  }, [globalTeacherMedia]);
+
+  const handleManualRefreshProfileStats = async () => {
+    if (isManualRefreshDisabled) return;
+    setRefreshCooldownNotice(null);
+    const { executed } = await triggerProfileSync(async () => {
+      try {
+        await syncProfileStats();
+      } catch (err) {
+        console.warn('[UserProfileModal] Manual syncProfileStats failed, preserving cached stats:', err);
+      }
     });
-    return () => unsub();
-  }, [isOpen]);
+    if (executed) {
+      setRefreshCooldownNotice('ซิงค์ข้อมูลสถิติและคลังสื่อล่าสุดเรียบร้อยแล้ว (รีเฟรชได้อีกครั้งใน 60 วินาที)');
+      setTimeout(() => setRefreshCooldownNotice(null), 4000);
+    }
+  };
 
   // Handle Admin's OWN visitor logs reset to 0 (never touches other users)
   const handleResetAdminOnlyStats = async () => {
@@ -309,17 +367,57 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         fallbackSeedName: incoming.fullName || userName,
       });
       const effectiveAvatar = isUiAvatarPlaceholder(resolvedRaw) ? '' : resolvedRaw;
-      const mergedData: FullUserProfile = {
-        ...incoming,
-        avatarUrl: effectiveAvatar,
-        photoURL: effectiveAvatar,
-      };
-      setProfile(mergedData);
+      setProfile((prev) => {
+        const refStats = latestCached?.stats || prev?.stats;
+        const incomingStats = incoming.stats || {
+          totalViews: 0,
+          uniqueVisitors: 0,
+          points: 0,
+          averageRating: 0,
+          totalRatings: 0,
+        };
+        const mergedData: FullUserProfile = {
+          ...incoming,
+          avatarUrl: effectiveAvatar,
+          photoURL: effectiveAvatar,
+          stats: {
+            totalViews:
+              incomingStats.totalViews > 0 || !refStats?.totalViews
+                ? incomingStats.totalViews
+                : refStats.totalViews,
+            uniqueVisitors:
+              incomingStats.uniqueVisitors > 0 || !refStats?.uniqueVisitors
+                ? incomingStats.uniqueVisitors
+                : refStats.uniqueVisitors,
+            points:
+              incomingStats.points > 0 || !refStats?.points
+                ? incomingStats.points
+                : refStats.points,
+            averageRating:
+              incomingStats.averageRating > 0 || !refStats?.averageRating
+                ? incomingStats.averageRating
+                : refStats.averageRating,
+            totalRatings:
+              incomingStats.totalRatings > 0 || !refStats?.totalRatings
+                ? incomingStats.totalRatings
+                : refStats.totalRatings,
+            submissionCount:
+              typeof incomingStats.submissionCount === 'number' &&
+              (incomingStats.submissionCount > 0 || !refStats?.submissionCount)
+                ? incomingStats.submissionCount
+                : (refStats?.submissionCount ?? 0),
+            dailyStats: incomingStats.dailyStats || refStats?.dailyStats,
+            monthlyStats: incomingStats.monthlyStats || refStats?.monthlyStats,
+            yearlyStats: incomingStats.yearlyStats || refStats?.yearlyStats,
+          },
+        };
+        return mergedData;
+      });
       if (allowFormReset) {
-        setFullNameInput(mergedData.fullName || userName || '');
-        setNicknameInput(mergedData.nickname || '');
-        setSchoolInput(mergedData.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
-        setRoleInput(mergedData.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
+        setFullNameInput(incoming.fullName || userName || '');
+        setNicknameInput(incoming.nickname || '');
+        setSchoolInput(incoming.school || 'โรงเรียนอัสสัมชัญอุบลราชธานี');
+        setRoleInput(incoming.role || 'ครูผู้สอน / ผู้พัฒนานวัตกรรม');
       }
     };
 
@@ -335,38 +433,34 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     }
 
     let isMounted = true;
-    fetchFullUserProfile(userEmail, userName, avatarUrl)
-      .then((fullData) => {
-        if (!isMounted || !fullData) return;
-        const shouldInitForm = initializedFormKeyRef.current !== formKey;
-        applyProfileSnapshot(fullData, shouldInitForm);
-        initializedFormKeyRef.current = formKey;
-      })
-      .catch((err) => {
-        console.error('Error loading full profile:', err);
-      });
-
-    const unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
-      if (!isMounted || !liveProf) return;
+    const isViewingOwnRootProfile =
+      Boolean(rootUserEmail) && rootUserEmail!.trim().toLowerCase() === normEmail && Boolean(rootUserProfile);
+    let unsubProfile = () => {};
+    if (isViewingOwnRootProfile && rootUserProfile) {
       const shouldInitForm = initializedFormKeyRef.current !== formKey;
-      applyProfileSnapshot(liveProf, shouldInitForm);
+      applyProfileSnapshot(rootUserProfile, shouldInitForm);
       initializedFormKeyRef.current = formKey;
-    });
+    } else {
+      unsubProfile = subscribeFullUserProfile(userEmail, (liveProf) => {
+        if (!isMounted || !liveProf) return;
+        const shouldInitForm = initializedFormKeyRef.current !== formKey;
+        applyProfileSnapshot(liveProf, shouldInitForm);
+        initializedFormKeyRef.current = formKey;
+      });
+    }
 
     return () => {
       isMounted = false;
       unsubProfile();
     };
-  }, [isOpen, userEmail, userName, isMasterWeerapong]);
+  }, [isOpen, userEmail, userName, isMasterWeerapong, rootUserEmail, rootUserProfile]);
 
-  // Subscribe to all innovations via shared multiplexed stream (zero extra Firestore reads & no re-subscribe on name edits)
+  // Sync innovations list from centralized global state
   useEffect(() => {
-    if (!isOpen || !userEmail) return;
-    const unsubscribe = subscribeAllInnovations((allInnos) => {
-      setAllInnovationsList(allInnos);
-    });
-    return () => unsubscribe();
-  }, [isOpen, userEmail]);
+    if (globalInnovations.length > 0 || allInnovationsList.length === 0) {
+      setAllInnovationsList(globalInnovations);
+    }
+  }, [globalInnovations]);
 
   const liveUserSubmissions = React.useMemo(() => {
     const teacherMatcher = {
@@ -420,10 +514,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   );
   const progressPercent = Math.min(100, Math.round((completedInnovationsCount / 5) * 100));
 
-  // Self-healing sync: keep user_profiles stats.submissionCount in sync with dynamic count when out of sync
+  // Self-healing sync: keep user_profiles stats.submissionCount in sync only when media caches are populated
   useEffect(() => {
     if (!isOpen || !userEmail) return;
-    if (completedInnovationsCount !== profile?.stats?.submissionCount) {
+    if (
+      (allInnovationsList.length > 0 || teacherMediaList.length > 0) &&
+      completedInnovationsCount !== profile?.stats?.submissionCount
+    ) {
       syncUserSubmissionCountIfOutOfSync(
         userEmail,
         completedInnovationsCount,
@@ -431,7 +528,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
         profile?.uid
       );
     }
-  }, [isOpen, userEmail, completedInnovationsCount, profile?.stats?.submissionCount, profile?.uid]);
+  }, [
+    isOpen,
+    userEmail,
+    allInnovationsList.length,
+    teacherMediaList.length,
+    completedInnovationsCount,
+    profile?.stats?.submissionCount,
+    profile?.uid,
+  ]);
 
   // Media posted by this teacher and total likes (Kudos points) - Strictly year-by-year (ปีต่อปีเท่านั้น ไม่ใช้กับปีอื่น ๆ)
   const targetYearNum = parseInt(selectedYear, 10) || getBangkokDateParts()?.year || new Date().getFullYear();
@@ -498,15 +603,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     });
 
     const profileViews = profile?.stats?.totalViews || 0;
+    const yearKeyStr = String(yearNum);
+    const profileYearlyViews =
+      typeof profile?.stats?.yearlyStats?.[yearKeyStr] === 'number'
+        ? profile.stats.yearlyStats[yearKeyStr]
+        : (isCurrentYear ? profileViews : 0);
     // Fallback for accounts with recorded profile views when login_logs entry is absent
-    const useProfileViewsFallback = myYearLogs.length === 0 && isCurrentYear && profileViews > 0;
+    const useProfileViewsFallback = myYearLogs.length === 0 && profileYearlyViews > 0;
 
-    // Monthly breakdown for selected year (1-12)
+    // Monthly breakdown for selected year (1-12), merging uncapped site_summary counts when available
     const monthNames = [
       'ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.',
       'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'
     ];
 
+    const summaryYearMonths = siteSummary?.monthlyVisits?.[yearKeyStr] || {};
     const monthlyData = monthNames.map((name, idx) => {
       let myCount = myYearLogs.filter((l) => {
         const parts = getBangkokDateParts(l.loginTimestamp);
@@ -518,8 +629,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       }).length;
 
       if (useProfileViewsFallback && idx === currentMonthIdx) {
-        myCount += profileViews;
-        allCount += profileViews;
+        myCount += profileYearlyViews;
+        allCount += profileYearlyViews;
+      }
+
+      const summaryMonthVal = Number(summaryYearMonths[String(idx)] || 0);
+      if (summaryMonthVal > allCount) {
+        allCount = summaryMonthVal;
       }
 
       return {
@@ -530,8 +646,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       };
     });
 
-    const myYearVisits = monthlyData.reduce((sum, m) => sum + m.myCount, 0);
-    const allYearVisits = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+    const myYearVisits = Math.max(
+      monthlyData.reduce((sum, m) => sum + m.myCount, 0),
+      profileYearlyViews
+    );
+    const monthlySumAll = monthlyData.reduce((sum, m) => sum + m.allCount, 0);
+    const summaryYearTotal = Number(siteSummary?.yearlyVisits?.[yearKeyStr] || 0);
+    const allYearVisits = Math.max(monthlySumAll, summaryYearTotal);
 
     const myTodayVisits = isCurrentYear
       ? myYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
@@ -540,9 +661,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       ? (monthlyData[currentMonthIdx]?.myCount || 0)
       : 0;
 
-    const allTodayVisits = isCurrentYear
+    const allTodayFromLogs = isCurrentYear
       ? allYearLogs.filter((l) => isSameBangkokDay(l.loginTimestamp)).length
       : 0;
+    const allTodayFromSummary = isCurrentYear
+      ? Number(siteSummary?.dailyVisits?.[nowParts.dateKey] || 0)
+      : 0;
+    const allTodayVisits = Math.max(allTodayFromLogs, allTodayFromSummary);
     const allMonthVisits = isCurrentYear
       ? (monthlyData[currentMonthIdx]?.allCount || 0)
       : 0;
@@ -564,23 +689,24 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
       myTodayVisits,
       myMonthVisits,
       myYearVisits,
-      myTotalVisits: Math.max(myLogs.length, myYearVisits),
+      myTotalVisits: Math.max(myLogs.length, myYearVisits, profileViews),
       allTodayVisits,
       allMonthVisits,
       allYearVisits,
       uniqueVerifiedUsersYear,
-      allTotalVisits: Math.max(loginLogs.length, allYearVisits),
+      allTotalVisits: Math.max(loginLogs.length, allYearVisits, siteSummary?.totalVisits || 0),
       uniqueAllUsers,
       monthlyData,
       myRecentLogs: myLogs.slice(0, 8),
       systemRecentLogs: loginLogs.slice(0, 8),
     };
-  }, [loginLogs, userEmail, selectedYear, profile?.stats?.totalViews]);
+  }, [loginLogs, siteSummary, userEmail, selectedYear, profile?.stats?.totalViews, profile?.stats?.yearlyStats]);
 
   if (!isOpen) return null;
 
   // Handle Save Personal Information
   const handleSaveProfile = async () => {
+    if (isSaving) return;
     setIsSaving(true);
     setSaveSuccess(false);
 
@@ -640,22 +766,30 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
     id: number, 
     fields: Partial<InnovationItem>
   ) => {
-    const updatedInnovations = profile.innovations.map((item) => {
-      if (item.id === id) {
-        return { ...item, ...fields };
-      }
-      return item;
-    });
+    if (isSavingInnovationItem) return;
+    setIsSavingInnovationItem(true);
+    try {
+      const updatedInnovations = profile.innovations.map((item) => {
+        if (item.id === id) {
+          return { ...item, ...fields };
+        }
+        return item;
+      });
 
-    const updatedProfile: FullUserProfile = {
-      ...profile,
-      innovations: updatedInnovations,
-      updatedAt: new Date().toISOString(),
-    };
+      const updatedProfile: FullUserProfile = {
+        ...profile,
+        innovations: updatedInnovations,
+        updatedAt: new Date().toISOString(),
+      };
 
-    setProfile(updatedProfile);
-    await saveFullUserProfile(updatedProfile);
-    setEditingInnovationId(null);
+      setProfile(updatedProfile);
+      await saveFullUserProfile(updatedProfile);
+      setEditingInnovationId(null);
+    } catch (err) {
+      console.error('Failed to update innovation item:', err);
+    } finally {
+      setIsSavingInnovationItem(false);
+    }
   };
 
   // Handle deleting a specific innovation slot item (Admin or profile owner)
@@ -736,6 +870,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   // Handle Visitor Praise and Star Rating Submission
   const handleSubmitPraise = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmittingPraise) return;
     if (!commentInput.trim() && ratingInput <= 0) return;
 
     setIsSubmittingPraise(true);
@@ -841,6 +976,21 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
+            {/* Manual Refresh Button (60s cooldown) */}
+            <button
+              type="button"
+              id="btn-profile-manual-refresh"
+              onClick={handleManualRefreshProfileStats}
+              disabled={isManualRefreshDisabled}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-800/80 hover:bg-slate-700 text-sky-300 hover:text-white border border-slate-700/60 text-xs font-medium transition-colors shadow-xs cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              title={manualRefreshCooldown > 0 ? `รอ ${manualRefreshCooldown} วินาทีก่อนรีเฟรชอีกครั้ง` : 'รีเฟรชข้อมูลสถิติและสื่อจากฐานข้อมูล (คูลดาวน์ 60 วินาที)'}
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isManualRefreshing ? 'animate-spin' : ''}`} />
+              <span className={isManualRefreshing || manualRefreshCooldown > 0 ? '' : 'hidden sm:inline'}>
+                {getProfileRefreshLabel('รีเฟรช')}
+              </span>
+            </button>
+
             {/* Special Privileges Check Status Button */}
             <button
               type="button"
@@ -867,6 +1017,13 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
             </button>
           </div>
         </div>
+
+        {refreshCooldownNotice && (
+          <div className="mt-2 px-3 py-1.5 rounded-xl bg-amber-950/70 border border-amber-500/40 text-amber-200 text-[11px] flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+            <span>{refreshCooldownNotice}</span>
+          </div>
+        )}
 
         {/* 4 Interactive Functional Tabs */}
         <div className="flex items-center gap-1 sm:gap-2 pt-4 pb-3 border-b border-slate-800/80 overflow-x-auto no-scrollbar text-xs">
@@ -1157,26 +1314,32 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                       className="p-3.5 sm:p-4 rounded-2xl bg-slate-800/60 border border-slate-700/70 hover:border-slate-600 transition-all flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-xs"
                     >
                       <div className="flex items-start gap-3 flex-1 min-w-0">
-                        {/* Cover Image Thumbnail or Number badge */}
-                        {item.coverImageUrl ? (
-                          <div className="w-14 h-14 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb shadow-sm">
-                            <img
-                              src={item.coverImageUrl}
-                              alt={item.title}
-                              className="w-full h-full object-cover"
-                              onError={(e) => {
-                                (e.target as HTMLImageElement).src = '/ACU N.png';
-                              }}
-                            />
-                            <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 rounded text-[9px] text-white font-bold">
-                              #{idx + 1}
+                        {/* Cover Image Thumbnail (YouTube / External URL) or Number/Category Badge */}
+                        {(() => {
+                          const resolvedSlotThumb = resolveDisplayThumbnailUrl(item.coverImageUrl, item.linkUrl);
+                          if (resolvedSlotThumb) {
+                            return (
+                              <div className="w-14 h-14 rounded-xl overflow-hidden bg-slate-900 border border-slate-700 flex-shrink-0 relative group/thumb shadow-sm">
+                                <img
+                                  src={resolvedSlotThumb}
+                                  alt={item.title}
+                                  className="w-full h-full object-cover"
+                                  onError={(e) => {
+                                    (e.target as HTMLImageElement).src = '/ACU N.png';
+                                  }}
+                                />
+                                <div className="absolute top-0.5 left-0.5 bg-black/70 px-1 rounded text-[9px] text-white font-bold">
+                                  #{idx + 1}
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
+                              {idx + 1}
                             </div>
-                          </div>
-                        ) : (
-                          <div className="w-8 h-8 rounded-xl bg-blue-600/20 border border-blue-500/30 text-blue-400 font-bold text-sm flex items-center justify-center flex-shrink-0">
-                            {idx + 1}
-                          </div>
-                        )}
+                          );
+                        })()}
 
                         <div className="flex-1 min-w-0">
                           <div className="flex items-center gap-2 flex-wrap mb-1">
@@ -1229,6 +1392,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                 />
                                 <button
                                   type="button"
+                                  disabled={isSavingInnovationItem}
                                   onClick={() => {
                                     const titleEl = document.getElementById(`edit-item-title-${item.id}`) as HTMLInputElement;
                                     const statusEl = document.getElementById(`edit-item-status-${item.id}`) as HTMLSelectElement | null;
@@ -1246,14 +1410,15 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                                       submittedDate: new Date().toLocaleDateString('th-TH', { day: 'numeric', month: 'short', year: 'numeric' }),
                                     });
                                   }}
-                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"
+                                  className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold cursor-pointer transition-colors shadow-sm"
                                 >
-                                  บันทึกชิ้นนี้
+                                  {isSavingInnovationItem ? 'กำลังบันทึก...' : 'บันทึกชิ้นนี้'}
                                 </button>
                                 <button
                                   type="button"
+                                  disabled={isSavingInnovationItem}
                                   onClick={() => setEditingInnovationId(null)}
-                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg text-xs cursor-pointer transition-colors"
+                                  className="px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-300 rounded-lg text-xs cursor-pointer transition-colors"
                                 >
                                   ยกเลิก
                                 </button>
@@ -1744,17 +1909,37 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
                           className="flex items-center justify-between p-2.5 rounded-xl bg-slate-900/70 border border-slate-800 text-xs gap-3"
                         >
                           <div className="flex items-center gap-2.5 min-w-0">
-                            {work.thumbnailUrl ? (
-                              <img
-                                src={work.thumbnailUrl}
-                                alt={work.title}
-                                className="w-9 h-9 rounded-lg object-cover flex-shrink-0 border border-slate-700"
-                              />
-                            ) : (
-                              <div className="w-9 h-9 rounded-lg bg-slate-800 flex items-center justify-center flex-shrink-0 text-slate-400">
-                                <FileText className="w-4 h-4" />
-                              </div>
-                            )}
+                            {(() => {
+                              const resolvedWorkThumb = resolveDisplayThumbnailUrl(work.thumbnailUrl, work.onlineUrl);
+                              if (resolvedWorkThumb) {
+                                return (
+                                  <img
+                                    src={resolvedWorkThumb}
+                                    alt={work.title}
+                                    className="w-9 h-9 rounded-lg object-cover flex-shrink-0 border border-slate-700"
+                                    onError={(e) => {
+                                      (e.target as HTMLImageElement).src = '/ACU N.png';
+                                    }}
+                                  />
+                                );
+                              }
+                              const workCat = detectMediaLinkCategory(work.onlineUrl, work.mediaType);
+                              return (
+                                <div className="w-9 h-9 rounded-lg bg-slate-800 border border-slate-700/80 flex items-center justify-center flex-shrink-0">
+                                  {workCat.key === 'youtube' ? (
+                                    <Youtube className="w-4 h-4 text-rose-400" />
+                                  ) : workCat.key === 'gdrive' ? (
+                                    <HardDrive className="w-4 h-4 text-emerald-400" />
+                                  ) : workCat.key === 'canva' ? (
+                                    <Palette className="w-4 h-4 text-cyan-400" />
+                                  ) : workCat.key === 'tech' ? (
+                                    <Globe className="w-4 h-4 text-blue-400" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-slate-400" />
+                                  )}
+                                </div>
+                              );
+                            })()}
                             <div className="min-w-0">
                               <p className="font-semibold text-white truncate">{work.title}</p>
                               <p className="text-[10px] text-slate-400 truncate">{work.subjectGroup || work.subjectName || work.mediaType || 'สื่อนวัตกรรม'}</p>
